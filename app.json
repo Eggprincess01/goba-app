@@ -1,25 +1,37 @@
 {
   "expo": {
-    "name": "goba_app",
-    "slug": "goba_app",
+    "name": "鍋巴 GOBA",
+    "slug": "caramel",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FCE7F3"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.mmlovenn.goba",
+      "infoPlist": {
+        "CFBundleDisplayName": "鍋巴 GOBA"
+      }
     },
     "android": {
+      "package": "com.mmlovenn.goba",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "predictiveBackGestureEnabled": false
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#FCE7F3"
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1d9fa917-f3f5-4f93-8ae6-581e46b0da7a"
+      }
     }
   }
 }
