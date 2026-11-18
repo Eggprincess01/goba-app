@@ -2,6 +2,7 @@
   "expo": {
     "name": "鍋巴 GOBA",
     "slug": "caramel",
+    "scheme": "goba",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

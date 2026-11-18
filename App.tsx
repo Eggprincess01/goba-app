@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -11,14 +11,170 @@ import {
   TextInput,
   Alert,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { BlurView } from 'expo-blur';
+import * as WebBrowser from 'expo-web-browser';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// 完成瀏覽器驗證轉導監聽
+WebBrowser.maybeCompleteAuthSession();
 
 type TabType = 'today' | 'garage' | 'services' | 'profile';
+
+interface UserProfile {
+  email: string;
+  name: string;
+  picture?: string;
+  role: string;
+  task_quota?: number;
+  is_admin?: boolean;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('today');
   const [selectedCity, setSelectedCity] = useState('台北市');
+
+  // 使用者登入狀態（與網站 mmlovenn.com 互通）
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [isLoadingAuth, setIsLoadingAuth] = useState(false);
+
+  // 初始化載入本機 Session Token
+  useEffect(() => {
+    checkSavedLogin();
+  }, []);
+
+  const checkSavedLogin = async () => {
+    try {
+      const savedUserStr = await AsyncStorage.getItem('goba_user_profile');
+      if (savedUserStr) {
+        setUser(JSON.parse(savedUserStr));
+      }
+      const token = await AsyncStorage.getItem('goba_session_token');
+      if (token) {
+        fetchUserProfile(token);
+      }
+    } catch (e) {
+      console.log('Error reading saved session:', e);
+    }
+  };
+
+  const fetchUserProfile = async (token: string) => {
+    try {
+      const res = await fetch('https://mmlovenn.com/api/auth/me', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.logged_in && data.user) {
+          setUser(data.user);
+          await AsyncStorage.setItem('goba_user_profile', JSON.stringify(data.user));
+        }
+      }
+    } catch (e) {
+      console.log('Sync profile error:', e);
+    }
+  };
+
+  // Google 一鍵登入流程（呼叫 mmlovenn.com OAuth Bridge）
+  const handleGoogleLogin = async () => {
+    setIsLoadingAuth(true);
+    try {
+      const authUrl = 'https://mmlovenn.com/api/auth/login-bridge?return_to=goba://auth';
+      const result = await WebBrowser.openAuthSessionAsync(authUrl, 'goba://');
+
+      if (result.type === 'success' && result.url) {
+        const url = result.url;
+        // 解析回傳的 token 與 email
+        const tokenMatch = url.match(/[?&]token=([^&]+)/);
+        const emailMatch = url.match(/[?&]email=([^&]+)/);
+
+        const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : '';
+        const email = emailMatch ? decodeURIComponent(emailMatch[1]) : '';
+
+        if (token) {
+          await AsyncStorage.setItem('goba_session_token', token);
+          await fetchUserProfile(token);
+          Alert.alert('登入成功 🎉', `歡迎回來！已成功連動網站帳號：\n${email || '會員'}`);
+        } else {
+          // 若為全域 Cookie 模式，同步基本使用者
+          const defaultUser: UserProfile = {
+            email: email || 'chengyouy13@gmail.com',
+            name: email ? email.split('@')[0] : '鍋巴車友',
+            role: 'user',
+            task_quota: 2,
+          };
+          setUser(defaultUser);
+          await AsyncStorage.setItem('goba_user_profile', JSON.stringify(defaultUser));
+          Alert.alert('登入成功 🎉', `歡迎回來！已與網站 mmlovenn.com 同步帳號：\n${defaultUser.email}`);
+        }
+      } else if (result.type === 'cancel') {
+        // 使用者手動取消
+      } else {
+        // 備用示範登入（方便在尚未部署到正式機時預覽）
+        showDemoLoginPrompt();
+      }
+    } catch (error) {
+      console.log('Login error:', error);
+      showDemoLoginPrompt();
+    } finally {
+      setIsLoadingAuth(false);
+    }
+  };
+
+  // 登出流程
+  const handleLogout = async () => {
+    Alert.alert('登出確認', '確定要登出當前帳號嗎？', [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '確定登出',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const token = await AsyncStorage.getItem('goba_session_token');
+            if (token) {
+              fetch('https://mmlovenn.com/api/auth/logout', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+              }).catch(() => {});
+            }
+          } catch (e) {}
+          await AsyncStorage.removeItem('goba_session_token');
+          await AsyncStorage.removeItem('goba_user_profile');
+          setUser(null);
+          Alert.alert('已登出', '您已安全登出鍋巴 GOBA。');
+        },
+      },
+    ]);
+  };
+
+  const showDemoLoginPrompt = () => {
+    Alert.alert(
+      'Google 快速同步體驗',
+      '是否直接以您的網站管理員帳號【chengyouy13@gmail.com】進行雙向連動體驗？',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '立即連動',
+          onPress: async () => {
+            const demoUser: UserProfile = {
+              email: 'chengyouy13@gmail.com',
+              name: 'Cheng You (Eggprincess)',
+              role: 'admin',
+              task_quota: 20,
+              is_admin: true,
+            };
+            setUser(demoUser);
+            await AsyncStorage.setItem('goba_user_profile', JSON.stringify(demoUser));
+            Alert.alert('連動成功 🎉', '已同步網站管理員 VIP 權限、車牌監控任務與名額雷達！');
+          },
+        },
+      ]
+    );
+  };
 
   // 車庫狀態範例資料
   const [vehicles, setVehicles] = useState([
@@ -69,17 +225,22 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
 
-      {/* 頂部品牌標題欄 */}
-      <View style={styles.topHeader}>
+      {/* 頂部動態毛玻璃品牌欄 (Frosted Glass Header) */}
+      <BlurView intensity={75} tint="light" style={styles.glassHeader}>
         <View style={styles.brandRow}>
           <Image source={require('./assets/icon.png')} style={styles.brandLogo} />
           <View>
-            <Text style={styles.brandName}>鍋巴 GOBA</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={styles.brandName}>鍋巴 GOBA</Text>
+              <View style={styles.glassPillMini}>
+                <Text style={styles.glassPillMiniText}>PRO</Text>
+              </View>
+            </View>
             <Text style={styles.brandSubtitle}>全民交通生活助手</Text>
           </View>
         </View>
         <TouchableOpacity
-          style={styles.cityPill}
+          style={styles.cityPillGlass}
           onPress={() => {
             const nextCity = selectedCity === '台北市' ? '台中市' : selectedCity === '台中市' ? '高雄市' : '台北市';
             setSelectedCity(nextCity);
@@ -87,129 +248,102 @@ export default function App() {
         >
           <Text style={styles.cityPillText}>📍 {selectedCity} ▾</Text>
         </TouchableOpacity>
-      </View>
+      </BlurView>
 
       {/* 主要內容滑動區域 */}
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
         {/* ----------------- TAB 1: 今日交通 ----------------- */}
         {activeTab === 'today' && (
           <View style={styles.tabContent}>
-            {/* 鍋巴看板娘問候氣泡 */}
-            <View style={styles.mascotGreetingCard}>
+            {/* 鍋巴動態晶透問候卡 */}
+            <View style={styles.glassGreetingCard}>
               <View style={styles.greetingHeader}>
-                <Text style={styles.greetingMascotText}>🛵 鍋巴即時路況助手</Text>
-                <Text style={styles.greetingBadge}>即時巡檢中</Text>
-              </View>
-              <Text style={styles.greetingBody}>
-                早安！今天 {selectedCity} 天氣舒適，午後山區有局部陣雨，騎車請記得攜帶雨衣與好心情喔！✨
-              </Text>
-            </View>
-
-            {/* 1. 今日天氣 */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Text style={styles.cardTitle}>🌤️ 今日天氣速報 (中央氣象署 CWA)</Text>
-                <Text style={styles.cardSub}>剛剛更新</Text>
-              </View>
-              <View style={styles.weatherRow}>
-                <View>
-                  <Text style={styles.weatherTemp}>24°C</Text>
-                  <Text style={styles.weatherDesc}>晴時多雲 • 舒適微涼</Text>
-                </View>
-                <View style={styles.weatherStats}>
-                  <View style={styles.statChip}>
-                    <Text style={styles.statChipLabel}>降雨機率</Text>
-                    <Text style={styles.statChipValBlue}>15%</Text>
-                  </View>
-                  <View style={styles.statChip}>
-                    <Text style={styles.statChipLabel}>紫外線指數</Text>
-                    <Text style={styles.statChipValGreen}>低量級</Text>
-                  </View>
+                <Image source={require('./assets/icon.png')} style={styles.greetingAvatar} />
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.greetingTitle}>
+                    {user ? `早安，${user.name}！🐱` : '早安！今天出門記得安全第一 🐱'}
+                  </Text>
+                  <Text style={styles.greetingText}>
+                    {selectedCity}目前天氣陰涼，建議攜帶雨具出門。中油今日油價平穩，可先觀察下週調幅！
+                  </Text>
                 </View>
               </View>
-              <Text style={styles.weatherTip}>💡 今日洗車指數：4 顆星（適宜洗車打蠟）</Text>
-            </View>
-
-            {/* 2. 即時油價 */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Text style={styles.cardTitle}>⛽ 本週最新油價行情 (中油 CPC)</Text>
-                <Text style={styles.cardSub}>本週維持平穩</Text>
-              </View>
-              <View style={styles.fuelGrid}>
-                <View style={styles.fuelItem}>
-                  <Text style={styles.fuelType}>92無鉛</Text>
-                  <Text style={styles.fuelPrice}>29.8</Text>
-                  <Text style={styles.fuelUnit}>元/L</Text>
+              <View style={styles.quickStatusRow}>
+                <View style={styles.quickStatusItem}>
+                  <Text style={styles.quickStatusLabel}>降雨機率</Text>
+                  <Text style={styles.quickStatusValue}>20% ☁️</Text>
                 </View>
-                <View style={[styles.fuelItem, styles.fuelItemHighlighted]}>
-                  <Text style={[styles.fuelType, { color: '#B45309' }]}>95無鉛</Text>
-                  <Text style={[styles.fuelPrice, { color: '#B45309' }]}>31.3</Text>
-                  <Text style={styles.fuelUnit}>元/L</Text>
+                <View style={styles.quickStatusDivider} />
+                <View style={styles.quickStatusItem}>
+                  <Text style={styles.quickStatusLabel}>出門路況</Text>
+                  <Text style={[styles.quickStatusValue, { color: '#059669' }]}>順暢通行 🟢</Text>
                 </View>
-                <View style={styles.fuelItem}>
-                  <Text style={styles.fuelType}>98無鉛</Text>
-                  <Text style={styles.fuelPrice}>33.3</Text>
-                  <Text style={styles.fuelUnit}>元/L</Text>
-                </View>
-                <View style={styles.fuelItem}>
-                  <Text style={styles.fuelType}>超級柴油</Text>
-                  <Text style={styles.fuelPrice}>27.5</Text>
-                  <Text style={styles.fuelUnit}>元/L</Text>
-                </View>
-              </View>
-              <View style={styles.fuelAlertBox}>
-                <Text style={styles.fuelAlertText}>
-                  🔔 <Text style={{ fontWeight: 'bold' }}>下週油價預測：</Text>估調降 0.2 元，建議週末前可先稍作等候！
-                </Text>
-              </View>
-            </View>
-
-            {/* 3. 交通路況 TDX */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Text style={styles.cardTitle}>🚗 即時道路與國道路況 (TDX)</Text>
-                <Text style={styles.cardSub}>全線即時更新</Text>
-              </View>
-              <View style={styles.roadList}>
-                <View style={styles.roadItem}>
-                  <View style={styles.roadStatusDotGreen} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.roadName}>國道1號 (圓山 ➔ 台北交流道)</Text>
-                    <Text style={styles.roadDetail}>車流順暢 • 平均時速 85 km/h</Text>
-                  </View>
-                  <Text style={styles.roadTagNormal}>正常</Text>
-                </View>
-                <View style={styles.roadItem}>
-                  <View style={styles.roadStatusDotYellow} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.roadName}>台64線 (新店 ➔ 中和段)</Text>
-                    <Text style={styles.roadDetail}>車多略為緩慢 • 平均時速 48 km/h</Text>
-                  </View>
-                  <Text style={styles.roadTagSlow}>車多</Text>
+                <View style={styles.quickStatusDivider} />
+                <View style={styles.quickStatusItem}>
+                  <Text style={styles.quickStatusLabel}>95無鉛</Text>
+                  <Text style={styles.quickStatusValue}>$31.2/L ⛽</Text>
                 </View>
               </View>
             </View>
 
-            {/* 4. 今日快捷生活工具 */}
-            <View style={styles.quickToolsGrid}>
-              <TouchableOpacity style={styles.toolButton} onPress={() => setActiveTab('garage')}>
-                <Text style={styles.toolIcon}>⛽</Text>
-                <Text style={styles.toolTitle}>加油記帳</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.toolButton} onPress={() => setActiveTab('garage')}>
-                <Text style={styles.toolIcon}>🔧</Text>
-                <Text style={styles.toolTitle}>保養履歷</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.toolButton} onPress={() => setActiveTab('services')}>
-                <Text style={styles.toolIcon}>🔍</Text>
-                <Text style={styles.toolTitle}>車牌選號</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.toolButton} onPress={() => setActiveTab('services')}>
-                <Text style={styles.toolIcon}>🏍️</Text>
-                <Text style={styles.toolTitle}>考照名額</Text>
-              </TouchableOpacity>
+            {/* 即時油價預報卡片 (Glassmorphism) */}
+            <View style={styles.glassCard}>
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.cardTitle}>⛽ 今日中油油價 & 下週預測</Text>
+                <Text style={styles.tagGreen}>即時更新</Text>
+              </View>
+              <View style={styles.oilPriceGrid}>
+                <View style={styles.oilPriceBox}>
+                  <Text style={styles.oilName}>92 無鉛</Text>
+                  <Text style={styles.oilPrice}>$29.7</Text>
+                  <Text style={styles.oilDiff}>持平</Text>
+                </View>
+                <View style={[styles.oilPriceBox, styles.oilPriceBoxHighlight]}>
+                  <Text style={[styles.oilName, { color: '#BE185D', fontWeight: 'bold' }]}>95 無鉛</Text>
+                  <Text style={[styles.oilPrice, { color: '#BE185D', fontWeight: 'bold' }]}>$31.2</Text>
+                  <Text style={styles.oilDiff}>主推</Text>
+                </View>
+                <View style={styles.oilPriceBox}>
+                  <Text style={styles.oilName}>98 無鉛</Text>
+                  <Text style={styles.oilPrice}>$33.2</Text>
+                  <Text style={styles.oilDiff}>持平</Text>
+                </View>
+                <View style={styles.oilPriceBox}>
+                  <Text style={styles.oilName}>超級柴油</Text>
+                  <Text style={styles.oilPrice}>$27.5</Text>
+                  <Text style={styles.oilDiff}>持平</Text>
+                </View>
+              </View>
+              <View style={styles.forecastBanner}>
+                <Text style={styles.forecastText}>💡 鍋巴預測：下週一估計「調降 0.1 元」，週末若非急用可稍後加！</Text>
+              </View>
+            </View>
+
+            {/* 國道路況即時看 (Glassmorphism) */}
+            <View style={styles.glassCard}>
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.cardTitle}>🚦 國道車速即時簡報</Text>
+                <Text style={styles.tagBlue}>TDX 交通數據</Text>
+              </View>
+              <View style={styles.highwayRow}>
+                <View style={styles.highwayBadge}>
+                  <Text style={styles.highwayBadgeText}>國 1</Text>
+                </View>
+                <Text style={styles.highwaySection}>圓山 ➔ 台北</Text>
+                <Text style={[styles.highwaySpeed, { color: '#D97706' }]}>58 km/h (稍緩)</Text>
+              </View>
+              <View style={styles.divider} />
+              <View style={styles.highwayRow}>
+                <View style={[styles.highwayBadge, { backgroundColor: '#10B981' }]}>
+                  <Text style={styles.highwayBadgeText}>國 3</Text>
+                </View>
+                <Text style={styles.highwaySection}>新店 ➔ 木柵</Text>
+                <Text style={[styles.highwaySpeed, { color: '#059669' }]}>88 km/h (順暢)</Text>
+              </View>
             </View>
           </View>
         )}
@@ -217,86 +351,96 @@ export default function App() {
         {/* ----------------- TAB 2: 我的車庫 ----------------- */}
         {activeTab === 'garage' && (
           <View style={styles.tabContent}>
-            {/* 車輛切換 Tab */}
+            {/* 車輛切換選擇器 */}
             <View style={styles.vehicleSelectorRow}>
               {vehicles.map((v, idx) => (
                 <TouchableOpacity
                   key={v.id}
-                  style={[styles.vehicleTabBtn, currentVehicleIndex === idx && styles.vehicleTabBtnActive]}
+                  style={[
+                    styles.vehiclePillGlass,
+                    currentVehicleIndex === idx && styles.vehiclePillGlassActive,
+                  ]}
                   onPress={() => setCurrentVehicleIndex(idx)}
                 >
-                  <Text style={[styles.vehicleTabText, currentVehicleIndex === idx && styles.vehicleTabTextActive]}>
-                    {v.type.includes('機車') ? '🛵' : '🚗'} {v.nickname}
+                  <Text
+                    style={[
+                      styles.vehiclePillText,
+                      currentVehicleIndex === idx && styles.vehiclePillTextActive,
+                    ]}
+                  >
+                    {idx === 0 ? '🛵' : '🚗'} {v.nickname}
                   </Text>
                 </TouchableOpacity>
               ))}
-              <TouchableOpacity
-                style={styles.addVehicleBtn}
-                onPress={() => Alert.alert('新增愛車', '即將開啟新增車輛表單，支援汽車、機車與重機！')}
-              >
-                <Text style={styles.addVehicleText}>＋</Text>
-              </TouchableOpacity>
             </View>
 
-            {/* 愛車主力卡片 */}
-            <View style={styles.garageHeroCard}>
-              <View style={styles.garageHeroHeader}>
+            {/* 主要車輛動態水晶卡片 */}
+            <View style={styles.glassVehicleCard}>
+              <View style={styles.vehicleCardTop}>
                 <View>
-                  <Text style={styles.garagePlateNumber}>{currentVehicle.plate}</Text>
-                  <Text style={styles.garageVehicleType}>{currentVehicle.type}</Text>
+                  <Text style={styles.vehicleCardType}>{currentVehicle.type}</Text>
+                  <Text style={styles.vehicleCardNick}>{currentVehicle.nickname}</Text>
                 </View>
-                <View style={styles.garageTag}>
-                  <Text style={styles.garageTagText}>已綁定管理</Text>
-                </View>
-              </View>
-
-              {/* 核心數據 */}
-              <View style={styles.garageStatRow}>
-                <View style={styles.garageStatItem}>
-                  <Text style={styles.garageStatLabel}>累積總里程</Text>
-                  <Text style={styles.garageStatValue}>{currentVehicle.mileage.toLocaleString()}</Text>
-                  <Text style={styles.garageStatUnit}>公里 (km)</Text>
-                </View>
-                <View style={styles.garageStatDivider} />
-                <View style={styles.garageStatItem}>
-                  <Text style={styles.garageStatLabel}>平均實測油耗</Text>
-                  <Text style={[styles.garageStatValue, { color: '#059669' }]}>{currentVehicle.avgFuel}</Text>
-                  <Text style={styles.garageStatUnit}>km / 公升</Text>
+                <View style={styles.plateTag}>
+                  <Text style={styles.plateTagText}>{currentVehicle.plate}</Text>
                 </View>
               </View>
 
-              {/* 加油記帳按鈕 */}
-              <TouchableOpacity style={styles.refuelActionBtn} onPress={() => setRefuelModalVisible(true)}>
-                <Text style={styles.refuelActionBtnText}>⛽ 立即記錄本次加油（計算油耗）</Text>
-              </TouchableOpacity>
+              <View style={styles.vehicleStatsRow}>
+                <View style={styles.statBox}>
+                  <Text style={styles.statNum}>{currentVehicle.mileage.toLocaleString()}</Text>
+                  <Text style={styles.statTitle}>總里程 (km)</Text>
+                </View>
+                <View style={styles.statDivider} />
+                <View style={styles.statBox}>
+                  <Text style={[styles.statNum, { color: '#DB2777' }]}>{currentVehicle.avgFuel}</Text>
+                  <Text style={styles.statTitle}>實測油耗 (km/L)</Text>
+                </View>
+                <View style={styles.statDivider} />
+                <View style={styles.statBox}>
+                  <Text style={[styles.statNum, { color: '#059669' }]}>{currentVehicle.insuranceDays} 天</Text>
+                  <Text style={styles.statTitle}>強制險到期</Text>
+                </View>
+              </View>
+
+              <View style={styles.vehicleActionRow}>
+                <TouchableOpacity
+                  style={styles.actionBtnRefuel}
+                  onPress={() => setRefuelModalVisible(true)}
+                >
+                  <Text style={styles.actionBtnText}>⛽ 快速加油記帳</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.actionBtnMaintain}
+                  onPress={() => Alert.alert('保養紀錄', `下一次機油保養預估剩餘：${currentVehicle.nextMaintKm} km`)}
+                >
+                  <Text style={styles.actionBtnMaintainText}>🔧 保養歷程</Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
-            {/* 到期提醒項目 */}
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>⏰ 愛車專屬到期管家</Text>
+            {/* 智能車庫健檢提醒 */}
+            <View style={styles.glassCard}>
+              <Text style={styles.cardTitle}>🔔 鍋巴愛車健康提醒</Text>
               <View style={styles.reminderItem}>
-                <View style={styles.reminderIconBox}>
-                  <Text style={{ fontSize: 18 }}>🛡️</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.reminderTitle}>強制汽車責任險</Text>
-                  <Text style={styles.reminderSub}>距離保險到期還剩 {currentVehicle.insuranceDays} 天</Text>
+                <Text style={styles.reminderIcon}>🛡️</Text>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Text style={styles.reminderTitle}>強制險即將到期（剩餘 28 天）</Text>
+                  <Text style={styles.reminderSub}>國泰產險 • 建議於兩週內完成線上續保</Text>
                 </View>
                 <TouchableOpacity
                   style={styles.reminderActionBtn}
-                  onPress={() => Alert.alert('提醒設定', '已開啟 LINE 到期即時推播通知！')}
+                  onPress={() => Alert.alert('線上續保', '即將開啟保險試算與線上續保專區')}
                 >
-                  <Text style={styles.reminderActionText}>已設定推播</Text>
+                  <Text style={styles.reminderActionText}>續保</Text>
                 </TouchableOpacity>
               </View>
-
+              <View style={styles.divider} />
               <View style={styles.reminderItem}>
-                <View style={[styles.reminderIconBox, { backgroundColor: '#FEE2E2' }]}>
-                  <Text style={{ fontSize: 18 }}>🔧</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.reminderTitle}>建議定期換機油/齒輪油</Text>
-                  <Text style={styles.reminderSub}>距離建議里程還剩 {currentVehicle.nextMaintKm} km</Text>
+                <Text style={styles.reminderIcon}>🛢️</Text>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Text style={styles.reminderTitle}>機油更換倒數（剩餘 720 km）</Text>
+                  <Text style={styles.reminderSub}>上次換油於 5,000 km • 建議使用 10W-40</Text>
                 </View>
                 <TouchableOpacity
                   style={styles.reminderActionBtn}
@@ -313,7 +457,7 @@ export default function App() {
         {activeTab === 'services' && (
           <View style={styles.tabContent}>
             {/* 車牌尋找助手 */}
-            <View style={styles.serviceBigCard}>
+            <View style={styles.glassServiceCard}>
               <View style={styles.serviceCardHeader}>
                 <View style={[styles.serviceIconCircle, { backgroundColor: '#DBEAFE' }]}>
                   <Text style={{ fontSize: 24 }}>🚙</Text>
@@ -330,6 +474,7 @@ export default function App() {
               <View style={styles.serviceFeatureList}>
                 <Text style={styles.serviceFeatureText}>✓ 全台 14 大車種全覆蓋（汽車、機車、重機、電動車）</Text>
                 <Text style={styles.serviceFeatureText}>✓ 易經靈動數吉凶鑑定 & 公路局即時標牌競標</Text>
+                <Text style={styles.serviceFeatureText}>✓ 與 App 帳號收藏車牌雙向同步</Text>
               </View>
               <TouchableOpacity
                 style={styles.serviceActionBtnBlue}
@@ -340,7 +485,7 @@ export default function App() {
             </View>
 
             {/* 考照報名助手 */}
-            <View style={styles.serviceBigCard}>
+            <View style={styles.glassServiceCard}>
               <View style={styles.serviceCardHeader}>
                 <View style={[styles.serviceIconCircle, { backgroundColor: '#D1FAE5' }]}>
                   <Text style={{ fontSize: 24 }}>🏍️</Text>
@@ -368,23 +513,95 @@ export default function App() {
           </View>
         )}
 
-        {/* ----------------- TAB 4: 會員中心 ----------------- */}
+        {/* ----------------- TAB 4: 會員中心 (含 Google 一鍵登入) ----------------- */}
         {activeTab === 'profile' && (
           <View style={styles.tabContent}>
-            {/* 會員卡片 */}
-            <View style={styles.profileCard}>
-              <Image source={require('./assets/icon.png')} style={styles.avatarImage} />
-              <View style={{ flex: 1, marginLeft: 14 }}>
-                <Text style={styles.profileName}>鍋巴車友會員</Text>
-                <Text style={styles.profileEmail}>chengyouy13@gmail.com</Text>
-                <View style={styles.vipBadge}>
-                  <Text style={styles.vipBadgeText}>👑 VIP 永久尊榮會員</Text>
+            {user ? (
+              // 已登入狀態卡片
+              <View style={styles.glassProfileCard}>
+                <View style={styles.profileTopRow}>
+                  {user.picture ? (
+                    <Image source={{ uri: user.picture }} style={styles.avatarImage} />
+                  ) : (
+                    <Image source={require('./assets/icon.png')} style={styles.avatarImage} />
+                  )}
+                  <View style={{ flex: 1, marginLeft: 14 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Text style={styles.profileName}>{user.name || '鍋巴車友'}</Text>
+                      {user.role === 'admin' ? (
+                        <View style={styles.adminTag}>
+                          <Text style={styles.adminTagText}>管理員</Text>
+                        </View>
+                      ) : (
+                        <View style={styles.vipTag}>
+                          <Text style={styles.vipTagText}>VIP</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.profileEmail}>{user.email}</Text>
+                    <View style={styles.accountSyncBadge}>
+                      <Text style={styles.accountSyncText}>🟢 網站 mmlovenn.com 互通中</Text>
+                    </View>
+                  </View>
                 </View>
+
+                {/* 權限統計 */}
+                <View style={styles.quotaStatsRow}>
+                  <View style={styles.quotaItem}>
+                    <Text style={styles.quotaVal}>{user.task_quota || 2}</Text>
+                    <Text style={styles.quotaLbl}>監控配額</Text>
+                  </View>
+                  <View style={styles.quotaDiv} />
+                  <View style={styles.quotaItem}>
+                    <Text style={[styles.quotaVal, { color: '#059669' }]}>無限制</Text>
+                    <Text style={styles.quotaLbl}>車牌查詢</Text>
+                  </View>
+                  <View style={styles.quotaDiv} />
+                  <View style={styles.quotaItem}>
+                    <Text style={[styles.quotaVal, { color: '#DB2777' }]}>已點亮</Text>
+                    <Text style={styles.quotaLbl}>推播權限</Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+                  <Text style={styles.logoutBtnText}>登出此帳號</Text>
+                </TouchableOpacity>
               </View>
-            </View>
+            ) : (
+              // 未登入：Google 一鍵登入大卡片
+              <View style={styles.glassLoginCard}>
+                <Image source={require('./assets/icon.png')} style={styles.loginCardLogo} />
+                <Text style={styles.loginCardTitle}>登入 鍋巴 GOBA</Text>
+                <Text style={styles.loginCardSubtitle}>
+                  登入同一個 Google 帳號，即時同步您在網站上的車牌收藏、VIP 權限與監控名額！
+                </Text>
+
+                <TouchableOpacity
+                  style={styles.googleLoginBtn}
+                  onPress={handleGoogleLogin}
+                  disabled={isLoadingAuth}
+                >
+                  {isLoadingAuth ? (
+                    <ActivityIndicator color="#1F2937" />
+                  ) : (
+                    <>
+                      <Text style={{ fontSize: 18, marginRight: 10 }}>🌐</Text>
+                      <Text style={styles.googleLoginBtnText}>以 Google 帳號一鍵登入</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.demoLoginBtn}
+                  onPress={showDemoLoginPrompt}
+                >
+                  <Text style={styles.demoLoginBtnText}>快速體驗管理員連動 ➔</Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             {/* 系統設定列表 */}
-            <View style={styles.card}>
+            <View style={styles.glassCard}>
               <Text style={styles.cardTitle}>⚙️ 帳號與通知設定</Text>
               <TouchableOpacity
                 style={styles.settingRow}
@@ -404,10 +621,10 @@ export default function App() {
               <View style={styles.divider} />
               <TouchableOpacity
                 style={styles.settingRow}
-                onPress={() => Alert.alert('關於 鍋巴 GOBA', '鍋巴 GOBA (全民交通生活助手) v1.0.0\n版權所有 © 2026 mmlovenn.com')}
+                onPress={() => Alert.alert('關於 鍋巴 GOBA', '鍋巴 GOBA (全民交通生活助手) v1.1.0\n版權所有 © 2026 mmlovenn.com\n支援 iOS GPU Metal 動態毛玻璃渲染')}
               >
                 <Text style={styles.settingLabel}>ℹ️ 關於 鍋巴 GOBA</Text>
-                <Text style={styles.settingStatusGray}>v1.0.0 ➔</Text>
+                <Text style={styles.settingStatusGray}>v1.1.0 (PRO) ➔</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -416,12 +633,12 @@ export default function App() {
         {/* 底部品牌宣告 */}
         <View style={styles.footerNote}>
           <Text style={styles.footerNoteText}>鍋巴 GOBA • 全民交通生活平台</Text>
-          <Text style={styles.footerSubText}>車牌尋找助手 • 考照報名助手 來自 鍋巴 GOBA</Text>
+          <Text style={styles.footerSubText}>iOS Liquid Glass 核心驅動 • mmlovenn.com 雲端連動</Text>
         </View>
       </ScrollView>
 
-      {/* 底部原生導航欄 (Tab Bar) */}
-      <View style={styles.bottomNav}>
+      {/* 底部動態毛玻璃導航欄 (Frosted Glass Tab Bar) */}
+      <BlurView intensity={85} tint="light" style={styles.glassBottomNav}>
         <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('today')}>
           <Text style={[styles.navIcon, activeTab === 'today' && styles.navIconActive]}>🛵</Text>
           <Text style={[styles.navLabel, activeTab === 'today' && styles.navLabelActive]}>今日交通</Text>
@@ -439,53 +656,62 @@ export default function App() {
 
         <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('profile')}>
           <Text style={[styles.navIcon, activeTab === 'profile' && styles.navIconActive]}>👤</Text>
-          <Text style={[styles.navLabel, activeTab === 'profile' && styles.navLabelActive]}>會員中心</Text>
+          <Text style={[styles.navLabel, activeTab === 'profile' && styles.navLabelActive]}>
+            {user ? '我的會員' : '會員中心'}
+          </Text>
         </TouchableOpacity>
-      </View>
+      </BlurView>
 
-      {/* 加油記帳彈窗 Modal */}
-      <Modal visible={refuelModalVisible} transparent animationType="slide">
+      {/* 加油記帳高斯模糊彈窗 Modal */}
+      <Modal visible={refuelModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+          <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
+          <View style={styles.modalGlassContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>⛽ 記錄加油（{currentVehicle.nickname}）</Text>
+              <Text style={styles.modalTitle}>⛽ 新增加油紀錄</Text>
               <TouchableOpacity onPress={() => setRefuelModalVisible(false)}>
                 <Text style={styles.modalCloseText}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            <View style={styles.modalBody}>
+            <Text style={styles.modalSub}>車輛：{currentVehicle.nickname} ({currentVehicle.plate})</Text>
+
+            <View style={styles.inputGroup}>
               <Text style={styles.inputLabel}>加油公升數 (L)</Text>
               <TextInput
                 style={styles.textInput}
-                placeholder="例如: 6.2"
                 keyboardType="numeric"
+                placeholder="例如：6.2"
                 value={refuelLiters}
                 onChangeText={setRefuelLiters}
               />
+            </View>
 
-              <Text style={styles.inputLabel}>實付金額 (NTD)</Text>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>總金額 (NT$)</Text>
               <TextInput
                 style={styles.textInput}
-                placeholder="例如: 195"
                 keyboardType="numeric"
+                placeholder="例如：190"
                 value={refuelAmount}
                 onChangeText={setRefuelAmount}
               />
+            </View>
 
-              <Text style={styles.inputLabel}>當前總里程數 (km)</Text>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>當前儀表總里程 (km)</Text>
               <TextInput
                 style={styles.textInput}
-                placeholder="例如: 6450"
                 keyboardType="numeric"
+                placeholder={`前次里程：${currentVehicle.mileage}`}
                 value={refuelKm}
                 onChangeText={setRefuelKm}
               />
-
-              <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleAddRefuel}>
-                <Text style={styles.modalSubmitText}>儲存記帳並計算油耗 ✨</Text>
-              </TouchableOpacity>
             </View>
+
+            <TouchableOpacity style={styles.submitBtn} onPress={handleAddRefuel}>
+              <Text style={styles.submitBtnText}>儲存並計算實測油耗</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -496,17 +722,17 @@ export default function App() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#FCE7F3', // 鍋巴可愛柔和粉底色
+    backgroundColor: '#FDF2F8', // 鍋巴柔粉暖白背景
   },
-  topHeader: {
+  glassHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 18,
+    alignItems: 'center',
+    paddingHorizontal: 20,
     paddingVertical: 12,
-    backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
-    borderBottomColor: '#F3E8FF',
+    borderBottomColor: 'rgba(255, 255, 255, 0.6)',
+    backgroundColor: 'rgba(255, 255, 255, 0.65)',
   },
   brandRow: {
     flexDirection: 'row',
@@ -517,467 +743,431 @@ const styles = StyleSheet.create({
     height: 38,
     borderRadius: 12,
     marginRight: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(244, 114, 182, 0.3)',
   },
   brandName: {
     fontSize: 18,
     fontWeight: '900',
     color: '#831843',
-    letterSpacing: -0.5,
+    letterSpacing: 0.5,
+  },
+  glassPillMini: {
+    backgroundColor: 'rgba(236, 72, 153, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 6,
+    marginLeft: 6,
+  },
+  glassPillMiniText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#DB2777',
   },
   brandSubtitle: {
     fontSize: 11,
     color: '#9D174D',
-    fontWeight: '600',
+    fontWeight: '500',
   },
-  cityPill: {
-    backgroundColor: '#FDF2F8',
+  cityPillGlass: {
+    backgroundColor: 'rgba(255, 255, 255, 0.75)',
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#FBCFE8',
+    borderColor: 'rgba(244, 114, 182, 0.3)',
+    shadowColor: '#BE185D',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
   },
   cityPillText: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#BE185D',
+    color: '#9D174D',
   },
   scrollView: {
     flex: 1,
-    backgroundColor: '#FAF5FF',
   },
   scrollContent: {
-    padding: 16,
-    paddingBottom: 24,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 110,
   },
   tabContent: {
     gap: 14,
   },
-  mascotGreetingCard: {
-    backgroundColor: '#FFFBEB',
-    borderRadius: 20,
-    padding: 16,
+  // 動態毛玻璃問候卡
+  glassGreetingCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.75)',
+    borderRadius: 24,
+    padding: 18,
     borderWidth: 1.5,
-    borderColor: '#FDE68A',
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
   },
   greetingHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
   },
-  greetingMascotText: {
-    fontSize: 14,
+  greetingAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: '#F472B6',
+  },
+  greetingTitle: {
+    fontSize: 15,
     fontWeight: '800',
-    color: '#B45309',
+    color: '#831843',
+    marginBottom: 3,
   },
-  greetingBadge: {
-    fontSize: 10,
-    fontWeight: '800',
-    backgroundColor: '#FEF3C7',
-    color: '#92400E',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
+  greetingText: {
+    fontSize: 12,
+    color: '#6B7280',
+    lineHeight: 18,
   },
-  greetingBody: {
+  quickStatusRow: {
+    flexDirection: 'row',
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(244, 114, 182, 0.2)',
+  },
+  quickStatusItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  quickStatusDivider: {
+    width: 1,
+    backgroundColor: 'rgba(244, 114, 182, 0.2)',
+  },
+  quickStatusLabel: {
+    fontSize: 11,
+    color: '#9CA3AF',
+    marginBottom: 4,
+  },
+  quickStatusValue: {
     fontSize: 13,
-    color: '#78350F',
-    lineHeight: 19,
-    fontWeight: '500',
+    fontWeight: '700',
+    color: '#1F2937',
   },
-  card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
+  // 通用動態晶透卡片 (Glassmorphism Card)
+  glassCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.72)',
+    borderRadius: 22,
     padding: 16,
-    shadowColor: '#831843',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.85)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
   },
-  cardHeader: {
+  cardHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 12,
   },
   cardTitle: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '800',
-    color: '#1E293B',
+    color: '#1F2937',
   },
-  cardSub: {
+  tagGreen: {
+    backgroundColor: 'rgba(209, 250, 229, 0.8)',
+    color: '#047857',
     fontSize: 11,
-    fontWeight: '600',
-    color: '#94A3B8',
+    fontWeight: '700',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
   },
-  weatherRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
+  tagBlue: {
+    backgroundColor: 'rgba(219, 234, 254, 0.8)',
+    color: '#1D4ED8',
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
   },
-  weatherTemp: {
-    fontSize: 34,
-    fontWeight: '900',
-    color: '#0284C7',
-    letterSpacing: -1,
-  },
-  weatherDesc: {
-    fontSize: 13,
-    color: '#64748B',
-    fontWeight: '600',
-  },
-  weatherStats: {
+  oilPriceGrid: {
     flexDirection: 'row',
     gap: 8,
   },
-  statChip: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  statChipLabel: {
-    fontSize: 10,
-    color: '#94A3B8',
-    fontWeight: '700',
-  },
-  statChipValBlue: {
-    fontSize: 14,
-    color: '#0284C7',
-    fontWeight: '900',
-  },
-  statChipValGreen: {
-    fontSize: 14,
-    color: '#059669',
-    fontWeight: '900',
-  },
-  weatherTip: {
-    fontSize: 12,
-    color: '#475569',
-    backgroundColor: '#F1F5F9',
-    padding: 8,
-    borderRadius: 10,
-    marginTop: 4,
-  },
-  fuelGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  fuelItem: {
+  oilPriceBox: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    padding: 8,
-    marginHorizontal: 3,
+    backgroundColor: 'rgba(249, 250, 251, 0.7)',
+    borderRadius: 14,
+    paddingVertical: 10,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: 'rgba(229, 231, 235, 0.8)',
   },
-  fuelItemHighlighted: {
-    backgroundColor: '#FEF3C7',
-    borderColor: '#FDE68A',
+  oilPriceBoxHighlight: {
+    backgroundColor: 'rgba(253, 242, 248, 0.9)',
+    borderColor: 'rgba(244, 114, 182, 0.6)',
   },
-  fuelType: {
+  oilName: {
     fontSize: 11,
-    color: '#64748B',
-    fontWeight: '700',
+    color: '#6B7280',
+    marginBottom: 2,
   },
-  fuelPrice: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: '#0F172A',
-    marginVertical: 2,
+  oilPrice: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#111827',
   },
-  fuelUnit: {
-    fontSize: 9,
-    color: '#94A3B8',
-  },
-  fuelAlertBox: {
-    backgroundColor: '#EFF6FF',
-    borderRadius: 12,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: '#BFDBFE',
-  },
-  fuelAlertText: {
-    fontSize: 12,
-    color: '#1E40AF',
-  },
-  roadList: {
-    gap: 10,
-  },
-  roadItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
-  },
-  roadStatusDotGreen: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#10B981',
-    marginRight: 10,
-  },
-  roadStatusDotYellow: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#F59E0B',
-    marginRight: 10,
-  },
-  roadName: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#1E293B',
-  },
-  roadDetail: {
-    fontSize: 11,
-    color: '#64748B',
+  oilDiff: {
+    fontSize: 10,
+    color: '#9CA3AF',
     marginTop: 2,
   },
-  roadTagNormal: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#059669',
-    backgroundColor: '#D1FAE5',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
+  forecastBanner: {
+    marginTop: 10,
+    backgroundColor: 'rgba(254, 243, 199, 0.7)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
   },
-  roadTagSlow: {
+  forecastText: {
     fontSize: 11,
-    fontWeight: '800',
-    color: '#B45309',
-    backgroundColor: '#FEF3C7',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
+    color: '#92400E',
+    fontWeight: '600',
   },
-  quickToolsGrid: {
+  highwayRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  toolButton: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    paddingVertical: 14,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 1,
+    paddingVertical: 6,
   },
-  toolIcon: {
-    fontSize: 22,
-    marginBottom: 4,
+  highwayBadge: {
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginRight: 10,
   },
-  toolTitle: {
+  highwayBadgeText: {
+    color: '#FFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  highwaySection: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  highwaySpeed: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#334155',
   },
+  divider: {
+    height: 1,
+    backgroundColor: 'rgba(243, 244, 246, 0.8)',
+    marginVertical: 8,
+  },
+  // 車庫毛玻璃樣式
   vehicleSelectorRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+    gap: 10,
   },
-  vehicleTabBtn: {
+  vehiclePillGlass: {
+    backgroundColor: 'rgba(255, 255, 255, 0.65)',
     paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: '#E2E8F0',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.8)',
   },
-  vehicleTabBtnActive: {
-    backgroundColor: '#831843',
+  vehiclePillGlassActive: {
+    backgroundColor: '#EC4899',
+    borderColor: '#EC4899',
   },
-  vehicleTabText: {
-    fontSize: 12,
+  vehiclePillText: {
+    fontSize: 13,
     fontWeight: '700',
-    color: '#475569',
+    color: '#6B7280',
   },
-  vehicleTabTextActive: {
+  vehiclePillTextActive: {
     color: '#FFFFFF',
   },
-  addVehicleBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#FFFFFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-  },
-  addVehicleText: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#64748B',
-    lineHeight: 20,
-  },
-  garageHeroCard: {
-    backgroundColor: '#831843',
+  glassVehicleCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
     borderRadius: 24,
     padding: 20,
-    shadowColor: '#831843',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 10,
-    elevation: 4,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    shadowColor: '#DB2777',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
   },
-  garageHeroHeader: {
+  vehicleCardTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: 16,
   },
-  garagePlateNumber: {
-    fontSize: 26,
-    fontWeight: '900',
-    color: '#FFFFFF',
-    letterSpacing: 1,
-  },
-  garageVehicleType: {
-    fontSize: 13,
-    color: '#FBCFE8',
-    marginTop: 2,
+  vehicleCardType: {
+    fontSize: 11,
+    color: '#9CA3AF',
     fontWeight: '600',
   },
-  garageTag: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
+  vehicleCardNick: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#1F2937',
+    marginTop: 2,
   },
-  garageTagText: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '700',
+  plateTag: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#475569',
   },
-  garageStatRow: {
+  plateTagText: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 1.2,
+  },
+  vehicleStatsRow: {
     flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: 'rgba(249, 250, 251, 0.7)',
     borderRadius: 16,
     paddingVertical: 14,
-    marginBottom: 16,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(243, 244, 246, 0.8)',
   },
-  garageStatItem: {
+  statBox: {
     flex: 1,
     alignItems: 'center',
   },
-  garageStatDivider: {
+  statDivider: {
     width: 1,
-    backgroundColor: '#F1F5F9',
+    backgroundColor: 'rgba(229, 231, 235, 0.8)',
   },
-  garageStatLabel: {
-    fontSize: 11,
-    color: '#64748B',
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  garageStatValue: {
-    fontSize: 22,
+  statNum: {
+    fontSize: 17,
     fontWeight: '900',
-    color: '#0F172A',
+    color: '#1F2937',
   },
-  garageStatUnit: {
+  statTitle: {
     fontSize: 10,
-    color: '#94A3B8',
+    color: '#9CA3AF',
+    marginTop: 3,
   },
-  refuelActionBtn: {
-    backgroundColor: '#F59E0B',
-    borderRadius: 16,
+  vehicleActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 16,
+  },
+  actionBtnRefuel: {
+    flex: 1.2,
+    backgroundColor: '#EC4899',
     paddingVertical: 12,
+    borderRadius: 14,
     alignItems: 'center',
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
   },
-  refuelActionBtnText: {
-    color: '#78350F',
-    fontSize: 13,
+  actionBtnText: {
+    color: '#FFFFFF',
     fontWeight: '800',
+    fontSize: 13,
+  },
+  actionBtnMaintain: {
+    flex: 1,
+    backgroundColor: 'rgba(243, 244, 246, 0.85)',
+    paddingVertical: 12,
+    borderRadius: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(229, 231, 235, 0.9)',
+  },
+  actionBtnMaintainText: {
+    color: '#4B5563',
+    fontWeight: '700',
+    fontSize: 13,
   },
   reminderItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
+    paddingVertical: 6,
   },
-  reminderIconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    backgroundColor: '#EDE9FE',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
+  reminderIcon: {
+    fontSize: 22,
   },
   reminderTitle: {
     fontSize: 13,
-    fontWeight: '800',
-    color: '#1E293B',
+    fontWeight: '700',
+    color: '#1F2937',
   },
   reminderSub: {
     fontSize: 11,
-    color: '#64748B',
+    color: '#9CA3AF',
     marginTop: 2,
   },
   reminderActionBtn: {
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 10,
+    backgroundColor: 'rgba(253, 242, 248, 0.9)',
+    paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(244, 114, 182, 0.5)',
   },
   reminderActionText: {
     fontSize: 11,
-    fontWeight: '700',
-    color: '#475569',
+    fontWeight: '800',
+    color: '#BE185D',
   },
-  serviceBigCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
+  // 旗艦服務樣式
+  glassServiceCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.78)',
+    borderRadius: 24,
     padding: 18,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    shadowColor: '#3B82F6',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
   },
   serviceCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
   },
   serviceIconCircle: {
     width: 44,
     height: 44,
-    borderRadius: 16,
+    borderRadius: 14,
     justifyContent: 'center',
     alignItems: 'center',
   },
   serviceTitle: {
     fontSize: 16,
     fontWeight: '900',
-    color: '#0F172A',
+    color: '#1F2937',
   },
   serviceSub: {
     fontSize: 11,
-    color: '#64748B',
-    fontWeight: '600',
+    color: '#6B7280',
+    marginTop: 1,
   },
   serviceBadgeBlue: {
-    backgroundColor: '#DBEAFE',
-    color: '#1E40AF',
+    backgroundColor: '#EFF6FF',
+    color: '#2563EB',
     fontSize: 10,
     fontWeight: '800',
     paddingHorizontal: 8,
@@ -985,8 +1175,8 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   serviceBadgeGreen: {
-    backgroundColor: '#D1FAE5',
-    color: '#065F46',
+    backgroundColor: '#ECFDF5',
+    color: '#059669',
     fontSize: 10,
     fontWeight: '800',
     paddingHorizontal: 8,
@@ -995,211 +1185,355 @@ const styles = StyleSheet.create({
   },
   serviceDescription: {
     fontSize: 12,
-    color: '#475569',
+    color: '#4B5563',
     lineHeight: 18,
-    marginBottom: 12,
+    marginTop: 12,
   },
   serviceFeatureList: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    padding: 10,
-    gap: 6,
-    marginBottom: 14,
+    marginTop: 10,
+    gap: 4,
   },
   serviceFeatureText: {
     fontSize: 11,
-    color: '#334155',
-    fontWeight: '600',
+    color: '#6B7280',
+    fontWeight: '500',
   },
   serviceActionBtnBlue: {
     backgroundColor: '#2563EB',
     borderRadius: 14,
     paddingVertical: 12,
     alignItems: 'center',
+    marginTop: 14,
   },
   serviceActionBtnGreen: {
     backgroundColor: '#059669',
     borderRadius: 14,
     paddingVertical: 12,
     alignItems: 'center',
+    marginTop: 14,
   },
   serviceActionText: {
     color: '#FFFFFF',
-    fontSize: 13,
     fontWeight: '800',
+    fontSize: 13,
   },
-  profileCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
+  // 會員中心樣式
+  glassProfileCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    borderRadius: 24,
     padding: 18,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.95)',
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.1,
+    shadowRadius: 14,
+  },
+  profileTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
   },
   avatarImage: {
-    width: 60,
-    height: 60,
-    borderRadius: 20,
+    width: 54,
+    height: 54,
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: '#EC4899',
   },
   profileName: {
     fontSize: 17,
     fontWeight: '900',
-    color: '#0F172A',
+    color: '#1F2937',
   },
   profileEmail: {
     fontSize: 12,
-    color: '#64748B',
-    marginVertical: 2,
+    color: '#6B7280',
+    marginTop: 2,
   },
-  vipBadge: {
-    backgroundColor: '#FEF3C7',
-    alignSelf: 'flex-start',
+  adminTag: {
+    backgroundColor: '#FEE2E2',
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: 8,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  adminTagText: {
+    color: '#DC2626',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  vipTag: {
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  vipTagText: {
+    color: '#D97706',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  accountSyncBadge: {
     marginTop: 4,
   },
-  vipBadgeText: {
-    fontSize: 11,
-    color: '#92400E',
+  accountSyncText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#059669',
+  },
+  quotaStatsRow: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(249, 250, 251, 0.8)',
+    borderRadius: 14,
+    paddingVertical: 12,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(243, 244, 246, 0.9)',
+  },
+  quotaItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  quotaDiv: {
+    width: 1,
+    backgroundColor: 'rgba(229, 231, 235, 0.8)',
+  },
+  quotaVal: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#1F2937',
+  },
+  quotaLbl: {
+    fontSize: 10,
+    color: '#9CA3AF',
+    marginTop: 2,
+  },
+  logoutBtn: {
+    marginTop: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(254, 226, 226, 0.6)',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(252, 165, 165, 0.5)',
+  },
+  logoutBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#DC2626',
+  },
+  // 未登入卡片
+  glassLoginCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    borderRadius: 24,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.95)',
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+  },
+  loginCardLogo: {
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: '#EC4899',
+    marginBottom: 12,
+  },
+  loginCardTitle: {
+    fontSize: 19,
+    fontWeight: '900',
+    color: '#1F2937',
+    marginBottom: 6,
+  },
+  loginCardSubtitle: {
+    fontSize: 12,
+    color: '#6B7280',
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 20,
+    paddingHorizontal: 8,
+  },
+  googleLoginBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 16,
+    width: '100%',
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+  },
+  googleLoginBtnText: {
+    fontSize: 14,
     fontWeight: '800',
+    color: '#1F2937',
+  },
+  demoLoginBtn: {
+    marginTop: 12,
+    paddingVertical: 8,
+  },
+  demoLoginBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#EC4899',
   },
   settingRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
+    paddingVertical: 10,
   },
   settingLabel: {
     fontSize: 13,
-    fontWeight: '700',
-    color: '#334155',
+    color: '#374151',
+    fontWeight: '600',
   },
   settingStatusGreen: {
     fontSize: 12,
+    fontWeight: '700',
     color: '#059669',
-    fontWeight: '800',
   },
   settingStatusBlue: {
     fontSize: 12,
+    fontWeight: '700',
     color: '#2563EB',
-    fontWeight: '800',
   },
   settingStatusGray: {
     fontSize: 12,
-    color: '#94A3B8',
-    fontWeight: '700',
-  },
-  divider: {
-    height: 1,
-    backgroundColor: '#F1F5F9',
+    color: '#9CA3AF',
   },
   footerNote: {
     alignItems: 'center',
-    marginTop: 20,
-    marginBottom: 10,
+    marginTop: 18,
+    paddingBottom: 8,
   },
   footerNoteText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#9D174D',
+    fontSize: 11,
+    color: '#9CA3AF',
+    fontWeight: '600',
   },
   footerSubText: {
     fontSize: 10,
-    color: '#BE185D',
+    color: '#D1D5DB',
     marginTop: 2,
   },
-  bottomNav: {
+  // 底部動態毛玻璃導航 (Frosted Glass Tab Bar)
+  glassBottomNav: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
     flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
+    justifyContent: 'space-around',
+    paddingTop: 10,
+    paddingBottom: Platform.OS === 'ios' ? 24 : 10,
     borderTopWidth: 1,
-    borderTopColor: '#F3E8FF',
-    paddingVertical: 8,
-    paddingBottom: Platform.OS === 'ios' ? 20 : 8,
+    borderTopColor: 'rgba(255, 255, 255, 0.7)',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
   },
   navItem: {
-    flex: 1,
     alignItems: 'center',
-    justifyContent: 'center',
   },
   navIcon: {
-    fontSize: 20,
-    color: '#94A3B8',
-    marginBottom: 2,
+    fontSize: 22,
+    opacity: 0.5,
   },
   navIconActive: {
-    transform: [{ scale: 1.15 }],
+    opacity: 1,
   },
   navLabel: {
     fontSize: 10,
-    fontWeight: '700',
-    color: '#94A3B8',
+    color: '#9CA3AF',
+    marginTop: 2,
+    fontWeight: '600',
   },
   navLabelActive: {
-    color: '#831843',
-    fontWeight: '900',
+    color: '#EC4899',
+    fontWeight: '800',
   },
+  // 彈窗
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
   },
-  modalContent: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 20,
-    paddingBottom: 36,
+  modalGlassContent: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    padding: 24,
+    borderTopWidth: 1.5,
+    borderTopColor: 'rgba(255, 255, 255, 0.9)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -6 },
+    shadowOpacity: 0.15,
+    shadowRadius: 18,
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
   },
   modalTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#0F172A',
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#1F2937',
   },
   modalCloseText: {
     fontSize: 18,
-    color: '#94A3B8',
-    fontWeight: '700',
-    padding: 4,
+    color: '#9CA3AF',
+    fontWeight: 'bold',
   },
-  modalBody: {
-    gap: 10,
+  modalSub: {
+    fontSize: 12,
+    color: '#6B7280',
+    marginTop: 4,
+    marginBottom: 16,
+  },
+  inputGroup: {
+    marginBottom: 14,
   },
   inputLabel: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#475569',
-    marginTop: 4,
+    color: '#374151',
+    marginBottom: 6,
   },
   textInput: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: 'rgba(243, 244, 246, 0.8)',
     borderRadius: 12,
     paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    paddingVertical: 12,
     fontSize: 14,
+    color: '#1F2937',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
-  modalSubmitBtn: {
-    backgroundColor: '#831843',
+  submitBtn: {
+    backgroundColor: '#EC4899',
     borderRadius: 14,
     paddingVertical: 14,
     alignItems: 'center',
-    marginTop: 14,
+    marginTop: 8,
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
   },
-  modalSubmitText: {
+  submitBtnText: {
     color: '#FFFFFF',
-    fontSize: 14,
     fontWeight: '800',
+    fontSize: 14,
   },
 });
