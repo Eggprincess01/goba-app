@@ -30,27 +30,28 @@ jobs:
           cd ios
           pod install
 
-      - name: Build Xcode Archive (Unsigned)
+      - name: Build Xcode (Unsigned)
         run: |
           cd ios
           WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
           SCHEME=$(basename "$WORKSPACE" .xcworkspace)
           echo "Building workspace: $WORKSPACE with scheme: $SCHEME"
-          xcodebuild -workspace "$WORKSPACE" \
+          xcodebuild build \
+            -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
-            -sdk iphoneos \
             -configuration Release \
-            -archivePath "$PWD/build/App.xcarchive" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            PROVISIONING_PROFILE="" \
-            archive
+            PROVISIONING_PROFILE=""
 
       - name: Package IPA
         run: |
           mkdir -p Payload
-          cp -R ios/build/App.xcarchive/Products/Applications/*.app Payload/
+          cp -R ios/DerivedData/Build/Products/Release-iphoneos/*.app Payload/
           zip -r -y 鍋巴GOBA.ipa Payload
           echo "IPA packaging finished. File info:"
           ls -lh 鍋巴GOBA.ipa
