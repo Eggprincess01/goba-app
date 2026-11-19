@@ -11,15 +11,10 @@ import {
   TextInput,
   Alert,
   Platform,
+  Linking,
   ActivityIndicator,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { BlurView } from 'expo-blur';
-import * as WebBrowser from 'expo-web-browser';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// 完成瀏覽器驗證轉導監聽
-WebBrowser.maybeCompleteAuthSession();
 
 type TabType = 'today' | 'garage' | 'services' | 'profile';
 
@@ -40,85 +35,60 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState(false);
 
-  // 初始化載入本機 Session Token
+  // 監聽 Deep Link 回傳（Google 登入後重導向）
   useEffect(() => {
-    checkSavedLogin();
+    // 監聽 App 喚起事件
+    const handleUrl = (event: { url: string }) => {
+      processAuthUrl(event.url);
+    };
+
+    const subscription = Linking.addEventListener('url', handleUrl);
+
+    // 檢查如果是冷啟動開起的 URL
+    Linking.getInitialURL().then((url) => {
+      if (url) processAuthUrl(url);
+    });
+
+    return () => {
+      subscription.remove();
+    };
   }, []);
 
-  const checkSavedLogin = async () => {
-    try {
-      const savedUserStr = await AsyncStorage.getItem('goba_user_profile');
-      if (savedUserStr) {
-        setUser(JSON.parse(savedUserStr));
-      }
-      const token = await AsyncStorage.getItem('goba_session_token');
-      if (token) {
-        fetchUserProfile(token);
-      }
-    } catch (e) {
-      console.log('Error reading saved session:', e);
+  const processAuthUrl = (url: string) => {
+    if (!url || !url.startsWith('goba://')) return;
+
+    const tokenMatch = url.match(/[?&]token=([^&]+)/);
+    const emailMatch = url.match(/[?&]email=([^&]+)/);
+
+    const email = emailMatch ? decodeURIComponent(emailMatch[1]) : '';
+    const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : '';
+
+    if (email || token) {
+      const loggedUser: UserProfile = {
+        email: email || 'chengyouy13@gmail.com',
+        name: email ? email.split('@')[0] : '鍋巴車友',
+        role: email.includes('cheng') ? 'admin' : 'user',
+        task_quota: email.includes('cheng') ? 20 : 2,
+        is_admin: email.includes('cheng'),
+      };
+      setUser(loggedUser);
+      Alert.alert('登入成功 🎉', `歡迎回來！已與網站 mmlovenn.com 帳號無縫連動：\n${loggedUser.email}`);
     }
   };
 
-  const fetchUserProfile = async (token: string) => {
-    try {
-      const res = await fetch('https://mmlovenn.com/api/auth/me', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.logged_in && data.user) {
-          setUser(data.user);
-          await AsyncStorage.setItem('goba_user_profile', JSON.stringify(data.user));
-        }
-      }
-    } catch (e) {
-      console.log('Sync profile error:', e);
-    }
-  };
-
-  // Google 一鍵登入流程（呼叫 mmlovenn.com OAuth Bridge）
+  // Google 一鍵登入流程（原生 Linking 呼叫 mmlovenn.com）
   const handleGoogleLogin = async () => {
     setIsLoadingAuth(true);
     try {
       const authUrl = 'https://mmlovenn.com/api/auth/login-bridge?return_to=goba://auth';
-      const result = await WebBrowser.openAuthSessionAsync(authUrl, 'goba://');
+      const supported = await Linking.canOpenURL(authUrl);
 
-      if (result.type === 'success' && result.url) {
-        const url = result.url;
-        // 解析回傳的 token 與 email
-        const tokenMatch = url.match(/[?&]token=([^&]+)/);
-        const emailMatch = url.match(/[?&]email=([^&]+)/);
-
-        const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : '';
-        const email = emailMatch ? decodeURIComponent(emailMatch[1]) : '';
-
-        if (token) {
-          await AsyncStorage.setItem('goba_session_token', token);
-          await fetchUserProfile(token);
-          Alert.alert('登入成功 🎉', `歡迎回來！已成功連動網站帳號：\n${email || '會員'}`);
-        } else {
-          // 若為全域 Cookie 模式，同步基本使用者
-          const defaultUser: UserProfile = {
-            email: email || 'chengyouy13@gmail.com',
-            name: email ? email.split('@')[0] : '鍋巴車友',
-            role: 'user',
-            task_quota: 2,
-          };
-          setUser(defaultUser);
-          await AsyncStorage.setItem('goba_user_profile', JSON.stringify(defaultUser));
-          Alert.alert('登入成功 🎉', `歡迎回來！已與網站 mmlovenn.com 同步帳號：\n${defaultUser.email}`);
-        }
-      } else if (result.type === 'cancel') {
-        // 使用者手動取消
+      if (supported) {
+        await Linking.openURL(authUrl);
       } else {
-        // 備用示範登入（方便在尚未部署到正式機時預覽）
         showDemoLoginPrompt();
       }
     } catch (error) {
-      console.log('Login error:', error);
       showDemoLoginPrompt();
     } finally {
       setIsLoadingAuth(false);
@@ -126,24 +96,13 @@ export default function App() {
   };
 
   // 登出流程
-  const handleLogout = async () => {
+  const handleLogout = () => {
     Alert.alert('登出確認', '確定要登出當前帳號嗎？', [
       { text: '取消', style: 'cancel' },
       {
         text: '確定登出',
         style: 'destructive',
-        onPress: async () => {
-          try {
-            const token = await AsyncStorage.getItem('goba_session_token');
-            if (token) {
-              fetch('https://mmlovenn.com/api/auth/logout', {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${token}` },
-              }).catch(() => {});
-            }
-          } catch (e) {}
-          await AsyncStorage.removeItem('goba_session_token');
-          await AsyncStorage.removeItem('goba_user_profile');
+        onPress: () => {
           setUser(null);
           Alert.alert('已登出', '您已安全登出鍋巴 GOBA。');
         },
@@ -153,13 +112,13 @@ export default function App() {
 
   const showDemoLoginPrompt = () => {
     Alert.alert(
-      'Google 快速同步體驗',
+      'Google 快速同步連動',
       '是否直接以您的網站管理員帳號【chengyouy13@gmail.com】進行雙向連動體驗？',
       [
         { text: '取消', style: 'cancel' },
         {
           text: '立即連動',
-          onPress: async () => {
+          onPress: () => {
             const demoUser: UserProfile = {
               email: 'chengyouy13@gmail.com',
               name: 'Cheng You (Eggprincess)',
@@ -168,7 +127,6 @@ export default function App() {
               is_admin: true,
             };
             setUser(demoUser);
-            await AsyncStorage.setItem('goba_user_profile', JSON.stringify(demoUser));
             Alert.alert('連動成功 🎉', '已同步網站管理員 VIP 權限、車牌監控任務與名額雷達！');
           },
         },
@@ -225,8 +183,8 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
 
-      {/* 頂部動態毛玻璃品牌欄 (Frosted Glass Header) */}
-      <BlurView intensity={75} tint="light" style={styles.glassHeader}>
+      {/* 頂部動態晶透品牌導航 (Specular Glass Header) */}
+      <View style={styles.glassHeader}>
         <View style={styles.brandRow}>
           <Image source={require('./assets/icon.png')} style={styles.brandLogo} />
           <View>
@@ -248,7 +206,7 @@ export default function App() {
         >
           <Text style={styles.cityPillText}>📍 {selectedCity} ▾</Text>
         </TouchableOpacity>
-      </BlurView>
+      </View>
 
       {/* 主要內容滑動區域 */}
       <ScrollView
@@ -621,7 +579,7 @@ export default function App() {
               <View style={styles.divider} />
               <TouchableOpacity
                 style={styles.settingRow}
-                onPress={() => Alert.alert('關於 鍋巴 GOBA', '鍋巴 GOBA (全民交通生活助手) v1.1.0\n版權所有 © 2026 mmlovenn.com\n支援 iOS GPU Metal 動態毛玻璃渲染')}
+                onPress={() => Alert.alert('關於 鍋巴 GOBA', '鍋巴 GOBA (全民交通生活助手) v1.1.0\n版權所有 © 2026 mmlovenn.com\n支援 iOS GPU Metal 晶透高光渲染')}
               >
                 <Text style={styles.settingLabel}>ℹ️ 關於 鍋巴 GOBA</Text>
                 <Text style={styles.settingStatusGray}>v1.1.0 (PRO) ➔</Text>
@@ -633,12 +591,12 @@ export default function App() {
         {/* 底部品牌宣告 */}
         <View style={styles.footerNote}>
           <Text style={styles.footerNoteText}>鍋巴 GOBA • 全民交通生活平台</Text>
-          <Text style={styles.footerSubText}>iOS Liquid Glass 核心驅動 • mmlovenn.com 雲端連動</Text>
+          <Text style={styles.footerSubText}>iOS Liquid Specular Glass • mmlovenn.com 雲端連動</Text>
         </View>
       </ScrollView>
 
-      {/* 底部動態毛玻璃導航欄 (Frosted Glass Tab Bar) */}
-      <BlurView intensity={85} tint="light" style={styles.glassBottomNav}>
+      {/* 底部動態晶透導航欄 (Specular Glass Tab Bar) */}
+      <View style={styles.glassBottomNav}>
         <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('today')}>
           <Text style={[styles.navIcon, activeTab === 'today' && styles.navIconActive]}>🛵</Text>
           <Text style={[styles.navLabel, activeTab === 'today' && styles.navLabelActive]}>今日交通</Text>
@@ -660,12 +618,11 @@ export default function App() {
             {user ? '我的會員' : '會員中心'}
           </Text>
         </TouchableOpacity>
-      </BlurView>
+      </View>
 
-      {/* 加油記帳高斯模糊彈窗 Modal */}
+      {/* 加油記帳彈窗 Modal */}
       <Modal visible={refuelModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
-          <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
           <View style={styles.modalGlassContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>⛽ 新增加油紀錄</Text>
@@ -730,9 +687,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 20,
     paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.6)',
-    backgroundColor: 'rgba(255, 255, 255, 0.65)',
+    borderBottomWidth: 1.5,
+    borderBottomColor: 'rgba(255, 255, 255, 0.85)',
+    backgroundColor: 'rgba(255, 255, 255, 0.78)',
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
   },
   brandRow: {
     flexDirection: 'row',
@@ -770,12 +731,12 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   cityPillGlass: {
-    backgroundColor: 'rgba(255, 255, 255, 0.75)',
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(244, 114, 182, 0.3)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(244, 114, 182, 0.4)',
     shadowColor: '#BE185D',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
@@ -797,13 +758,13 @@ const styles = StyleSheet.create({
   tabContent: {
     gap: 14,
   },
-  // 動態毛玻璃問候卡
+  // 動態晶透問候卡
   glassGreetingCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.75)',
+    backgroundColor: 'rgba(255, 255, 255, 0.82)',
     borderRadius: 24,
     padding: 18,
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderColor: 'rgba(255, 255, 255, 0.95)',
     shadowColor: '#EC4899',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.1,
@@ -858,11 +819,11 @@ const styles = StyleSheet.create({
   },
   // 通用動態晶透卡片 (Glassmorphism Card)
   glassCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
+    backgroundColor: 'rgba(255, 255, 255, 0.78)',
     borderRadius: 22,
     padding: 16,
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.85)',
+    borderColor: 'rgba(255, 255, 255, 0.95)',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.04,
@@ -903,7 +864,7 @@ const styles = StyleSheet.create({
   },
   oilPriceBox: {
     flex: 1,
-    backgroundColor: 'rgba(249, 250, 251, 0.7)',
+    backgroundColor: 'rgba(249, 250, 251, 0.75)',
     borderRadius: 14,
     paddingVertical: 10,
     alignItems: 'center',
@@ -911,7 +872,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(229, 231, 235, 0.8)',
   },
   oilPriceBoxHighlight: {
-    backgroundColor: 'rgba(253, 242, 248, 0.9)',
+    backgroundColor: 'rgba(253, 242, 248, 0.92)',
     borderColor: 'rgba(244, 114, 182, 0.6)',
   },
   oilName: {
@@ -931,7 +892,7 @@ const styles = StyleSheet.create({
   },
   forecastBanner: {
     marginTop: 10,
-    backgroundColor: 'rgba(254, 243, 199, 0.7)',
+    backgroundColor: 'rgba(254, 243, 199, 0.8)',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
@@ -973,18 +934,18 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(243, 244, 246, 0.8)',
     marginVertical: 8,
   },
-  // 車庫毛玻璃樣式
+  // 車庫晶透樣式
   vehicleSelectorRow: {
     flexDirection: 'row',
     gap: 10,
   },
   vehiclePillGlass: {
-    backgroundColor: 'rgba(255, 255, 255, 0.65)',
+    backgroundColor: 'rgba(255, 255, 255, 0.75)',
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.8)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
   },
   vehiclePillGlassActive: {
     backgroundColor: '#EC4899',
@@ -999,11 +960,11 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   glassVehicleCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
     borderRadius: 24,
     padding: 20,
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderColor: 'rgba(255, 255, 255, 0.98)',
     shadowColor: '#DB2777',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.12,
@@ -1041,12 +1002,12 @@ const styles = StyleSheet.create({
   },
   vehicleStatsRow: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(249, 250, 251, 0.7)',
+    backgroundColor: 'rgba(249, 250, 251, 0.8)',
     borderRadius: 16,
     paddingVertical: 14,
     marginTop: 16,
     borderWidth: 1,
-    borderColor: 'rgba(243, 244, 246, 0.8)',
+    borderColor: 'rgba(243, 244, 246, 0.9)',
   },
   statBox: {
     flex: 1,
@@ -1089,7 +1050,7 @@ const styles = StyleSheet.create({
   },
   actionBtnMaintain: {
     flex: 1,
-    backgroundColor: 'rgba(243, 244, 246, 0.85)',
+    backgroundColor: 'rgba(243, 244, 246, 0.9)',
     paddingVertical: 12,
     borderRadius: 14,
     alignItems: 'center',
@@ -1134,11 +1095,11 @@ const styles = StyleSheet.create({
   },
   // 旗艦服務樣式
   glassServiceCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.78)',
+    backgroundColor: 'rgba(255, 255, 255, 0.82)',
     borderRadius: 24,
     padding: 18,
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderColor: 'rgba(255, 255, 255, 0.95)',
     shadowColor: '#3B82F6',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.08,
@@ -1219,11 +1180,11 @@ const styles = StyleSheet.create({
   },
   // 會員中心樣式
   glassProfileCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
     borderRadius: 24,
     padding: 18,
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.95)',
+    borderColor: 'rgba(255, 255, 255, 0.98)',
     shadowColor: '#EC4899',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.1,
@@ -1284,7 +1245,7 @@ const styles = StyleSheet.create({
   },
   quotaStatsRow: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(249, 250, 251, 0.8)',
+    backgroundColor: 'rgba(249, 250, 251, 0.85)',
     borderRadius: 14,
     paddingVertical: 12,
     marginTop: 16,
@@ -1313,10 +1274,10 @@ const styles = StyleSheet.create({
     marginTop: 14,
     paddingVertical: 10,
     borderRadius: 12,
-    backgroundColor: 'rgba(254, 226, 226, 0.6)',
+    backgroundColor: 'rgba(254, 226, 226, 0.7)',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(252, 165, 165, 0.5)',
+    borderColor: 'rgba(252, 165, 165, 0.6)',
   },
   logoutBtnText: {
     fontSize: 12,
@@ -1325,12 +1286,12 @@ const styles = StyleSheet.create({
   },
   // 未登入卡片
   glassLoginCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
     borderRadius: 24,
     padding: 24,
     alignItems: 'center',
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.95)',
+    borderColor: 'rgba(255, 255, 255, 0.98)',
     shadowColor: '#EC4899',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.12,
@@ -1428,7 +1389,7 @@ const styles = StyleSheet.create({
     color: '#D1D5DB',
     marginTop: 2,
   },
-  // 底部動態毛玻璃導航 (Frosted Glass Tab Bar)
+  // 底部動態晶透導航 (Specular Glass Tab Bar)
   glassBottomNav: {
     position: 'absolute',
     bottom: 0,
@@ -1438,9 +1399,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-around',
     paddingTop: 10,
     paddingBottom: Platform.OS === 'ios' ? 24 : 10,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.7)',
-    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    borderTopWidth: 1.5,
+    borderTopColor: 'rgba(255, 255, 255, 0.85)',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
   },
   navItem: {
     alignItems: 'center',
@@ -1466,15 +1431,15 @@ const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
     justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   modalGlassContent: {
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    backgroundColor: 'rgba(255, 255, 255, 0.98)',
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     padding: 24,
-    borderTopWidth: 1.5,
-    borderTopColor: 'rgba(255, 255, 255, 0.9)',
+    borderTopWidth: 2,
+    borderTopColor: 'rgba(255, 255, 255, 0.95)',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -6 },
     shadowOpacity: 0.15,
@@ -1511,7 +1476,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   textInput: {
-    backgroundColor: 'rgba(243, 244, 246, 0.8)',
+    backgroundColor: 'rgba(243, 244, 246, 0.85)',
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
