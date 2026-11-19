@@ -8,7 +8,7 @@ on:
 jobs:
   build-ipa:
     name: Build Unsigned IPA for iOS
-    runs-on: macos-15-intel
+    runs-on: macos-26
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,6 +36,8 @@ jobs:
           WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
           SCHEME=$(basename "$WORKSPACE" .xcworkspace)
           echo "Building workspace: $WORKSPACE with scheme: $SCHEME"
+          xcodebuild -version
+          set -o pipefail
           xcodebuild -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
             -sdk iphoneos \
@@ -45,7 +47,11 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
-            archive
+            archive 2>&1 | tee xcodebuild.log || {
+              echo "========== XCODEBUILD ERRORS =========="
+              grep -E "(error:|fatal error:|BUILD FAILED|ARCHIVE FAILED)" xcodebuild.log | tail -n 50
+              exit 65
+            }
 
       - name: Package IPA
         run: |
