@@ -126,6 +126,11 @@ export interface MapPOI {
   lon: number;
   distanceKm: number;
   address?: string;
+  rate?: string;
+  availableCar?: number | null;
+  availableMotor?: number | null;
+  isSelfService?: boolean;
+  hours?: string;
   category: 'gas' | 'parking' | 'dmv';
 }
 
@@ -221,101 +226,142 @@ export async function fetchNearbyPOIs(
     })).sort((a, b) => a.distanceKm - b.distanceKm);
   }
 
-  const cacheKey = `${category}:${lat.toFixed(2)}:${lon.toFixed(2)}`;
+  const cacheKey = `${category}:${lat.toFixed(3)}:${lon.toFixed(3)}`;
   const cached = poiMemoryCache[cacheKey];
-  if (cached && Date.now() - cached.ts < 15 * 60 * 1000 && cached.data.length > 0) {
+  // 停車場即時車位快取 60 秒；加油站快取 15 分鐘
+  const ttlMs = category === 'parking' ? 60 * 1000 : 15 * 60 * 1000;
+  if (cached && Date.now() - cached.ts < ttlMs && cached.data.length > 0) {
     return cached.data;
   }
 
-  // 直接從手機端使用高速 Photon ElasticSearch API（1 秒回應、不經共享機房 IP）
-  const queries =
-    category === 'gas'
-      ? ['加油站', '台灣中油', '台塑石油', '速邁樂', '全國加油站']
-      : ['停車場', '公有停車場'];
-  const maxDist = category === 'gas' ? 10 : 10;
-
-  const responses = await Promise.allSettled(
-    queries.map(async (q) => {
-      const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}&limit=20`;
-      const res = await fetch(url);
-      if (!res.ok) return [];
-      const json = await res.json();
-      return Array.isArray(json.features) ? json.features : [];
-    })
-  );
-
-  const allFeatures: any[] = [];
-  for (const r of responses) {
-    if (r.status === 'fulfilled') allFeatures.push(...r.value);
+  // 1. 停車場：優先使用政府即時停車位 & 費率 API（雙北精準至 0.1km，附真實費率與剩餘車位數）
+  if (category === 'parking') {
+    try {
+      const res = await fetch(`${API_BASE}/api/map/parking?lat=${lat}&lon=${lon}`);
+      if (res.ok) {
+        const json = await res.json();
+        const officialParks: MapPOI[] = Array.isArray(json.pois) ? json.pois : [];
+        if (officialParks.length > 0) {
+          poiMemoryCache[cacheKey] = { ts: Date.now(), data: officialParks };
+          return officialParks;
+        }
+      }
+    } catch {
+      // fallback below
+    }
   }
 
+  // 2. 加油站：並行抓取「中油官方全台 1,970+ 站精準最近距離」+「Photon 台塑/速邁樂/全國/台亞」並去重合併
   const pois: MapPOI[] = [];
   const seen = new Set<string>();
 
-  for (const feat of allFeatures) {
-    const coords = feat?.geometry?.coordinates;
-    if (!Array.isArray(coords) || coords.length < 2) continue;
-    const pLon = Number(coords[0]);
-    const pLat = Number(coords[1]);
-    const dist = haversineKm(lat, lon, pLat, pLon);
-    if (dist > maxDist) continue;
+  if (category === 'gas') {
+    const [cpcRes, photonRes] = await Promise.allSettled([
+      fetch(`${API_BASE}/api/map/gas?lat=${lat}&lon=${lon}`).then((r) => (r.ok ? r.json() : { pois: [] })),
+      Promise.allSettled(
+        ['台塑石油', '統一速邁樂', '全國加油站', '台亞加油站'].map(async (q) => {
+          const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}&limit=15`;
+          const r = await fetch(url);
+          if (!r.ok) return [];
+          const j = await r.json();
+          return Array.isArray(j.features) ? j.features : [];
+        })
+      ),
+    ]);
 
-    const props = feat.properties || {};
-    const osmVal = String(props.osm_value || '').toLowerCase();
-    let name = String(props.name || '').trim();
-    const street = String(props.street || props.district || props.city || '').trim();
-
-    if (category === 'gas') {
-      if (!name) continue;
-      if (osmVal !== 'fuel' && !/加油|中油|石油|速邁樂|福懋/.test(name)) continue;
-    } else {
-      if (!['parking', 'parking_entrance', 'parking_space', 'park'].includes(osmVal) && !name.includes('停車')) {
-        continue;
-      }
-      if (!name || name === '停車場') {
-        name = street ? `${street} 停車場` : '周邊停車場';
+    if (cpcRes.status === 'fulfilled' && Array.isArray(cpcRes.value?.pois)) {
+      for (const p of cpcRes.value.pois as MapPOI[]) {
+        const k = `${p.lat.toFixed(3)},${p.lon.toFixed(3)}`;
+        seen.add(k);
+        pois.push(p);
       }
     }
 
-    const coordKey = `${pLat.toFixed(4)},${pLon.toFixed(4)}`;
-    if (seen.has(coordKey)) continue;
-    seen.add(coordKey);
-
-    const addr = [props.city, props.district, props.street, props.housenumber].filter(Boolean).join('');
-    if (category === 'gas') {
-      const cls = classifyGasBrand(name, street);
-      pois.push({
-        id: `gas-${props.osm_id || pois.length}-${coordKey}`,
-        name,
-        brand: cls.brand,
-        brandColor: cls.color,
-        lat: pLat,
-        lon: pLon,
-        distanceKm: dist,
-        address: addr || undefined,
-        category: 'gas',
-      });
-    } else {
-      pois.push({
-        id: `park-${props.osm_id || pois.length}-${coordKey}`,
-        name,
-        brand: '停車場',
-        brandColor: '#2563EB',
-        lat: pLat,
-        lon: pLon,
-        distanceKm: dist,
-        address: addr || undefined,
-        category: 'parking',
-      });
+    if (photonRes.status === 'fulfilled') {
+      for (const sub of photonRes.value) {
+        if (sub.status !== 'fulfilled') continue;
+        for (const feat of sub.value) {
+          const coords = feat?.geometry?.coordinates;
+          if (!Array.isArray(coords) || coords.length < 2) continue;
+          const pLon = Number(coords[0]);
+          const pLat = Number(coords[1]);
+          const dist = haversineKm(lat, lon, pLat, pLon);
+          if (dist > 10) continue;
+          const props = feat.properties || {};
+          const osmVal = String(props.osm_value || '').toLowerCase();
+          const name = String(props.name || '').trim();
+          if (!name) continue;
+          if (osmVal !== 'fuel' && !/加油|石油|速邁樂|福懋/.test(name)) continue;
+          const k = `${pLat.toFixed(3)},${pLon.toFixed(3)}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          const street = String(props.street || props.district || '').trim();
+          const cls = classifyGasBrand(name, street);
+          const addr = [props.city, props.district, props.street, props.housenumber].filter(Boolean).join('');
+          pois.push({
+            id: `gas-p-${props.osm_id || pois.length}-${k}`,
+            name,
+            brand: cls.brand,
+            brandColor: cls.color,
+            lat: pLat,
+            lon: pLon,
+            distanceKm: dist,
+            address: addr || undefined,
+            category: 'gas',
+          });
+        }
+      }
     }
+
+    pois.sort((a, b) => a.distanceKm - b.distanceKm);
+    const finalGas = pois.slice(0, 35);
+    if (finalGas.length > 0) {
+      poiMemoryCache[cacheKey] = { ts: Date.now(), data: finalGas };
+    }
+    return finalGas;
+  }
+
+  // 3. 雙北以外縣市的停車場備援（Photon）
+  try {
+    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent('停車場')}&lat=${lat}&lon=${lon}&limit=25`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const json = await res.json();
+      for (const feat of Array.isArray(json.features) ? json.features : []) {
+        const coords = feat?.geometry?.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) continue;
+        const pLon = Number(coords[0]);
+        const pLat = Number(coords[1]);
+        const dist = haversineKm(lat, lon, pLat, pLon);
+        if (dist > 8) continue;
+        const props = feat.properties || {};
+        const name = String(props.name || '').trim() || '周邊停車場';
+        const k = `${pLat.toFixed(4)},${pLon.toFixed(4)}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        pois.push({
+          id: `park-p-${props.osm_id || pois.length}-${k}`,
+          name,
+          brand: '停車場',
+          brandColor: '#2563EB',
+          lat: pLat,
+          lon: pLon,
+          distanceKm: dist,
+          address: [props.city, props.district, props.street].filter(Boolean).join('') || undefined,
+          category: 'parking',
+        });
+      }
+    }
+  } catch {
+    // ignore
   }
 
   pois.sort((a, b) => a.distanceKm - b.distanceKm);
-  const finalPois = pois.slice(0, 35);
-  if (finalPois.length > 0) {
-    poiMemoryCache[cacheKey] = { ts: Date.now(), data: finalPois };
+  const finalParks = pois.slice(0, 30);
+  if (finalParks.length > 0) {
+    poiMemoryCache[cacheKey] = { ts: Date.now(), data: finalParks };
   }
-  return finalPois;
+  return finalParks;
 }
 
 export async function fetchLiveTraffic(): Promise<LiveTrafficData> {

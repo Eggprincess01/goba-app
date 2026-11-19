@@ -122,9 +122,10 @@ const STORAGE_KEYS = {
   USER: 'goba_user_profile',
   REGION: 'goba_selected_region_v1',
   PREFS: 'goba_account_prefs_v1',
-  VEHICLES: 'goba_vehicles_v2',
-  REFUELS: 'goba_refuels_v2',
-  MAINTS: 'goba_maints_v2',
+  VEHICLES: 'goba_vehicles_v1',
+  VEHICLES_LEGACY_V2: 'goba_vehicles_v2',
+  REFUELS: 'goba_refuels_v1',
+  MAINTS: 'goba_maints_v1',
 };
 
 const DEFAULT_PREFS: AccountPrefs = {
@@ -399,13 +400,14 @@ export default function App() {
     const bootstrap = async () => {
       let initialRegion = TAIWAN_REGIONS[3];
       try {
-        const [savedToken, savedUser, savedRegion, savedPrefs, savedVehicles, savedRefuels, savedMaints] =
+        const [savedToken, savedUser, savedRegion, savedPrefs, savedV1, savedV2, savedRefuels, savedMaints] =
           await Promise.all([
             AsyncStorage.getItem(STORAGE_KEYS.TOKEN),
             AsyncStorage.getItem(STORAGE_KEYS.USER),
             AsyncStorage.getItem(STORAGE_KEYS.REGION),
             AsyncStorage.getItem(STORAGE_KEYS.PREFS),
             AsyncStorage.getItem(STORAGE_KEYS.VEHICLES),
+            AsyncStorage.getItem(STORAGE_KEYS.VEHICLES_LEGACY_V2),
             AsyncStorage.getItem(STORAGE_KEYS.REFUELS),
             AsyncStorage.getItem(STORAGE_KEYS.MAINTS),
           ]);
@@ -418,8 +420,14 @@ export default function App() {
           setPrefs(parsedPrefs);
           setRefuelFuelType(parsedPrefs.preferredFuel);
         }
-        if (savedVehicles) {
-          const parsedV: VehicleItem[] = JSON.parse(savedVehicles);
+        const rawVehicles = savedV1 || savedV2;
+        if (rawVehicles) {
+          const parsedV: VehicleItem[] = JSON.parse(rawVehicles).map((v: any) => ({
+            ...v,
+            manufactureYM: v.manufactureYM || '',
+            lastInspectionDate: v.lastInspectionDate || '',
+            insuranceExpiry: v.insuranceExpiry || '',
+          }));
           if (parsedV.length > 0) {
             setVehicles(parsedV);
             setRefuelVehicleId(parsedV[0].id);
@@ -1155,17 +1163,23 @@ export default function App() {
                 showsMyLocationButton={false}
                 showsTraffic={mapCategory === 'traffic'}
               >
-                {mapCategory !== 'traffic' &&
-                  visibleMapPois.map((poi) => (
-                    <Marker
-                      key={poi.id}
-                      coordinate={{ latitude: poi.lat, longitude: poi.lon }}
-                      title={poi.name}
-                      description={`${poi.brand} • 距離 ${poi.distanceKm} km`}
-                      pinColor={poi.brandColor}
-                      onPress={() => setSelectedPoi(poi)}
-                    />
-                  ))}
+              {mapCategory !== 'traffic' &&
+                  visibleMapPois
+                    .filter((p) => p.category === mapCategory)
+                    .map((poi) => (
+                      <Marker
+                        key={poi.id}
+                        coordinate={{ latitude: poi.lat, longitude: poi.lon }}
+                        title={poi.name}
+                        description={
+                          poi.category === 'parking'
+                            ? `${poi.brand}${poi.rate ? ` • ${poi.rate}` : ''} • ${poi.distanceKm} km`
+                            : `${poi.brand} • 距離 ${poi.distanceKm} km`
+                        }
+                        pinColor={poi.brandColor}
+                        onPress={() => setSelectedPoi(poi)}
+                      />
+                    ))}
                 {mapCategory === 'traffic' &&
                   (trafficData?.incidents || [])
                     .filter((inc) => inc.lat && inc.lon)
@@ -1258,44 +1272,63 @@ export default function App() {
                   showsVerticalScrollIndicator={false}
                   contentContainerStyle={{ paddingBottom: 110, gap: 8 }}
                 >
-                  {visibleMapPois.length === 0 ? (
+                  {visibleMapPois.filter((p) => p.category === mapCategory).length === 0 ? (
                     <Text style={styles.emptyText}>此篩選條件下暫無站點，可切換「全部」或更換地區</Text>
                   ) : (
-                    visibleMapPois.map((poi) => {
-                      const isSel = selectedPoi?.id === poi.id;
-                      return (
-                        <TouchableOpacity key={poi.id} activeOpacity={0.82} onPress={() => focusPoiOnMap(poi)}>
-                          <BlurView
-                            intensity={68}
-                            tint="light"
-                            style={[styles.poiRowCard, isSel && styles.poiRowCardSelected]}
-                          >
-                            <View style={{ flex: 1 }}>
-                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                                <View style={[styles.poiBrandPill, { backgroundColor: `${poi.brandColor}18` }]}>
-                                  <Text style={[styles.poiBrandText, { color: poi.brandColor }]}>
-                                    {poi.brand}
-                                  </Text>
+                    visibleMapPois
+                      .filter((p) => p.category === mapCategory)
+                      .map((poi) => {
+                        const isSel = selectedPoi?.id === poi.id;
+                        return (
+                          <TouchableOpacity key={poi.id} activeOpacity={0.82} onPress={() => focusPoiOnMap(poi)}>
+                            <BlurView
+                              intensity={68}
+                              tint="light"
+                              style={[styles.poiRowCard, isSel && styles.poiRowCardSelected]}
+                            >
+                              <View style={{ flex: 1 }}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                                  <View style={[styles.poiBrandPill, { backgroundColor: `${poi.brandColor}18` }]}>
+                                    <Text style={[styles.poiBrandText, { color: poi.brandColor }]}>
+                                      {poi.brand}
+                                    </Text>
+                                  </View>
+                                  {poi.availableMotor != null && poi.availableMotor >= 0 && (
+                                    <View style={[styles.poiBrandPill, { backgroundColor: '#FCE7F3' }]}>
+                                      <Text style={[styles.poiBrandText, { color: '#BE185D' }]}>
+                                        機車剩 {poi.availableMotor} 位
+                                      </Text>
+                                    </View>
+                                  )}
+                                  {poi.isSelfService && (
+                                    <View style={[styles.poiBrandPill, { backgroundColor: '#FEF3C7' }]}>
+                                      <Text style={[styles.poiBrandText, { color: '#B45309' }]}>刷卡自助</Text>
+                                    </View>
+                                  )}
+                                  <Text style={styles.poiDistText}>{poi.distanceKm} km</Text>
                                 </View>
-                                <Text style={styles.poiDistText}>{poi.distanceKm} km</Text>
-                              </View>
-                              <Text style={styles.poiNameText} numberOfLines={1}>
-                                {poi.name}
-                              </Text>
-                              {poi.address ? (
-                                <Text style={styles.poiAddrText} numberOfLines={1}>
-                                  {poi.address}
+                                <Text style={styles.poiNameText} numberOfLines={1}>
+                                  {poi.name}
                                 </Text>
-                              ) : null}
-                            </View>
-                            <TouchableOpacity style={styles.poiNavBtn} onPress={() => openPoiNavigation(poi)}>
-                              <Ionicons name="navigate" size={14} color="#FFF" />
-                              <Text style={styles.poiNavBtnText}>導航</Text>
-                            </TouchableOpacity>
-                          </BlurView>
-                        </TouchableOpacity>
-                      );
-                    })
+                                {poi.rate ? (
+                                  <Text style={styles.poiRateText} numberOfLines={2}>
+                                    💰 {poi.rate}
+                                  </Text>
+                                ) : null}
+                                {poi.address ? (
+                                  <Text style={styles.poiAddrText} numberOfLines={1}>
+                                    {poi.address}
+                                  </Text>
+                                ) : null}
+                              </View>
+                              <TouchableOpacity style={styles.poiNavBtn} onPress={() => openPoiNavigation(poi)}>
+                                <Ionicons name="navigate" size={14} color="#FFF" />
+                                <Text style={styles.poiNavBtnText}>導航</Text>
+                              </TouchableOpacity>
+                            </BlurView>
+                          </TouchableOpacity>
+                        );
+                      })
                   )}
                 </ScrollView>
               )}
@@ -2966,6 +2999,7 @@ const styles = StyleSheet.create({
   poiBrandText: { fontSize: 10, fontWeight: '800' },
   poiDistText: { fontSize: 11, fontWeight: '700', color: '#7C6270' },
   poiNameText: { fontSize: 14, fontWeight: '800', color: '#3B1525', marginTop: 3 },
+  poiRateText: { fontSize: 11, fontWeight: '700', color: '#9D174D', marginTop: 2 },
   poiAddrText: { fontSize: 11, color: '#7C6270', marginTop: 2 },
   poiNavBtn: {
     flexDirection: 'row',
