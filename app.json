@@ -11,7 +11,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.mmlovenn.goba",
       "infoPlist": {
-        "CFBundleDisplayName": "鍋巴 GOBA"
+        "CFBundleDisplayName": "鍋巴 GOBA",
+        "NSLocationWhenInUseUsageDescription": "鍋巴 GOBA 需要取用您的位置，以自動提供所在地區的天氣、空氣品質，並在地圖中顯示附近的加油站、停車場與即時路況。"
       }
     },
     "android": {

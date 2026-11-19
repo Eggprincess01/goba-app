@@ -1,18 +1,62 @@
 export const API_BASE = 'https://mmlovenn.com';
 
-export interface CityInfo {
+export interface RegionInfo {
   name: string;
   lat: number;
   lon: number;
+  isGps?: boolean;
 }
 
-export const TAIWAN_CITIES: CityInfo[] = [
-  { name: '新北市 林口', lat: 25.0774, lon: 121.3772 },
-  { name: '台北市 信義', lat: 25.0330, lon: 121.5654 },
-  { name: '桃園市 中壢', lat: 24.9650, lon: 121.2248 },
-  { name: '台中市 西屯', lat: 24.1631, lon: 120.6406 },
-  { name: '台南市 東區', lat: 22.9804, lon: 120.2252 },
-  { name: '高雄市 左營', lat: 22.6889, lon: 120.2929 },
+export const TAIWAN_REGIONS: RegionInfo[] = [
+  { name: '基隆市', lat: 25.1276, lon: 121.7392 },
+  { name: '台北市', lat: 25.0330, lon: 121.5654 },
+  { name: '新北市', lat: 25.0120, lon: 121.4657 },
+  { name: '新北市 林口區', lat: 25.0774, lon: 121.3772 },
+  { name: '桃園市', lat: 24.9936, lon: 121.3010 },
+  { name: '新竹市', lat: 24.8138, lon: 120.9675 },
+  { name: '新竹縣', lat: 24.8387, lon: 121.0177 },
+  { name: '苗栗縣', lat: 24.5602, lon: 120.8214 },
+  { name: '台中市', lat: 24.1477, lon: 120.6736 },
+  { name: '彰化縣', lat: 24.0518, lon: 120.5161 },
+  { name: '南投縣', lat: 23.9609, lon: 120.9719 },
+  { name: '雲林縣', lat: 23.7092, lon: 120.4313 },
+  { name: '嘉義市', lat: 23.4801, lon: 120.4491 },
+  { name: '嘉義縣', lat: 23.4518, lon: 120.2555 },
+  { name: '台南市', lat: 22.9997, lon: 120.2270 },
+  { name: '高雄市', lat: 22.6273, lon: 120.3014 },
+  { name: '屏東縣', lat: 22.6690, lon: 120.4861 },
+  { name: '宜蘭縣', lat: 24.7570, lon: 121.7530 },
+  { name: '花蓮縣', lat: 23.9872, lon: 121.6015 },
+  { name: '台東縣', lat: 22.7583, lon: 121.1444 },
+  { name: '澎湖縣', lat: 23.5711, lon: 119.5793 },
+  { name: '金門縣', lat: 24.4493, lon: 118.3767 },
+  { name: '連江縣', lat: 26.1505, lon: 119.9499 },
+];
+
+export interface CarTypeOption {
+  apiValue: string;
+  label: string;
+  shortTag: string;
+  plateBg: string;
+  plateText: string;
+  plateBorder: string;
+}
+
+export const PLATE_CAR_TYPES: CarTypeOption[] = [
+  { apiValue: '普通重型機車', label: '普通重型機車 (白牌)', shortTag: '白牌', plateBg: '#FFFFFF', plateText: '#111827', plateBorder: '#374151' },
+  { apiValue: '550cc以下重機', label: '大型重機 250~550cc (黃牌)', shortTag: '黃牌', plateBg: '#FACC15', plateText: '#111827', plateBorder: '#CA8A04' },
+  { apiValue: '550cc以上重機', label: '大型重機 550cc+ (紅牌)', shortTag: '紅牌', plateBg: '#DC2626', plateText: '#FFFFFF', plateBorder: '#991B1B' },
+  { apiValue: '自用小客貨車', label: '自用小客貨車 (汽車)', shortTag: '汽車', plateBg: '#FFFFFF', plateText: '#111827', plateBorder: '#1E293B' },
+  { apiValue: '電動普通重型機車', label: '電動普通重機 (白牌電動)', shortTag: '電動白', plateBg: '#FFFFFF', plateText: '#111827', plateBorder: '#10B981' },
+  { apiValue: '電動普通輕型機車', label: '電動輕型機車 (綠牌電動)', shortTag: '綠牌', plateBg: '#16A34A', plateText: '#FFFFFF', plateBorder: '#15803D' },
+  { apiValue: '電動自小客', label: '電動自小客車', shortTag: '電動車', plateBg: '#FFFFFF', plateText: '#111827', plateBorder: '#10B981' },
+  { apiValue: '微型電動二輪車', label: '微型電動二輪車', shortTag: '微電', plateBg: '#FFFFFF', plateText: '#16A34A', plateBorder: '#16A34A' },
+  { apiValue: '租賃小客貨車', label: '租賃小客貨車', shortTag: '租賃', plateBg: '#FFFFFF', plateText: '#111827', plateBorder: '#374151' },
+  { apiValue: '營業小客車', label: '營業小客車 (計程車)', shortTag: '營業', plateBg: '#FFFFFF', plateText: '#DC2626', plateBorder: '#DC2626' },
+  { apiValue: '營業小貨車', label: '營業小貨車', shortTag: '營業貨', plateBg: '#16A34A', plateText: '#FFFFFF', plateBorder: '#15803D' },
+  { apiValue: '電動租賃車', label: '電動租賃車', shortTag: '電動租', plateBg: '#FFFFFF', plateText: '#111827', plateBorder: '#10B981' },
+  { apiValue: '自用大貨車', label: '自用大貨車', shortTag: '大貨', plateBg: '#FFFFFF', plateText: '#16A34A', plateBorder: '#16A34A' },
+  { apiValue: '營業大貨車', label: '營業大貨車', shortTag: '營大貨', plateBg: '#16A34A', plateText: '#FFFFFF', plateBorder: '#15803D' },
 ];
 
 export interface LiveWeather {
@@ -40,7 +84,6 @@ export interface LiveOilPrices {
   price98: string;
   priceDiesel: string;
   updateDate: string;
-  trendText: string;
 }
 
 export interface UserProfile {
@@ -72,6 +115,145 @@ export interface ExamSlot {
   candidate_type_name?: string;
   notes?: string;
   is_full?: boolean;
+}
+
+export interface MapPOI {
+  id: string;
+  name: string;
+  brand: string;
+  brandColor: string;
+  lat: number;
+  lon: number;
+  distanceKm: number;
+  address?: string;
+  category: 'gas' | 'parking' | 'dmv';
+}
+
+const TAIWAN_DMV_STATIONS = [
+  { name: '臺北市區監理所', lat: 25.0507, lon: 121.5528, address: '臺北市松山區八德路四段21號' },
+  { name: '士林監理站', lat: 25.0865, lon: 121.5221, address: '臺北市士林區承德路五段80號' },
+  { name: '臺北區監理所 (樹林)', lat: 25.0029, lon: 121.4253, address: '新北市樹林區中正路248巷7號' },
+  { name: '板橋監理站', lat: 25.0056, lon: 121.4832, address: '新北市中和區中山路三段116號' },
+  { name: '蘆洲監理站', lat: 25.0846, lon: 121.4648, address: '新北市蘆洲區中山二路163號' },
+  { name: '基隆監理站', lat: 25.0933, lon: 121.7145, address: '基隆市七堵區實踐路296號' },
+  { name: '桃園監理站', lat: 24.9803, lon: 121.3189, address: '桃園市桃園區介壽路416號' },
+  { name: '中壢監理站', lat: 24.9562, lon: 121.2279, address: '桃園市中壢區延平路394號' },
+  { name: '新竹市監理站', lat: 24.8058, lon: 120.9805, address: '新竹市東區自由路10號' },
+  { name: '臺中區監理所', lat: 24.1604, lon: 120.5782, address: '臺中市大肚區遊園路一段2號' },
+  { name: '臺中市監理站', lat: 24.1645, lon: 120.6923, address: '臺中市北屯區北屯路77號' },
+  { name: '彰化監理站', lat: 24.0221, lon: 120.5488, address: '彰化縣花壇鄉中山路二段457號' },
+  { name: '臺南監理站', lat: 22.9765, lon: 120.2219, address: '臺南市東區崇德路1號' },
+  { name: '高雄市區監理所', lat: 22.7232, lon: 120.3054, address: '高雄市楠梓區德民路71號' },
+  { name: '高雄區監理所 (鳳山)', lat: 22.6251, lon: 120.3471, address: '高雄市鳳山區武營路361號' },
+  { name: '宜蘭監理站', lat: 24.6951, lon: 121.7662, address: '宜蘭縣五結鄉中正路二段9號' },
+  { name: '花蓮監理站', lat: 23.9708, lon: 121.5841, address: '花蓮縣吉安鄉中正路二段152號' },
+  { name: '臺東監理站', lat: 22.7538, lon: 121.1391, address: '臺東縣臺東市正氣北路441號' },
+];
+
+export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return Number((R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(2));
+}
+
+function classifyGasBrand(name: string, brandTag: string): { brand: string; color: string } {
+  const combined = `${name} ${brandTag}`.toLowerCase();
+  if (combined.includes('中油') || combined.includes('cpc')) {
+    return { brand: '台灣中油', color: '#2563EB' };
+  }
+  if (combined.includes('統一') || combined.includes('速邁樂') || combined.includes('smile')) {
+    return { brand: '統一速邁樂', color: '#F97316' };
+  }
+  if (combined.includes('台塑') || combined.includes('formosa') || combined.includes('福懋')) {
+    return { brand: '台塑石油', color: '#DC2626' };
+  }
+  if (combined.includes('台亞')) {
+    return { brand: '台亞石油', color: '#7C3AED' };
+  }
+  if (combined.includes('全國')) {
+    return { brand: '全國加油站', color: '#16A34A' };
+  }
+  if (combined.includes('山隆')) {
+    return { brand: '山隆加油站', color: '#0D9488' };
+  }
+  return { brand: '其他加油站', color: '#6B7280' };
+}
+
+export async function fetchNearbyPOIs(
+  lat: number,
+  lon: number,
+  category: 'gas' | 'parking' | 'dmv'
+): Promise<MapPOI[]> {
+  if (category === 'dmv') {
+    return TAIWAN_DMV_STATIONS.map((s, idx) => ({
+      id: `dmv-${idx}`,
+      name: s.name,
+      brand: '公路局監理站',
+      brandColor: '#DB2777',
+      lat: s.lat,
+      lon: s.lon,
+      distanceKm: haversineKm(lat, lon, s.lat, s.lon),
+      address: s.address,
+      category: 'dmv' as const,
+    })).sort((a, b) => a.distanceKm - b.distanceKm);
+  }
+
+  const radius = category === 'gas' ? 5000 : 2500;
+  const amenity = category === 'gas' ? 'fuel' : 'parking';
+  const query = `[out:json][timeout:12];(node["amenity"="${amenity}"](around:${radius},${lat},${lon});way["amenity"="${amenity}"](around:${radius},${lat},${lon}););out center 40;`;
+  const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Overpass API error');
+  const data = await res.json();
+  const elements: any[] = Array.isArray(data.elements) ? data.elements : [];
+
+  const pois: MapPOI[] = [];
+  for (const el of elements) {
+    const pLat = el.lat ?? el.center?.lat;
+    const pLon = el.lon ?? el.center?.lon;
+    if (!pLat || !pLon) continue;
+    const tags = el.tags || {};
+    const rawName = tags.name || tags['name:zh'] || (category === 'gas' ? '加油站' : '停車場');
+    const brandTag = tags.brand || tags.operator || '';
+    const addr = [tags['addr:city'], tags['addr:district'], tags['addr:street'], tags['addr:housenumber']]
+      .filter(Boolean)
+      .join('');
+
+    if (category === 'gas') {
+      const cls = classifyGasBrand(rawName, brandTag);
+      pois.push({
+        id: `gas-${el.id}`,
+        name: rawName,
+        brand: cls.brand,
+        brandColor: cls.color,
+        lat: pLat,
+        lon: pLon,
+        distanceKm: haversineKm(lat, lon, pLat, pLon),
+        address: addr || undefined,
+        category: 'gas',
+      });
+    } else {
+      pois.push({
+        id: `park-${el.id}`,
+        name: rawName,
+        brand: tags.fee === 'no' ? '免費停車' : '收費停車場',
+        brandColor: '#2563EB',
+        lat: pLat,
+        lon: pLon,
+        distanceKm: haversineKm(lat, lon, pLat, pLon),
+        address: addr || undefined,
+        category: 'parking',
+      });
+    }
+  }
+
+  return pois.sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 35);
 }
 
 function mapWmoCode(code: number): { desc: string; icon: string } {
@@ -144,22 +326,12 @@ export async function fetchLiveOilPrices(): Promise<LiveOilPrices> {
   const res = await fetch('https://www.cpc.com.tw/GetOilPriceJson.aspx?type=TodayOilPriceString');
   if (!res.ok) throw new Error('CPC Oil API error');
   const data = await res.json();
-  const rawHtml = String(data.UpOrDown_Html || '');
-  let trendText = '本週油價已同步中油最新牌價';
-  if (rawHtml.includes('down')) {
-    trendText = '本週中油汽油調降，適合順路加滿！';
-  } else if (rawHtml.includes('up')) {
-    trendText = '本週中油汽油調漲，可留意自助加油折扣！';
-  } else if (rawHtml.includes('same')) {
-    trendText = '本週中油汽油價格持平！';
-  }
   return {
-    price92: String(data.sPrice1 || '31.2'),
-    price95: String(data.sPrice2 || '32.7'),
-    price98: String(data.sPrice3 || '34.7'),
-    priceDiesel: String(data.sPrice5 || '29.9'),
-    updateDate: String(data.PriceUpdate || '最新'),
-    trendText,
+    price92: String(data.sPrice1 || '--'),
+    price95: String(data.sPrice2 || '--'),
+    price98: String(data.sPrice3 || '--'),
+    priceDiesel: String(data.sPrice5 || '--'),
+    updateDate: String(data.PriceUpdate || ''),
   };
 }
 
