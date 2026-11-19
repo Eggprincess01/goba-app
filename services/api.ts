@@ -129,6 +129,33 @@ export interface MapPOI {
   category: 'gas' | 'parking' | 'dmv';
 }
 
+export interface TrafficIncident {
+  id: string;
+  type: string;
+  title: string;
+  detail: string;
+  freeway: string;
+  time: string;
+  lat: number | null;
+  lon: number | null;
+}
+
+export interface TrafficSpeed {
+  id: string;
+  road: string;
+  section: string;
+  speed: number;
+  status: string;
+  color: string;
+}
+
+export interface LiveTrafficData {
+  updated_at: string;
+  source: string;
+  incidents: TrafficIncident[];
+  speeds: TrafficSpeed[];
+}
+
 const TAIWAN_DMV_STATIONS = [
   { name: '臺北市區監理所', lat: 25.0507, lon: 121.5528, address: '臺北市松山區八德路四段21號' },
   { name: '士林監理站', lat: 25.0865, lon: 121.5221, address: '臺北市士林區承德路五段80號' },
@@ -161,28 +188,19 @@ export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: numb
   return Number((R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(2));
 }
 
-function classifyGasBrand(name: string, brandTag: string): { brand: string; color: string } {
-  const combined = `${name} ${brandTag}`.toLowerCase();
-  if (combined.includes('中油') || combined.includes('cpc')) {
-    return { brand: '台灣中油', color: '#2563EB' };
-  }
-  if (combined.includes('統一') || combined.includes('速邁樂') || combined.includes('smile')) {
-    return { brand: '統一速邁樂', color: '#F97316' };
-  }
-  if (combined.includes('台塑') || combined.includes('formosa') || combined.includes('福懋')) {
-    return { brand: '台塑石油', color: '#DC2626' };
-  }
-  if (combined.includes('台亞')) {
-    return { brand: '台亞石油', color: '#7C3AED' };
-  }
-  if (combined.includes('全國')) {
-    return { brand: '全國加油站', color: '#16A34A' };
-  }
-  if (combined.includes('山隆')) {
-    return { brand: '山隆加油站', color: '#0D9488' };
-  }
+function classifyGasBrand(name: string, extraTag: string): { brand: string; color: string } {
+  const combined = `${name} ${extraTag}`.toLowerCase();
+  if (combined.includes('中油') || combined.includes('cpc')) return { brand: '台灣中油', color: '#2563EB' };
+  if (combined.includes('統一') || combined.includes('速邁樂') || combined.includes('smile')) return { brand: '統一速邁樂', color: '#F97316' };
+  if (combined.includes('台塑') || combined.includes('formosa') || combined.includes('福懋')) return { brand: '台塑石油', color: '#DC2626' };
+  if (combined.includes('台亞')) return { brand: '台亞石油', color: '#7C3AED' };
+  if (combined.includes('全國')) return { brand: '全國加油站', color: '#16A34A' };
+  if (combined.includes('山隆')) return { brand: '山隆加油站', color: '#0D9488' };
   return { brand: '其他加油站', color: '#6B7280' };
 }
+
+// 記憶體快取（避免重複查詢導致站點閃爍或消失）
+const poiMemoryCache: Record<string, { ts: number; data: MapPOI[] }> = {};
 
 export async function fetchNearbyPOIs(
   lat: number,
@@ -203,57 +221,174 @@ export async function fetchNearbyPOIs(
     })).sort((a, b) => a.distanceKm - b.distanceKm);
   }
 
-  const radius = category === 'gas' ? 5000 : 2500;
-  const amenity = category === 'gas' ? 'fuel' : 'parking';
-  const query = `[out:json][timeout:12];(node["amenity"="${amenity}"](around:${radius},${lat},${lon});way["amenity"="${amenity}"](around:${radius},${lat},${lon}););out center 40;`;
-  const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+  const cacheKey = `${category}:${lat.toFixed(2)}:${lon.toFixed(2)}`;
+  const cached = poiMemoryCache[cacheKey];
+  if (cached && Date.now() - cached.ts < 15 * 60 * 1000 && cached.data.length > 0) {
+    return cached.data;
+  }
 
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('Overpass API error');
-  const data = await res.json();
-  const elements: any[] = Array.isArray(data.elements) ? data.elements : [];
+  // 直接從手機端使用高速 Photon ElasticSearch API（1 秒回應、不經共享機房 IP）
+  const queries =
+    category === 'gas'
+      ? ['加油站', '台灣中油', '台塑石油', '速邁樂', '全國加油站']
+      : ['停車場', '公有停車場'];
+  const maxDist = category === 'gas' ? 10 : 10;
+
+  const responses = await Promise.allSettled(
+    queries.map(async (q) => {
+      const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}&limit=20`;
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const json = await res.json();
+      return Array.isArray(json.features) ? json.features : [];
+    })
+  );
+
+  const allFeatures: any[] = [];
+  for (const r of responses) {
+    if (r.status === 'fulfilled') allFeatures.push(...r.value);
+  }
 
   const pois: MapPOI[] = [];
-  for (const el of elements) {
-    const pLat = el.lat ?? el.center?.lat;
-    const pLon = el.lon ?? el.center?.lon;
-    if (!pLat || !pLon) continue;
-    const tags = el.tags || {};
-    const rawName = tags.name || tags['name:zh'] || (category === 'gas' ? '加油站' : '停車場');
-    const brandTag = tags.brand || tags.operator || '';
-    const addr = [tags['addr:city'], tags['addr:district'], tags['addr:street'], tags['addr:housenumber']]
-      .filter(Boolean)
-      .join('');
+  const seen = new Set<string>();
+
+  for (const feat of allFeatures) {
+    const coords = feat?.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+    const pLon = Number(coords[0]);
+    const pLat = Number(coords[1]);
+    const dist = haversineKm(lat, lon, pLat, pLon);
+    if (dist > maxDist) continue;
+
+    const props = feat.properties || {};
+    const osmVal = String(props.osm_value || '').toLowerCase();
+    let name = String(props.name || '').trim();
+    const street = String(props.street || props.district || props.city || '').trim();
 
     if (category === 'gas') {
-      const cls = classifyGasBrand(rawName, brandTag);
+      if (!name) continue;
+      if (osmVal !== 'fuel' && !/加油|中油|石油|速邁樂|福懋/.test(name)) continue;
+    } else {
+      if (!['parking', 'parking_entrance', 'parking_space', 'park'].includes(osmVal) && !name.includes('停車')) {
+        continue;
+      }
+      if (!name || name === '停車場') {
+        name = street ? `${street} 停車場` : '周邊停車場';
+      }
+    }
+
+    const coordKey = `${pLat.toFixed(4)},${pLon.toFixed(4)}`;
+    if (seen.has(coordKey)) continue;
+    seen.add(coordKey);
+
+    const addr = [props.city, props.district, props.street, props.housenumber].filter(Boolean).join('');
+    if (category === 'gas') {
+      const cls = classifyGasBrand(name, street);
       pois.push({
-        id: `gas-${el.id}`,
-        name: rawName,
+        id: `gas-${props.osm_id || pois.length}-${coordKey}`,
+        name,
         brand: cls.brand,
         brandColor: cls.color,
         lat: pLat,
         lon: pLon,
-        distanceKm: haversineKm(lat, lon, pLat, pLon),
+        distanceKm: dist,
         address: addr || undefined,
         category: 'gas',
       });
     } else {
       pois.push({
-        id: `park-${el.id}`,
-        name: rawName,
-        brand: tags.fee === 'no' ? '免費停車' : '收費停車場',
+        id: `park-${props.osm_id || pois.length}-${coordKey}`,
+        name,
+        brand: '停車場',
         brandColor: '#2563EB',
         lat: pLat,
         lon: pLon,
-        distanceKm: haversineKm(lat, lon, pLat, pLon),
+        distanceKm: dist,
         address: addr || undefined,
         category: 'parking',
       });
     }
   }
 
-  return pois.sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 35);
+  pois.sort((a, b) => a.distanceKm - b.distanceKm);
+  const finalPois = pois.slice(0, 35);
+  if (finalPois.length > 0) {
+    poiMemoryCache[cacheKey] = { ts: Date.now(), data: finalPois };
+  }
+  return finalPois;
+}
+
+export async function fetchLiveTraffic(): Promise<LiveTrafficData> {
+  const res = await fetch(`${API_BASE}/api/traffic/live`);
+  if (!res.ok) throw new Error('Traffic API error');
+  return await res.json();
+}
+
+export function calcDaysUntilDate(dateStr?: string): number | null {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr.trim())) return null;
+  const target = new Date(`${dateStr.trim()}T00:00:00`);
+  if (isNaN(target.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.ceil((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+export function calcInspectionStatus(
+  category: 'scooter' | 'car',
+  manufactureYM?: string,
+  lastInspectionDate?: string
+): { statusText: string; isDueSoon: boolean; detail: string } {
+  if (!manufactureYM || !/^\d{4}-\d{2}$/.test(manufactureYM.trim())) {
+    return {
+      statusText: '尚未設定出廠年月',
+      isDueSoon: false,
+      detail: '請點此設定出廠年月以自動計算定檢週期',
+    };
+  }
+  const [yStr, mStr] = manufactureYM.trim().split('-');
+  const mYear = parseInt(yStr, 10);
+  const mMonth = parseInt(mStr, 10);
+  const now = new Date();
+  const ageYears = now.getFullYear() - mYear + (now.getMonth() + 1 - mMonth) / 12;
+
+  if (ageYears < 5) {
+    const startYear = mYear + 5;
+    return {
+      statusText: '未滿 5 年（免定檢）',
+      isDueSoon: false,
+      detail: `預計 ${startYear} 年 ${mMonth} 月起需開始年度定檢`,
+    };
+  }
+
+  const periodMonths = category === 'car' && ageYears >= 10 ? 6 : 12;
+  if (lastInspectionDate && /^\d{4}-\d{2}-\d{2}$/.test(lastInspectionDate.trim())) {
+    const last = new Date(`${lastInspectionDate.trim()}T00:00:00`);
+    if (!isNaN(last.getTime())) {
+      const nextDue = new Date(last);
+      nextDue.setMonth(nextDue.getMonth() + periodMonths);
+      const nextStr = `${nextDue.getFullYear()}-${String(nextDue.getMonth() + 1).padStart(2, '0')}-${String(nextDue.getDate()).padStart(2, '0')}`;
+      const daysLeft = calcDaysUntilDate(nextStr);
+      if (daysLeft !== null) {
+        return {
+          statusText: daysLeft < 0 ? `已逾期 ${Math.abs(daysLeft)} 天` : `距下次定檢 ${daysLeft} 天`,
+          isDueSoon: daysLeft <= 30,
+          detail: `上次定檢 ${lastInspectionDate} • 下次期限 ${nextStr}`,
+        };
+      }
+    }
+  }
+
+  const ruleText =
+    category === 'scooter'
+      ? `滿 5 年每年需排氣定檢（出廠月 ${mMonth} 月前後 1 個月）`
+      : ageYears >= 10
+      ? '滿 10 年每半年需定檢 1 次'
+      : '滿 5 年每年需定檢 1 次';
+  return {
+    statusText: '需定期檢驗（未填上次日期）',
+    isDueSoon: true,
+    detail: `${ruleText}，請補填上次定檢日期`,
+  };
 }
 
 function mapWmoCode(code: number): { desc: string; icon: string } {
@@ -341,9 +476,7 @@ export async function fetchAuthMe(token: string): Promise<UserProfile | null> {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  if (data.logged_in && data.user) {
-    return data.user as UserProfile;
-  }
+  if (data.logged_in && data.user) return data.user as UserProfile;
   return null;
 }
 

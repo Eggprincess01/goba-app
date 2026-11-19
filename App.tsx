@@ -39,6 +39,7 @@ import {
   PlateResult,
   ExamSlot,
   MapPOI,
+  LiveTrafficData,
   fetchLiveWeather,
   fetchLiveAqi,
   fetchLiveOilPrices,
@@ -50,6 +51,9 @@ import {
   fetchUserFavorites,
   addUserFavorite,
   fetchNearbyPOIs,
+  fetchLiveTraffic,
+  calcDaysUntilDate,
+  calcInspectionStatus,
 } from './services/api';
 
 WebBrowser.maybeCompleteAuthSession();
@@ -68,7 +72,9 @@ interface VehicleItem {
   mileage: number;
   nextMaintKm: number;
   avgFuel: number;
-  insuranceDays: number;
+  manufactureYM?: string;      // 出廠年月 YYYY-MM
+  lastInspectionDate?: string; // 上次定檢日期 YYYY-MM-DD
+  insuranceExpiry?: string;    // 強制險到期日 YYYY-MM-DD（未設定時為空，不亂填假天數）
   accentColor: string;
 }
 
@@ -77,10 +83,20 @@ interface RefuelLog {
   vehicleId: string;
   vehicleName: string;
   date: string;
+  fuelType: FuelPref;
+  fuelLabel: string;
+  unitPrice: number;
   liters: number;
-  amount: number;
+  originalAmount: number;
+  paidAmount: number; // 若有自助折扣，則為折扣後實付金額
   odometer: number;
   kmPerLiter?: number;
+}
+
+interface MaintSubItem {
+  id: string;
+  name: string;
+  cost: number;
 }
 
 interface MaintLog {
@@ -88,8 +104,8 @@ interface MaintLog {
   vehicleId: string;
   vehicleName: string;
   date: string;
-  item: string;
-  cost: number;
+  items: MaintSubItem[];
+  totalCost: number;
   odometer: number;
 }
 
@@ -106,9 +122,9 @@ const STORAGE_KEYS = {
   USER: 'goba_user_profile',
   REGION: 'goba_selected_region_v1',
   PREFS: 'goba_account_prefs_v1',
-  VEHICLES: 'goba_vehicles_v1',
-  REFUELS: 'goba_refuels_v1',
-  MAINTS: 'goba_maints_v1',
+  VEHICLES: 'goba_vehicles_v2',
+  REFUELS: 'goba_refuels_v2',
+  MAINTS: 'goba_maints_v2',
 };
 
 const DEFAULT_PREFS: AccountPrefs = {
@@ -129,7 +145,9 @@ const DEFAULT_VEHICLES: VehicleItem[] = [
     mileage: 12860,
     nextMaintKm: 15000,
     avgFuel: 26.4,
-    insuranceDays: 45,
+    manufactureYM: '',
+    lastInspectionDate: '',
+    insuranceExpiry: '',
     accentColor: '#16A34A',
   },
   {
@@ -141,19 +159,40 @@ const DEFAULT_VEHICLES: VehicleItem[] = [
     mileage: 8320,
     nextMaintKm: 10000,
     avgFuel: 39.2,
-    insuranceDays: 28,
+    manufactureYM: '',
+    lastInspectionDate: '',
+    insuranceExpiry: '',
     accentColor: '#EC4899',
   },
 ];
 
 const GAS_BRAND_FILTERS = ['全部', '台灣中油', '台塑石油', '統一速邁樂', '全國加油站', '台亞石油', '山隆加油站'];
 
+const FUEL_OPTIONS: { key: FuelPref; label: string }[] = [
+  { key: '92', label: '92 無鉛汽油' },
+  { key: '95', label: '95 無鉛汽油' },
+  { key: '98', label: '98 無鉛汽油' },
+  { key: 'diesel', label: '超級柴油' },
+];
+
+const COMMON_MAINT_ITEMS = [
+  '更換機油',
+  '更換齒輪油',
+  '更換空氣濾網',
+  '更換前輪胎',
+  '更換後輪胎',
+  '更換煞車皮',
+  '更換電瓶',
+  '傳動清潔',
+  '火星塞',
+];
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('home');
-  const [region, setRegion] = useState<RegionInfo>(TAIWAN_REGIONS[3]); // 預設新北市林口區，可於地區設定自由更改或使用 GPS
+  const [region, setRegion] = useState<RegionInfo>(TAIWAN_REGIONS[3]);
   const [refreshing, setRefreshing] = useState(false);
 
-  // 即時真實資料狀態
+  // 即時真實資料
   const [weather, setWeather] = useState<LiveWeather | null>(null);
   const [aqi, setAqi] = useState<LiveAqi | null>(null);
   const [oilPrices, setOilPrices] = useState<LiveOilPrices | null>(null);
@@ -164,7 +203,7 @@ export default function App() {
   const [regionSearch, setRegionSearch] = useState('');
   const [gpsLoading, setGpsLoading] = useState(false);
 
-  // 登入與帳戶偏好設定
+  // 登入與帳戶偏好
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [userTasks, setUserTasks] = useState<any[]>([]);
@@ -181,35 +220,66 @@ export default function App() {
   const [refuelLogs, setRefuelLogs] = useState<RefuelLog[]>([]);
   const [maintLogs, setMaintLogs] = useState<MaintLog[]>([]);
 
-  // 內建真實地圖狀態（MapView + Overpass 多品牌加油站 / 停車場 / 路況 / 監理站）
+  // 內建真實地圖 + 高公局 1968 即時路況
   const mapRef = useRef<MapView | null>(null);
+  const poiReqIdRef = useRef(0);
   const [mapCategory, setMapCategory] = useState<MapCategory>('gas');
   const [gasBrandFilter, setGasBrandFilter] = useState('全部');
   const [mapPois, setMapPois] = useState<MapPOI[]>([]);
   const [mapLoading, setMapLoading] = useState(false);
   const [selectedPoi, setSelectedPoi] = useState<MapPOI | null>(null);
 
-  // 加油 / 保養 / 統計 / 新增車輛 Modals
+  const [trafficData, setTrafficData] = useState<LiveTrafficData | null>(null);
+  const [trafficLoading, setTrafficLoading] = useState(false);
+  const [trafficSubTab, setTrafficSubTab] = useState<'speeds' | 'incidents'>('speeds');
+
+  // 加油紀錄 Modal（含車輛下拉選單、油品下拉選單、公升/原價自動換算、自助折扣後實付）
   const [refuelModalVisible, setRefuelModalVisible] = useState(false);
-  const [selectedVehicleIdx, setSelectedVehicleIdx] = useState(0);
+  const [refuelVehicleId, setRefuelVehicleId] = useState<string>('1');
+  const [refuelVehicleDropdownOpen, setRefuelVehicleDropdownOpen] = useState(false);
+  const [refuelFuelType, setRefuelFuelType] = useState<FuelPref>('95');
+  const [refuelFuelDropdownOpen, setRefuelFuelDropdownOpen] = useState(false);
   const [refuelLiters, setRefuelLiters] = useState('');
-  const [refuelAmount, setRefuelAmount] = useState('');
+  const [refuelOriginalAmount, setRefuelOriginalAmount] = useState('');
+  const [refuelDiscountedAmount, setRefuelDiscountedAmount] = useState('');
   const [refuelKm, setRefuelKm] = useState('');
 
+  // 保養紀錄 Modal（含車輛下拉選單 + 多項目清單自由新增）
   const [maintModalVisible, setMaintModalVisible] = useState(false);
-  const [maintItem, setMaintItem] = useState('更換機油');
-  const [maintCost, setMaintCost] = useState('');
+  const [maintVehicleId, setMaintVehicleId] = useState<string>('1');
+  const [maintVehicleDropdownOpen, setMaintVehicleDropdownOpen] = useState(false);
+  const [maintDraftItems, setMaintDraftItems] = useState<MaintSubItem[]>([]);
+  const [maintCustomName, setMaintCustomName] = useState('');
+  const [maintCustomCost, setMaintCustomCost] = useState('');
   const [maintKm, setMaintKm] = useState('');
 
+  // 保險提醒管理 Modal（真實設定到期日，不再亂寫 180 天）
+  const [insuranceModalVisible, setInsuranceModalVisible] = useState(false);
+  const [insVehicleId, setInsVehicleId] = useState<string>('1');
+  const [insVehicleDropdownOpen, setInsVehicleDropdownOpen] = useState(false);
+  const [insExpiryInput, setInsExpiryInput] = useState('');
+
+  // 驗車 / 排氣定檢管理 Modal（出廠年月 + 上次定檢日期）
+  const [inspectionModalVisible, setInspectionModalVisible] = useState(false);
+  const [inspVehicleId, setInspVehicleId] = useState<string>('1');
+  const [inspVehicleDropdownOpen, setInspVehicleDropdownOpen] = useState(false);
+  const [inspMfgInput, setInspMfgInput] = useState('');
+  const [inspLastDateInput, setInspLastDateInput] = useState('');
+
+  // 油耗與歷史明細 Modal
   const [statsModalVisible, setStatsModalVisible] = useState(false);
 
+  // 新增車輛 Modal（含出廠年月、強制險到期日）
   const [addVehicleModalVisible, setAddVehicleModalVisible] = useState(false);
   const [newVehicleName, setNewVehicleName] = useState('');
   const [newVehiclePlate, setNewVehiclePlate] = useState('');
   const [newVehicleKm, setNewVehicleKm] = useState('');
+  const [newVehicleMfgYM, setNewVehicleMfgYM] = useState('');
+  const [newVehicleLastInsp, setNewVehicleLastInsp] = useState('');
+  const [newVehicleInsExpiry, setNewVehicleInsExpiry] = useState('');
   const [newVehicleCategory, setNewVehicleCategory] = useState<'scooter' | 'car'>('scooter');
 
-  // 內建真實「車牌查詢」Modal（完整 14 種車種，明確區分白牌 / 黃牌 / 紅牌 / 汽車）
+  // 內建真實「車牌查詢」Modal
   const [plateModalVisible, setPlateModalVisible] = useState(false);
   const [plateQuery, setPlateQuery] = useState('9969');
   const [selectedCarType, setSelectedCarType] = useState<CarTypeOption>(PLATE_CAR_TYPES[0]);
@@ -225,6 +295,24 @@ export default function App() {
   const [examSlots, setExamSlots] = useState<ExamSlot[]>([]);
   const [examAvailCount, setExamAvailCount] = useState(0);
   const [examLoading, setExamLoading] = useState(false);
+
+  // 依所選油品取得今日官方單價
+  const getFuelUnitPrice = useCallback(
+    (fuel: FuelPref): number => {
+      if (!oilPrices) return 0;
+      const raw =
+        fuel === '92'
+          ? oilPrices.price92
+          : fuel === '95'
+          ? oilPrices.price95
+          : fuel === '98'
+          ? oilPrices.price98
+          : oilPrices.priceDiesel;
+      const num = parseFloat(raw);
+      return isNaN(num) ? 0 : num;
+    },
+    [oilPrices]
+  );
 
   // -------------------- 載入即時天氣、AQI、中油官方牌價 --------------------
   const loadLiveData = useCallback(async (targetRegion: RegionInfo) => {
@@ -242,24 +330,43 @@ export default function App() {
     }
   }, []);
 
-  // -------------------- 載入內建地圖真實 POI --------------------
-  const loadMapPois = useCallback(async (targetRegion: RegionInfo, cat: MapCategory) => {
-    if (cat === 'traffic') {
-      setMapPois([]);
-      setSelectedPoi(null);
-      return;
-    }
-    setMapLoading(true);
-    setSelectedPoi(null);
+  // -------------------- 載入高公局 1968 即時路況 --------------------
+  const loadLiveTraffic = useCallback(async () => {
+    setTrafficLoading(true);
     try {
-      const pois = await fetchNearbyPOIs(targetRegion.lat, targetRegion.lon, cat);
-      setMapPois(pois);
+      const data = await fetchLiveTraffic();
+      setTrafficData(data);
     } catch {
-      setMapPois([]);
+      // 保留前次資料不清空
     } finally {
-      setMapLoading(false);
+      setTrafficLoading(false);
     }
   }, []);
+
+  // -------------------- 載入內建地圖真實 POI（請求 ID 保護 + 不閃退不清空） --------------------
+  const loadMapPois = useCallback(
+    async (lat: number, lon: number, cat: MapCategory) => {
+      if (cat === 'traffic') {
+        loadLiveTraffic();
+        return;
+      }
+      const reqId = ++poiReqIdRef.current;
+      setMapLoading(true);
+      try {
+        const pois = await fetchNearbyPOIs(lat, lon, cat);
+        if (reqId === poiReqIdRef.current && pois.length > 0) {
+          setMapPois(pois);
+        }
+      } catch {
+        // 失敗時保留現有站點，絕不把畫面清空
+      } finally {
+        if (reqId === poiReqIdRef.current) {
+          setMapLoading(false);
+        }
+      }
+    },
+    [loadLiveTraffic]
+  );
 
   // -------------------- 同步會員資料 --------------------
   const syncBackendAccount = useCallback(async (token: string) => {
@@ -306,8 +413,21 @@ export default function App() {
           initialRegion = JSON.parse(savedRegion);
           setRegion(initialRegion);
         }
-        if (savedPrefs) setPrefs({ ...DEFAULT_PREFS, ...JSON.parse(savedPrefs) });
-        if (savedVehicles) setVehicles(JSON.parse(savedVehicles));
+        if (savedPrefs) {
+          const parsedPrefs = { ...DEFAULT_PREFS, ...JSON.parse(savedPrefs) };
+          setPrefs(parsedPrefs);
+          setRefuelFuelType(parsedPrefs.preferredFuel);
+        }
+        if (savedVehicles) {
+          const parsedV: VehicleItem[] = JSON.parse(savedVehicles);
+          if (parsedV.length > 0) {
+            setVehicles(parsedV);
+            setRefuelVehicleId(parsedV[0].id);
+            setMaintVehicleId(parsedV[0].id);
+            setInsVehicleId(parsedV[0].id);
+            setInspVehicleId(parsedV[0].id);
+          }
+        }
         if (savedRefuels) setRefuelLogs(JSON.parse(savedRefuels));
         if (savedMaints) setMaintLogs(JSON.parse(savedMaints));
         if (savedUser) setUser(JSON.parse(savedUser));
@@ -325,11 +445,10 @@ export default function App() {
 
   useEffect(() => {
     if (activeTab === 'map') {
-      loadMapPois(region, mapCategory);
+      loadMapPois(region.lat, region.lon, mapCategory);
     }
-  }, [activeTab, mapCategory, region, loadMapPois]);
+  }, [activeTab, mapCategory, region.lat, region.lon, loadMapPois]);
 
-  // 監聽外部 Deep Link
   useEffect(() => {
     const sub = Linking.addEventListener('url', ({ url }) => handleAuthCallbackUrl(url));
     Linking.getInitialURL().then((url) => {
@@ -351,7 +470,7 @@ export default function App() {
     }
   };
 
-  // -------------------- 選擇地區 / 取用使用者 GPS 位置 --------------------
+  // -------------------- 選擇地區 / GPS 定位 --------------------
   const selectRegion = async (nextRegion: RegionInfo) => {
     setRegion(nextRegion);
     await AsyncStorage.setItem(STORAGE_KEYS.REGION, JSON.stringify(nextRegion));
@@ -363,12 +482,11 @@ export default function App() {
         {
           latitude: nextRegion.lat,
           longitude: nextRegion.lon,
-          latitudeDelta: 0.04,
-          longitudeDelta: 0.04,
+          latitudeDelta: 0.035,
+          longitudeDelta: 0.035,
         },
         450
       );
-      loadMapPois(nextRegion, mapCategory);
     }
   };
 
@@ -377,7 +495,7 @@ export default function App() {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('未開啟定位權限', '請到 iPhone「設定 ➔ 鍋巴 GOBA ➔ 位置」開啟定位權限，或從下方手動選擇您的地區。');
+        Alert.alert('未開啟定位權限', '請到 iPhone「設定 ➔ 鍋巴 GOBA ➔ 位置」開啟定位權限，或從下方手動選擇地區。');
         return;
       }
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
@@ -391,7 +509,7 @@ export default function App() {
           if (parts.length > 0) label = parts.join(' ');
         }
       } catch {
-        // fallback label
+        // fallback
       }
       await selectRegion({ name: label, lat: latitude, lon: longitude, isGps: true });
     } catch {
@@ -448,7 +566,7 @@ export default function App() {
     setRefreshing(false);
   };
 
-  // -------------------- 車庫持久化操作 --------------------
+  // -------------------- 車庫 CRUD --------------------
   const persistVehicles = async (next: VehicleItem[]) => {
     setVehicles(next);
     await AsyncStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(next));
@@ -457,6 +575,18 @@ export default function App() {
   const handleAddVehicle = async () => {
     if (!newVehicleName.trim() || !newVehiclePlate.trim()) {
       Alert.alert('提醒', '請輸入車款名稱與車牌號碼！');
+      return;
+    }
+    if (newVehicleMfgYM.trim() && !/^\d{4}-\d{2}$/.test(newVehicleMfgYM.trim())) {
+      Alert.alert('格式錯誤', '出廠年月請依 YYYY-MM 格式填寫（例如：2021-06），或留空稍後設定。');
+      return;
+    }
+    if (newVehicleInsExpiry.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(newVehicleInsExpiry.trim())) {
+      Alert.alert('格式錯誤', '強制險到期日請依 YYYY-MM-DD 格式填寫（例如：2027-05-20），或留空稍後設定。');
+      return;
+    }
+    if (newVehicleLastInsp.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(newVehicleLastInsp.trim())) {
+      Alert.alert('格式錯誤', '上次定檢日期請依 YYYY-MM-DD 格式填寫，或留空稍後設定。');
       return;
     }
     Keyboard.dismiss();
@@ -470,7 +600,9 @@ export default function App() {
       mileage: kmNum,
       nextMaintKm: kmNum + (newVehicleCategory === 'scooter' ? 2000 : 5000),
       avgFuel: newVehicleCategory === 'scooter' ? 36.0 : 14.5,
-      insuranceDays: 180,
+      manufactureYM: newVehicleMfgYM.trim(),
+      lastInspectionDate: newVehicleLastInsp.trim(),
+      insuranceExpiry: newVehicleInsExpiry.trim(),
       accentColor: newVehicleCategory === 'scooter' ? '#EC4899' : '#2563EB',
     };
     await persistVehicles([item, ...vehicles]);
@@ -478,6 +610,9 @@ export default function App() {
     setNewVehicleName('');
     setNewVehiclePlate('');
     setNewVehicleKm('');
+    setNewVehicleMfgYM('');
+    setNewVehicleLastInsp('');
+    setNewVehicleInsExpiry('');
     Alert.alert('新增成功 🎉', `已將【${item.nickname}】儲存至您的車庫！`);
   };
 
@@ -494,17 +629,53 @@ export default function App() {
     ]);
   };
 
+  // -------------------- 加油雙向自動推算（公升 <-> 原價金額） --------------------
+  const onChangeRefuelLiters = (val: string) => {
+    setRefuelLiters(val);
+    const l = parseFloat(val);
+    const unit = getFuelUnitPrice(refuelFuelType);
+    if (!isNaN(l) && l > 0 && unit > 0) {
+      setRefuelOriginalAmount(String(Math.round(l * unit)));
+    } else if (!val.trim()) {
+      setRefuelOriginalAmount('');
+    }
+  };
+
+  const onChangeRefuelOriginalAmount = (val: string) => {
+    setRefuelOriginalAmount(val);
+    const amt = parseFloat(val);
+    const unit = getFuelUnitPrice(refuelFuelType);
+    if (!isNaN(amt) && amt > 0 && unit > 0) {
+      setRefuelLiters((amt / unit).toFixed(2));
+    } else if (!val.trim()) {
+      setRefuelLiters('');
+    }
+  };
+
+  const onSelectRefuelFuelType = (fuel: FuelPref) => {
+    setRefuelFuelType(fuel);
+    setRefuelFuelDropdownOpen(false);
+    const unit = getFuelUnitPrice(fuel);
+    const l = parseFloat(refuelLiters);
+    if (!isNaN(l) && l > 0 && unit > 0) {
+      setRefuelOriginalAmount(String(Math.round(l * unit)));
+    }
+  };
+
   const handleAddRefuel = async () => {
-    const target = vehicles[selectedVehicleIdx] || vehicles[0];
+    const target = vehicles.find((v) => v.id === refuelVehicleId) || vehicles[0];
     if (!target) {
       Alert.alert('提醒', '請先新增至少一輛車！');
       return;
     }
     const liters = parseFloat(refuelLiters);
-    const amount = parseFloat(refuelAmount);
+    const origAmt = parseFloat(refuelOriginalAmount);
+    const discAmt = refuelDiscountedAmount.trim() ? parseFloat(refuelDiscountedAmount) : NaN;
+    const paidAmt = !isNaN(discAmt) && discAmt > 0 ? discAmt : origAmt;
     const odo = parseInt(refuelKm, 10);
-    if (!liters || !amount || !odo) {
-      Alert.alert('提醒', '請完整填寫正確的公升數、金額與里程數字！');
+
+    if (!liters || !origAmt || !odo) {
+      Alert.alert('提醒', '請完整填寫公升數（或原價金額）與當前里程！');
       return;
     }
     Keyboard.dismiss();
@@ -514,13 +685,18 @@ export default function App() {
       calcKmL = Number(((odo - target.mileage) / liters).toFixed(1));
     }
 
+    const fuelObj = FUEL_OPTIONS.find((f) => f.key === refuelFuelType) || FUEL_OPTIONS[1];
     const newLog: RefuelLog = {
       id: String(Date.now()),
       vehicleId: target.id,
       vehicleName: target.nickname,
       date: new Date().toLocaleDateString('zh-TW'),
+      fuelType: refuelFuelType,
+      fuelLabel: fuelObj.label,
+      unitPrice: getFuelUnitPrice(refuelFuelType),
       liters,
-      amount,
+      originalAmount: origAmt,
+      paidAmount: paidAmt,
       odometer: odo,
       kmPerLiter: calcKmL,
     };
@@ -542,28 +718,60 @@ export default function App() {
 
     setRefuelModalVisible(false);
     setRefuelLiters('');
-    setRefuelAmount('');
+    setRefuelOriginalAmount('');
+    setRefuelDiscountedAmount('');
     setRefuelKm('');
+
+    const savedDiff = origAmt > paidAmt ? `\n自助折扣省下：NT$ ${Math.round(origAmt - paidAmt)}` : '';
     Alert.alert(
       '加油記帳已儲存 ⛽',
-      `車輛：${target.nickname}\n加油：${liters} L / NT$ ${amount}` +
+      `車輛：${target.nickname}\n油品：${fuelObj.label}\n公升數：${liters} L\n實付金額：NT$ ${paidAmt}${savedDiff}` +
         (calcKmL ? `\n本次實測油耗：${calcKmL} km/L` : '')
     );
   };
 
-  const handleAddMaint = async () => {
-    const target = vehicles[selectedVehicleIdx] || vehicles[0];
+  // -------------------- 多項目保養 / 維修紀錄 --------------------
+  const addMaintSubItem = (nameToAdd?: string, costToAdd?: string) => {
+    const nm = (nameToAdd !== undefined ? nameToAdd : maintCustomName).trim();
+    if (!nm) {
+      Alert.alert('提醒', '請輸入保養或維修項目名稱！');
+      return;
+    }
+    const c = parseFloat(costToAdd !== undefined ? costToAdd : maintCustomCost) || 0;
+    setMaintDraftItems((prev) => [...prev, { id: `${Date.now()}-${Math.random()}`, name: nm, cost: c }]);
+    if (nameToAdd === undefined) {
+      setMaintCustomName('');
+      setMaintCustomCost('');
+    }
+  };
+
+  const updateMaintItemCost = (id: string, val: string) => {
+    const c = parseFloat(val) || 0;
+    setMaintDraftItems((prev) => prev.map((it) => (it.id === id ? { ...it, cost: c } : it)));
+  };
+
+  const removeMaintSubItem = (id: string) => {
+    setMaintDraftItems((prev) => prev.filter((it) => it.id !== id));
+  };
+
+  const handleSaveMaint = async () => {
+    const target = vehicles.find((v) => v.id === maintVehicleId) || vehicles[0];
     if (!target) return;
+    if (maintDraftItems.length === 0) {
+      Alert.alert('提醒', '請至少新增一項保養或維修項目！');
+      return;
+    }
     Keyboard.dismiss();
-    const cost = parseFloat(maintCost) || 0;
     const odo = parseInt(maintKm, 10) || target.mileage;
+    const totalCost = maintDraftItems.reduce((sum, it) => sum + it.cost, 0);
+
     const newLog: MaintLog = {
       id: String(Date.now()),
       vehicleId: target.id,
       vehicleName: target.nickname,
       date: new Date().toLocaleDateString('zh-TW'),
-      item: maintItem.trim() || '定期保養',
-      cost,
+      items: maintDraftItems,
+      totalCost,
       odometer: odo,
     };
     const nextLogs = [newLog, ...maintLogs];
@@ -579,12 +787,72 @@ export default function App() {
     await persistVehicles(nextVehicles);
 
     setMaintModalVisible(false);
-    setMaintCost('');
+    setMaintDraftItems([]);
+    setMaintCustomName('');
+    setMaintCustomCost('');
     setMaintKm('');
-    Alert.alert('保養紀錄已儲存 🔧', `已更新下次保養提醒里程至 ${(odo + interval).toLocaleString()} km！`);
+    Alert.alert(
+      '保養紀錄已儲存 🔧',
+      `車輛：${target.nickname}\n共 ${newLog.items.length} 項維修/保養\n總金額：NT$ ${totalCost.toLocaleString()}`
+    );
   };
 
-  // -------------------- 真實車牌查詢（正確區分白牌 / 黃牌 / 紅牌 / 汽車） --------------------
+  // -------------------- 儲存保險到期日 --------------------
+  const openInsuranceModal = () => {
+    const v = vehicles.find((x) => x.id === insVehicleId) || vehicles[0];
+    if (v) {
+      setInsVehicleId(v.id);
+      setInsExpiryInput(v.insuranceExpiry || '');
+    }
+    setInsuranceModalVisible(true);
+  };
+
+  const handleSaveInsurance = async () => {
+    if (insExpiryInput.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(insExpiryInput.trim())) {
+      Alert.alert('格式錯誤', '強制險到期日請輸入 YYYY-MM-DD（例如：2027-05-20）');
+      return;
+    }
+    Keyboard.dismiss();
+    const next = vehicles.map((v) =>
+      v.id === insVehicleId ? { ...v, insuranceExpiry: insExpiryInput.trim() } : v
+    );
+    await persistVehicles(next);
+    setInsuranceModalVisible(false);
+    Alert.alert('已更新 🛡️', '強制險到期日已儲存！');
+  };
+
+  // -------------------- 儲存出廠年月與上次定檢日期 --------------------
+  const openInspectionModal = () => {
+    const v = vehicles.find((x) => x.id === inspVehicleId) || vehicles[0];
+    if (v) {
+      setInspVehicleId(v.id);
+      setInspMfgInput(v.manufactureYM || '');
+      setInspLastDateInput(v.lastInspectionDate || '');
+    }
+    setInspectionModalVisible(true);
+  };
+
+  const handleSaveInspection = async () => {
+    if (inspMfgInput.trim() && !/^\d{4}-\d{2}$/.test(inspMfgInput.trim())) {
+      Alert.alert('格式錯誤', '出廠年月請輸入 YYYY-MM（例如：2020-08）');
+      return;
+    }
+    if (inspLastDateInput.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(inspLastDateInput.trim())) {
+      Alert.alert('格式錯誤', '上次定檢日期請輸入 YYYY-MM-DD（例如：2026-08-12）');
+      return;
+    }
+    Keyboard.dismiss();
+    const next = vehicles.map((v) =>
+      v.id === inspVehicleId
+        ? { ...v, manufactureYM: inspMfgInput.trim(), lastInspectionDate: inspLastDateInput.trim() }
+        : v
+    );
+    await persistVehicles(next);
+    setInspectionModalVisible(false);
+    Alert.alert('已更新 ✅', '車輛出廠年月與定檢紀錄已儲存！');
+  };
+
+  // -------------------- 車牌查詢 ＆ 考照雷達 --------------------
   const runPlateSearch = async (queryOverride?: string, typeOverride?: CarTypeOption) => {
     const q = queryOverride !== undefined ? queryOverride : plateQuery;
     const ct = typeOverride !== undefined ? typeOverride : selectedCarType;
@@ -610,22 +878,11 @@ export default function App() {
     if (!sessionToken) {
       Alert.alert('請先登入', '登入 Google 帳號後即可將心儀車牌加入收藏清單！', [
         { text: '稍後', style: 'cancel' },
-        {
-          text: '前往登入',
-          onPress: () => {
-            setPlateModalVisible(false);
-            setActiveTab('profile');
-          },
-        },
+        { text: '前往登入', onPress: () => { setPlateModalVisible(false); setActiveTab('profile'); } },
       ]);
       return;
     }
-    const ok = await addUserFavorite(
-      sessionToken,
-      item.plate_number,
-      selectedCarType.apiValue,
-      item.motor_vehicles_office
-    );
+    const ok = await addUserFavorite(sessionToken, item.plate_number, selectedCarType.apiValue, item.motor_vehicles_office);
     if (ok) {
       Alert.alert('收藏成功 ❤️', `已將【${item.plate_number}】加入您的收藏清單！`);
       syncBackendAccount(sessionToken);
@@ -634,7 +891,6 @@ export default function App() {
     }
   };
 
-  // -------------------- 真實考照名額雷達 --------------------
   const runExamRadar = async (ltOverride?: string) => {
     const lt = ltOverride !== undefined ? ltOverride : examLicenseType;
     setExamLoading(true);
@@ -665,18 +921,12 @@ export default function App() {
   const focusPoiOnMap = (poi: MapPOI) => {
     setSelectedPoi(poi);
     mapRef.current?.animateToRegion(
-      {
-        latitude: poi.lat,
-        longitude: poi.lon,
-        latitudeDelta: 0.012,
-        longitudeDelta: 0.012,
-      },
+      { latitude: poi.lat, longitude: poi.lon, latitudeDelta: 0.012, longitudeDelta: 0.012 },
       400
     );
   };
 
   const displayName = prefs.customNickname.trim() || user?.name || '鍋巴車友';
-
   const filteredVehicles =
     vehicleFilter === 'all' ? vehicles : vehicles.filter((v) => v.category === vehicleFilter);
 
@@ -697,8 +947,14 @@ export default function App() {
     })
     .slice(0, 40);
 
-  const totalFuelSpent = refuelLogs.reduce((acc, r) => acc + r.amount, 0);
+  const totalFuelSpent = refuelLogs.reduce((acc, r) => acc + r.paidAmount, 0);
   const totalFuelLiters = refuelLogs.reduce((acc, r) => acc + r.liters, 0);
+  const maintDraftTotal = maintDraftItems.reduce((sum, it) => sum + it.cost, 0);
+
+  const activeRefuelVehicle = vehicles.find((v) => v.id === refuelVehicleId) || vehicles[0];
+  const activeMaintVehicle = vehicles.find((v) => v.id === maintVehicleId) || vehicles[0];
+  const activeInsVehicle = vehicles.find((v) => v.id === insVehicleId) || vehicles[0];
+  const activeInspVehicle = vehicles.find((v) => v.id === inspVehicleId) || vehicles[0];
 
   const homeQuickActions = [
     { label: '我的車庫', icon: 'car-sport', color: '#EC4899', bg: '#FCE7F3', onPress: () => setActiveTab('garage') },
@@ -759,10 +1015,7 @@ export default function App() {
               <Text style={styles.homeBrandTitle}>鍋巴 GOBA</Text>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <TouchableOpacity
-                style={styles.regionTopPill}
-                onPress={() => setRegionModalVisible(true)}
-              >
+              <TouchableOpacity style={styles.regionTopPill} onPress={() => setRegionModalVisible(true)}>
                 <Ionicons name={region.isGps ? 'navigate' : 'location'} size={13} color="#DB2777" />
                 <Text style={styles.regionTopPillText} numberOfLines={1}>
                   {region.name}
@@ -795,18 +1048,11 @@ export default function App() {
                 : '我的'}
             </Text>
             {activeTab === 'garage' ? (
-              <TouchableOpacity
-                style={styles.addCircleBtn}
-                onPress={() => setAddVehicleModalVisible(true)}
-              >
+              <TouchableOpacity style={styles.addCircleBtn} onPress={() => setAddVehicleModalVisible(true)}>
                 <Ionicons name="add" size={22} color="#DB2777" />
               </TouchableOpacity>
             ) : activeTab === 'map' ? (
-              <TouchableOpacity
-                style={styles.addCircleBtn}
-                onPress={handleUseGpsLocation}
-                disabled={gpsLoading}
-              >
+              <TouchableOpacity style={styles.addCircleBtn} onPress={handleUseGpsLocation} disabled={gpsLoading}>
                 {gpsLoading ? (
                   <ActivityIndicator size="small" color="#DB2777" />
                 ) : (
@@ -819,10 +1065,9 @@ export default function App() {
           </View>
         )}
 
-        {/* ==================== 內建真實地圖頁（專屬版面，不包在 ScrollView 內以免搶手勢） ==================== */}
+        {/* ==================== 內建真實地圖頁（高公局 1968 即時路況 + 高速多品牌加油站/停車場） ==================== */}
         {activeTab === 'map' ? (
           <View style={styles.mapTabContainer}>
-            {/* 地圖分類膠囊 */}
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -875,8 +1120,33 @@ export default function App() {
               </ScrollView>
             )}
 
-            {/* 內建原生互動地圖 MapView（支援即時路況覆蓋層 + 真實多品牌圖釘） */}
-            <View style={styles.mapFrame}>
+            {/* 即時路況子頁籤：國道即時車速 / 1968 即時事件 */}
+            {mapCategory === 'traffic' && (
+              <View style={styles.trafficSubTabRow}>
+                <TouchableOpacity
+                  style={[styles.trafficSubBtn, trafficSubTab === 'speeds' && styles.trafficSubBtnActive]}
+                  onPress={() => setTrafficSubTab('speeds')}
+                >
+                  <Text style={[styles.trafficSubText, trafficSubTab === 'speeds' && { color: '#FFF' }]}>
+                    ⚡ 國道即時車速 ({trafficData?.speeds.length || 0})
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.trafficSubBtn, trafficSubTab === 'incidents' && styles.trafficSubBtnActive]}
+                  onPress={() => setTrafficSubTab('incidents')}
+                >
+                  <Text style={[styles.trafficSubText, trafficSubTab === 'incidents' && { color: '#FFF' }]}>
+                    ⚠️ 1968 即時事件 ({trafficData?.incidents.length || 0})
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.trafficRefreshIcon} onPress={loadLiveTraffic}>
+                  <Ionicons name="refresh" size={16} color="#9D174D" />
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* 內建原生互動地圖 */}
+            <View style={[styles.mapFrame, mapCategory === 'traffic' && { height: 200 }]}>
               <MapView
                 ref={mapRef}
                 style={StyleSheet.absoluteFill}
@@ -885,49 +1155,102 @@ export default function App() {
                 showsMyLocationButton={false}
                 showsTraffic={mapCategory === 'traffic'}
               >
-                {visibleMapPois.map((poi) => (
-                  <Marker
-                    key={poi.id}
-                    coordinate={{ latitude: poi.lat, longitude: poi.lon }}
-                    title={poi.name}
-                    description={`${poi.brand} • 距離 ${poi.distanceKm} km`}
-                    pinColor={poi.brandColor}
-                    onPress={() => setSelectedPoi(poi)}
-                  />
-                ))}
+                {mapCategory !== 'traffic' &&
+                  visibleMapPois.map((poi) => (
+                    <Marker
+                      key={poi.id}
+                      coordinate={{ latitude: poi.lat, longitude: poi.lon }}
+                      title={poi.name}
+                      description={`${poi.brand} • 距離 ${poi.distanceKm} km`}
+                      pinColor={poi.brandColor}
+                      onPress={() => setSelectedPoi(poi)}
+                    />
+                  ))}
+                {mapCategory === 'traffic' &&
+                  (trafficData?.incidents || [])
+                    .filter((inc) => inc.lat && inc.lon)
+                    .map((inc) => (
+                      <Marker
+                        key={inc.id}
+                        coordinate={{ latitude: inc.lat!, longitude: inc.lon! }}
+                        title={inc.title}
+                        description={`${inc.type}：${inc.detail}`}
+                        pinColor="#DC2626"
+                      />
+                    ))}
               </MapView>
 
-              {/* 地圖左上地區按鈕 */}
-              <TouchableOpacity
-                style={styles.mapRegionFloatBtn}
-                onPress={() => setRegionModalVisible(true)}
-              >
+              <TouchableOpacity style={styles.mapRegionFloatBtn} onPress={() => setRegionModalVisible(true)}>
                 <Ionicons name="location" size={13} color="#DB2777" />
                 <Text style={styles.mapRegionFloatText}>{region.name}</Text>
               </TouchableOpacity>
-
-              {/* 即時路況圖例 */}
-              {mapCategory === 'traffic' && (
-                <View style={styles.trafficLegendBox}>
-                  <Text style={styles.trafficLegendText}>🟢 順暢   🟠 車多   🔴 壅塞（即時路況圖層）</Text>
-                </View>
-              )}
             </View>
 
-            {/* 下方真實站點清單 */}
+            {/* 下方資料列表 */}
             <View style={styles.mapListWrap}>
               {mapCategory === 'traffic' ? (
-                <BlurView intensity={65} tint="light" style={styles.glassCard}>
-                  <Text style={styles.oilCardTitle}>🚦 即時道路車流圖層已開啟</Text>
-                  <Text style={styles.trafficHelpText}>
-                    可直接在上方地圖雙指縮放、拖曳查看 {region.name} 周邊國道與市區即時路況紅黃綠車流線。點擊右上角定位按鈕可移動至您的目前 GPS 位置。
-                  </Text>
-                </BlurView>
-              ) : mapLoading ? (
+                trafficLoading && !trafficData ? (
+                  <View style={{ paddingVertical: 24, alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color="#EC4899" />
+                    <Text style={{ fontSize: 12, color: '#9D174D', marginTop: 6 }}>
+                      正在抓取高公局 1968 官方即時路況...
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView
+                    showsVerticalScrollIndicator={false}
+                    contentContainerStyle={{ paddingBottom: 110, gap: 8 }}
+                  >
+                    <Text style={{ fontSize: 11, color: '#9D174D', fontWeight: '600', marginBottom: 2 }}>
+                      資料來源：{trafficData?.source || '高公局 1968'} • 更新 {trafficData?.updated_at || '--:--'}
+                    </Text>
+
+                    {trafficSubTab === 'speeds' ? (
+                      (trafficData?.speeds || []).length === 0 ? (
+                        <Text style={styles.emptyText}>暫無國道車速回報資料</Text>
+                      ) : (
+                        (trafficData?.speeds || []).map((sp) => (
+                          <BlurView key={sp.id} intensity={68} tint="light" style={styles.poiRowCard}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.poiNameText}>{sp.section}</Text>
+                              <Text style={styles.poiAddrText}>{sp.road}</Text>
+                            </View>
+                            <View style={{ alignItems: 'flex-end' }}>
+                              <Text style={{ fontSize: 16, fontWeight: '900', color: sp.color }}>
+                                {sp.speed} km/h
+                              </Text>
+                              <View style={[styles.poiBrandPill, { backgroundColor: `${sp.color}18`, marginTop: 2 }]}>
+                                <Text style={[styles.poiBrandText, { color: sp.color }]}>{sp.status}</Text>
+                              </View>
+                            </View>
+                          </BlurView>
+                        ))
+                      )
+                    ) : (trafficData?.incidents || []).length === 0 ? (
+                      <Text style={styles.emptyText}>目前全台國道無通報事件 🟢</Text>
+                    ) : (
+                      (trafficData?.incidents || []).map((inc) => (
+                        <BlurView key={inc.id} intensity={68} tint="light" style={styles.poiRowCard}>
+                          <View style={{ flex: 1 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <View style={[styles.poiBrandPill, { backgroundColor: '#FEE2E2' }]}>
+                                <Text style={[styles.poiBrandText, { color: '#DC2626' }]}>{inc.type}</Text>
+                              </View>
+                              <Text style={styles.poiDistText}>{inc.time}</Text>
+                            </View>
+                            <Text style={styles.poiNameText}>{inc.title}</Text>
+                            <Text style={styles.poiAddrText}>{inc.detail}</Text>
+                          </View>
+                        </BlurView>
+                      ))
+                    )}
+                  </ScrollView>
+                )
+              ) : mapLoading && mapPois.length === 0 ? (
                 <View style={{ paddingVertical: 24, alignItems: 'center' }}>
                   <ActivityIndicator size="small" color="#EC4899" />
                   <Text style={{ fontSize: 12, color: '#9D174D', marginTop: 6 }}>
-                    正在搜尋 {region.name} 周邊站點...
+                    正在載入 {region.name} 周邊站點...
                   </Text>
                 </View>
               ) : (
@@ -936,16 +1259,12 @@ export default function App() {
                   contentContainerStyle={{ paddingBottom: 110, gap: 8 }}
                 >
                   {visibleMapPois.length === 0 ? (
-                    <Text style={styles.emptyText}>此範圍內查無符合的站點，可切換品牌或更換地區</Text>
+                    <Text style={styles.emptyText}>此篩選條件下暫無站點，可切換「全部」或更換地區</Text>
                   ) : (
                     visibleMapPois.map((poi) => {
                       const isSel = selectedPoi?.id === poi.id;
                       return (
-                        <TouchableOpacity
-                          key={poi.id}
-                          activeOpacity={0.82}
-                          onPress={() => focusPoiOnMap(poi)}
-                        >
+                        <TouchableOpacity key={poi.id} activeOpacity={0.82} onPress={() => focusPoiOnMap(poi)}>
                           <BlurView
                             intensity={68}
                             tint="light"
@@ -969,10 +1288,7 @@ export default function App() {
                                 </Text>
                               ) : null}
                             </View>
-                            <TouchableOpacity
-                              style={styles.poiNavBtn}
-                              onPress={() => openPoiNavigation(poi)}
-                            >
+                            <TouchableOpacity style={styles.poiNavBtn} onPress={() => openPoiNavigation(poi)}>
                               <Ionicons name="navigate" size={14} color="#FFF" />
                               <Text style={styles.poiNavBtnText}>導航</Text>
                             </TouchableOpacity>
@@ -998,32 +1314,14 @@ export default function App() {
             {/* -------------------- TAB 1: 首頁 -------------------- */}
             {activeTab === 'home' && (
               <View style={styles.sectionStack}>
-                {/* 櫻花粉鍋巴主題 Hero Banner */}
-                <LinearGradient
-                  colors={['#BAE6FD', '#FBCFE8', '#FCE7F3']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.heroBanner}
-                >
-                  <View style={styles.heroPetalDecor1} />
-                  <View style={styles.heroPetalDecor2} />
-                  <View style={styles.heroMascotWrap}>
-                    <Image source={require('./assets/icon.png')} style={styles.heroMascotImg} />
-                  </View>
-                  <View style={styles.heroTextCol}>
-                    <Text style={styles.heroTitle}>鍋巴 GOBA</Text>
-                    <View style={styles.heroSubtitlePill}>
-                      <Text style={styles.heroSubtitle}>每一天，鍋巴陪你出發！♡</Text>
-                    </View>
-                    {user ? (
-                      <Text style={styles.heroUserGreeting}>早安，{displayName} ✨</Text>
-                    ) : (
-                      <TouchableOpacity onPress={() => setActiveTab('profile')}>
-                        <Text style={styles.heroUserGreeting}>點此登入會員帳號 ➔</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                </LinearGradient>
+                {/* 專屬櫻花粉鍋巴橫幅圖片 */}
+                <View style={styles.heroBannerImageWrap}>
+                  <Image
+                    source={require('./assets/hero-banner.jpg')}
+                    style={styles.heroBannerImage}
+                    resizeMode="cover"
+                  />
+                </View>
 
                 {/* 4x2 晶透玻璃快捷方格 */}
                 <View style={styles.quickGrid}>
@@ -1055,7 +1353,7 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                {/* 真實即時天氣動態玻璃卡片（點此開啟地區設定與 GPS 定位） */}
+                {/* 真實即時天氣動態玻璃卡片 */}
                 <TouchableOpacity activeOpacity={0.85} onPress={() => setRegionModalVisible(true)}>
                   <BlurView intensity={65} tint="light" style={styles.glassCard}>
                     <View style={styles.weatherRow}>
@@ -1104,7 +1402,7 @@ export default function App() {
                   </BlurView>
                 </TouchableOpacity>
 
-                {/* 真實中油官方今日油價玻璃卡片（絕不含未經證實之漲跌預測） */}
+                {/* 真實中油官方今日油價玻璃卡片 */}
                 <BlurView intensity={65} tint="light" style={styles.glassCard}>
                   <View style={styles.oilHeaderRow}>
                     <Text style={styles.oilCardTitle}>
@@ -1163,63 +1461,77 @@ export default function App() {
                   })}
                 </BlurView>
 
-                {filteredVehicles.map((v, idx) => (
-                  <BlurView key={v.id} intensity={70} tint="light" style={styles.garageVehicleCard}>
-                    <View style={styles.garageTopRow}>
-                      <View style={[styles.vehicleThumbBox, { backgroundColor: `${v.accentColor}15` }]}>
-                        <MaterialCommunityIcons
-                          name={v.category === 'scooter' ? 'motorbike' : 'car'}
-                          size={38}
-                          color={v.accentColor}
-                        />
-                      </View>
-                      <View style={{ flex: 1, marginLeft: 14 }}>
-                        <View style={styles.vehicleTitleRow}>
-                          <Text style={styles.vehicleName}>{v.nickname}</Text>
-                          <TouchableOpacity
-                            onPress={() =>
-                              Alert.alert(
-                                v.nickname,
-                                `車種：${v.typeLabel}\n平均油耗：${v.avgFuel} km/L\n強制險到期：剩餘 ${v.insuranceDays} 天`,
-                                [
-                                  { text: '關閉', style: 'cancel' },
-                                  {
-                                    text: '⛽ 記一筆加油',
-                                    onPress: () => {
-                                      setSelectedVehicleIdx(idx);
-                                      setRefuelModalVisible(true);
+                {filteredVehicles.map((v) => {
+                  const insDays = calcDaysUntilDate(v.insuranceExpiry);
+                  const insp = calcInspectionStatus(v.category, v.manufactureYM, v.lastInspectionDate);
+                  return (
+                    <BlurView key={v.id} intensity={70} tint="light" style={styles.garageVehicleCard}>
+                      <View style={styles.garageTopRow}>
+                        <View style={[styles.vehicleThumbBox, { backgroundColor: `${v.accentColor}15` }]}>
+                          <MaterialCommunityIcons
+                            name={v.category === 'scooter' ? 'motorbike' : 'car'}
+                            size={38}
+                            color={v.accentColor}
+                          />
+                        </View>
+                        <View style={{ flex: 1, marginLeft: 14 }}>
+                          <View style={styles.vehicleTitleRow}>
+                            <Text style={styles.vehicleName}>{v.nickname}</Text>
+                            <TouchableOpacity
+                              onPress={() =>
+                                Alert.alert(
+                                  v.nickname,
+                                  `車種：${v.typeLabel}\n出廠年月：${v.manufactureYM || '尚未設定'}\n定檢狀態：${insp.statusText}\n強制險到期：${v.insuranceExpiry ? `${v.insuranceExpiry} (剩 ${insDays} 天)` : '尚未設定'}`,
+                                  [
+                                    { text: '關閉', style: 'cancel' },
+                                    {
+                                      text: '🛡️ 設定保險日期',
+                                      onPress: () => {
+                                        setInsVehicleId(v.id);
+                                        setInsExpiryInput(v.insuranceExpiry || '');
+                                        setInsuranceModalVisible(true);
+                                      },
                                     },
-                                  },
-                                  {
-                                    text: '移除車輛',
-                                    style: 'destructive',
-                                    onPress: () => handleDeleteVehicle(v),
-                                  },
-                                ]
-                              )
-                            }
-                          >
-                            <Ionicons name="ellipsis-horizontal" size={20} color="#9D174D" />
-                          </TouchableOpacity>
-                        </View>
-                        <View style={styles.pinkPlateBadge}>
-                          <Text style={styles.pinkPlateText}>{v.plate}</Text>
+                                    {
+                                      text: '✅ 設定出廠/定檢',
+                                      onPress: () => {
+                                        setInspVehicleId(v.id);
+                                        setInspMfgInput(v.manufactureYM || '');
+                                        setInspLastDateInput(v.lastInspectionDate || '');
+                                        setInspectionModalVisible(true);
+                                      },
+                                    },
+                                    {
+                                      text: '移除車輛',
+                                      style: 'destructive',
+                                      onPress: () => handleDeleteVehicle(v),
+                                    },
+                                  ]
+                                )
+                              }
+                            >
+                              <Ionicons name="ellipsis-horizontal" size={20} color="#9D174D" />
+                            </TouchableOpacity>
+                          </View>
+                          <View style={styles.pinkPlateBadge}>
+                            <Text style={styles.pinkPlateText}>{v.plate}</Text>
+                          </View>
                         </View>
                       </View>
-                    </View>
 
-                    <View style={styles.garageMetaRow}>
-                      <View style={styles.garageMetaItem}>
-                        <Ionicons name="speedometer-outline" size={14} color="#9D174D" />
-                        <Text style={styles.garageMetaText}>里程 {v.mileage.toLocaleString()} km</Text>
+                      <View style={styles.garageMetaRow}>
+                        <View style={styles.garageMetaItem}>
+                          <Ionicons name="speedometer-outline" size={14} color="#9D174D" />
+                          <Text style={styles.garageMetaText}>里程 {v.mileage.toLocaleString()} km</Text>
+                        </View>
+                        <View style={styles.garageMetaItem}>
+                          <Ionicons name="shield-checkmark-outline" size={14} color="#DB2777" />
+                          <Text style={styles.garageMetaText}>下次保養 {v.nextMaintKm.toLocaleString()} km</Text>
+                        </View>
                       </View>
-                      <View style={styles.garageMetaItem}>
-                        <Ionicons name="shield-checkmark-outline" size={14} color="#DB2777" />
-                        <Text style={styles.garageMetaText}>下次保養 {v.nextMaintKm.toLocaleString()} km</Text>
-                      </View>
-                    </View>
-                  </BlurView>
-                ))}
+                    </BlurView>
+                  );
+                })}
 
                 <TouchableOpacity activeOpacity={0.8} onPress={() => setAddVehicleModalVisible(true)}>
                   <LinearGradient
@@ -1241,7 +1553,9 @@ export default function App() {
                       color: '#F97316',
                       bg: '#FFEDD5',
                       action: () => {
-                        setSelectedVehicleIdx(0);
+                        if (vehicles.length > 0 && !vehicles.find((v) => v.id === refuelVehicleId)) {
+                          setRefuelVehicleId(vehicles[0].id);
+                        }
                         setRefuelModalVisible(true);
                       },
                     },
@@ -1251,7 +1565,9 @@ export default function App() {
                       color: '#EC4899',
                       bg: '#FCE7F3',
                       action: () => {
-                        setSelectedVehicleIdx(0);
+                        if (vehicles.length > 0 && !vehicles.find((v) => v.id === maintVehicleId)) {
+                          setMaintVehicleId(vehicles[0].id);
+                        }
                         setMaintModalVisible(true);
                       },
                     },
@@ -1267,22 +1583,14 @@ export default function App() {
                       icon: 'shield-outline',
                       color: '#3B82F6',
                       bg: '#DBEAFE',
-                      action: () =>
-                        Alert.alert(
-                          '強制險到期倒數 🛡️',
-                          vehicles.map((v) => `• ${v.nickname}：剩餘 ${v.insuranceDays} 天`).join('\n')
-                        ),
+                      action: openInsuranceModal,
                     },
                     {
                       label: '驗車提醒',
                       icon: 'checkmark-done-circle-outline',
                       color: '#10B981',
                       bg: '#D1FAE5',
-                      action: () =>
-                        Alert.alert(
-                          '排氣 / 驗車定檢提醒 ✅',
-                          '機車出廠滿 5 年須每年定檢排氣；自小客車出廠滿 5 年須定期檢驗。'
-                        ),
+                      action: openInspectionModal,
                     },
                     {
                       label: '稅金提醒',
@@ -1290,7 +1598,7 @@ export default function App() {
                       color: '#F59E0B',
                       bg: '#FEF3C7',
                       action: () =>
-                        Alert.alert('牌照稅 ＆ 燃料費提醒 💰', '• 4 月：使用牌照稅\n• 7 月：汽車/機車燃料使用費'),
+                        Alert.alert('牌照稅 ＆ 燃料費繳納月份 💰', '• 4 月 1 日 ~ 4 月 30 日：使用牌照稅\n• 7 月 1 日 ~ 7 月 31 日：汽機車燃料使用費'),
                     },
                   ].map((tool) => (
                     <TouchableOpacity
@@ -1392,7 +1700,7 @@ export default function App() {
               </View>
             )}
 
-            {/* -------------------- TAB 5: 我的（潔淨會員頁 + 完整帳戶資訊設定） -------------------- */}
+            {/* -------------------- TAB 5: 我的 -------------------- */}
             {activeTab === 'profile' && (
               <View style={styles.sectionStack}>
                 {user ? (
@@ -1482,7 +1790,6 @@ export default function App() {
                   </BlurView>
                 )}
 
-                {/* 帳戶資訊與系統設定 */}
                 <BlurView intensity={65} tint="light" style={styles.glassCard}>
                   <Text style={styles.oilCardTitle}>帳戶與系統設定</Text>
 
@@ -1505,10 +1812,7 @@ export default function App() {
 
                   <View style={styles.softDivider} />
 
-                  <TouchableOpacity
-                    style={styles.settingItem}
-                    onPress={() => setRegionModalVisible(true)}
-                  >
+                  <TouchableOpacity style={styles.settingItem} onPress={() => setRegionModalVisible(true)}>
                     <View style={styles.settingLeft}>
                       <Ionicons name="location-outline" size={20} color="#2563EB" />
                       <Text style={styles.settingText}>地區與定位設定</Text>
@@ -1539,7 +1843,7 @@ export default function App() {
                     onPress={() =>
                       Alert.alert(
                         '關於 鍋巴 GOBA',
-                        '鍋巴 GOBA v2.2\n即時氣象：Open-Meteo\n官方油價：台灣中油\n地圖圖資：Apple Maps & OpenStreetMap'
+                        '鍋巴 GOBA v2.3\n即時氣象：Open-Meteo\n官方油價：台灣中油\n即時路況：交通部高公局 1968'
                       )
                     }
                   >
@@ -1547,7 +1851,7 @@ export default function App() {
                       <Ionicons name="sparkles-outline" size={20} color="#8B5CF6" />
                       <Text style={styles.settingText}>關於 鍋巴 GOBA</Text>
                     </View>
-                    <Text style={{ fontSize: 12, color: '#9CA3AF' }}>v2.2</Text>
+                    <Text style={{ fontSize: 12, color: '#9CA3AF' }}>v2.3</Text>
                   </TouchableOpacity>
                 </BlurView>
               </View>
@@ -1589,10 +1893,7 @@ export default function App() {
 
         {/* ==================== 地區與 GPS 定位設定 Modal ==================== */}
         <Modal visible={regionModalVisible} transparent animationType="slide">
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalOverlay}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
             <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '82%' }]}>
               <View style={styles.modalHeader}>
@@ -1602,11 +1903,7 @@ export default function App() {
                 </TouchableOpacity>
               </View>
 
-              <TouchableOpacity
-                style={styles.gpsActionBtn}
-                onPress={handleUseGpsLocation}
-                disabled={gpsLoading}
-              >
+              <TouchableOpacity style={styles.gpsActionBtn} onPress={handleUseGpsLocation} disabled={gpsLoading}>
                 {gpsLoading ? (
                   <ActivityIndicator color="#FFF" />
                 ) : (
@@ -1647,10 +1944,7 @@ export default function App() {
 
         {/* ==================== 帳戶資訊設定 Modal ==================== */}
         <Modal visible={accountSettingsVisible} transparent animationType="slide">
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalOverlay}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
             <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '85%' }]}>
               <View style={styles.modalHeader}>
@@ -1741,12 +2035,157 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 內建真實「車牌即時查詢」Modal（白牌/黃牌/紅牌/汽車完整區分） ==================== */}
+        {/* ==================== 保險到期提醒管理 Modal ==================== */}
+        <Modal visible={insuranceModalVisible} transparent animationType="slide">
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+            <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
+            <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '85%' }]}>
+              <ScrollView keyboardShouldPersistTaps="handled" bounces={false}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>🛡️ 強制險到期日設定</Text>
+                  <TouchableOpacity onPress={() => setInsuranceModalVisible(false)}>
+                    <Ionicons name="close-circle" size={26} color="#9D174D" />
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.inputLabel}>選擇車輛</Text>
+                <TouchableOpacity
+                  style={styles.dropdownTrigger}
+                  onPress={() => setInsVehicleDropdownOpen(!insVehicleDropdownOpen)}
+                >
+                  <Text style={styles.dropdownTriggerText}>
+                    {activeInsVehicle ? `${activeInsVehicle.nickname} (${activeInsVehicle.plate})` : '請選擇車輛'}
+                  </Text>
+                  <Ionicons name={insVehicleDropdownOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#9D174D" />
+                </TouchableOpacity>
+                {insVehicleDropdownOpen && (
+                  <View style={styles.dropdownList}>
+                    {vehicles.map((v) => (
+                      <TouchableOpacity
+                        key={v.id}
+                        style={styles.dropdownOption}
+                        onPress={() => {
+                          setInsVehicleId(v.id);
+                          setInsExpiryInput(v.insuranceExpiry || '');
+                          setInsVehicleDropdownOpen(false);
+                        }}
+                      >
+                        <Text style={styles.dropdownOptionText}>{v.nickname} ({v.plate})</Text>
+                        {v.id === insVehicleId && <Ionicons name="checkmark" size={16} color="#DB2777" />}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+
+                <View style={styles.statusBoxCard}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#5B2333' }}>
+                    目前狀態：
+                    {(() => {
+                      const d = calcDaysUntilDate(insExpiryInput);
+                      if (d === null) return '尚未設定到期日';
+                      return d < 0 ? `已過期 ${Math.abs(d)} 天 ⚠️` : `距離到期還有 ${d} 天`;
+                    })()}
+                  </Text>
+                </View>
+
+                <Text style={styles.inputLabel}>強制險到期日 (YYYY-MM-DD)</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="例如：2027-05-20"
+                  value={insExpiryInput}
+                  onChangeText={setInsExpiryInput}
+                />
+
+                <TouchableOpacity style={styles.primaryPinkBtn} onPress={handleSaveInsurance}>
+                  <Text style={styles.primaryPinkBtnText}>儲存保險到期日</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </BlurView>
+          </KeyboardAvoidingView>
+        </Modal>
+
+        {/* ==================== 驗車 / 排氣定檢管理 Modal ==================== */}
+        <Modal visible={inspectionModalVisible} transparent animationType="slide">
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+            <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
+            <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '85%' }]}>
+              <ScrollView keyboardShouldPersistTaps="handled" bounces={false}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>✅ 驗車 / 排氣定檢設定</Text>
+                  <TouchableOpacity onPress={() => setInspectionModalVisible(false)}>
+                    <Ionicons name="close-circle" size={26} color="#9D174D" />
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.inputLabel}>選擇車輛</Text>
+                <TouchableOpacity
+                  style={styles.dropdownTrigger}
+                  onPress={() => setInspVehicleDropdownOpen(!inspVehicleDropdownOpen)}
+                >
+                  <Text style={styles.dropdownTriggerText}>
+                    {activeInspVehicle ? `${activeInspVehicle.nickname} (${activeInspVehicle.plate})` : '請選擇車輛'}
+                  </Text>
+                  <Ionicons name={inspVehicleDropdownOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#9D174D" />
+                </TouchableOpacity>
+                {inspVehicleDropdownOpen && (
+                  <View style={styles.dropdownList}>
+                    {vehicles.map((v) => (
+                      <TouchableOpacity
+                        key={v.id}
+                        style={styles.dropdownOption}
+                        onPress={() => {
+                          setInspVehicleId(v.id);
+                          setInspMfgInput(v.manufactureYM || '');
+                          setInspLastDateInput(v.lastInspectionDate || '');
+                          setInspVehicleDropdownOpen(false);
+                        }}
+                      >
+                        <Text style={styles.dropdownOptionText}>{v.nickname} ({v.plate})</Text>
+                        {v.id === inspVehicleId && <Ionicons name="checkmark" size={16} color="#DB2777" />}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+
+                {activeInspVehicle && (() => {
+                  const st = calcInspectionStatus(activeInspVehicle.category, inspMfgInput, inspLastDateInput);
+                  return (
+                    <View style={styles.statusBoxCard}>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: st.isDueSoon ? '#DC2626' : '#059669' }}>
+                        {st.statusText}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#6B4C5A', marginTop: 3 }}>{st.detail}</Text>
+                    </View>
+                  );
+                })()}
+
+                <Text style={styles.inputLabel}>出廠年月 (YYYY-MM)</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="例如：2020-06"
+                  value={inspMfgInput}
+                  onChangeText={setInspMfgInput}
+                />
+
+                <Text style={styles.inputLabel}>上次定檢日期 (YYYY-MM-DD，選填)</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="例如：2026-06-15"
+                  value={inspLastDateInput}
+                  onChangeText={setInspLastDateInput}
+                />
+
+                <TouchableOpacity style={styles.primaryPinkBtn} onPress={handleSaveInspection}>
+                  <Text style={styles.primaryPinkBtnText}>儲存出廠年月與定檢日期</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </BlurView>
+          </KeyboardAvoidingView>
+        </Modal>
+
+        {/* ==================== 內建真實「車牌即時查詢」Modal ==================== */}
         <Modal visible={plateModalVisible} transparent animationType="slide">
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalOverlay}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
             <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '88%' }]}>
               <View style={styles.modalHeader}>
@@ -1829,10 +2268,7 @@ export default function App() {
                           </View>
                           <Text style={styles.plateOfficeText}>{p.motor_vehicles_office}</Text>
                         </View>
-                        <TouchableOpacity
-                          style={styles.favSmallBtn}
-                          onPress={() => handleFavoritePlate(p)}
-                        >
+                        <TouchableOpacity style={styles.favSmallBtn} onPress={() => handleFavoritePlate(p)}>
                           <Ionicons name="heart-outline" size={16} color="#DB2777" />
                           <Text style={styles.favSmallText}>收藏</Text>
                         </TouchableOpacity>
@@ -1847,10 +2283,7 @@ export default function App() {
 
         {/* ==================== 內建真實「考照名額雷達」Modal ==================== */}
         <Modal visible={examModalVisible} transparent animationType="slide">
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalOverlay}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
             <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '86%' }]}>
               <View style={styles.modalHeader}>
@@ -1926,14 +2359,11 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 加油記帳 Modal（完整 KeyboardAvoidingView） ==================== */}
+        {/* ==================== 加油記帳 Modal（下拉選車 + 下拉選油品 + 公升/原價自動推算 + 自助折扣實付） ==================== */}
         <Modal visible={refuelModalVisible} transparent animationType="slide">
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalOverlay}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
-            <BlurView intensity={92} tint="light" style={styles.modalGlassSheet}>
+            <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '88%' }]}>
               <ScrollView keyboardShouldPersistTaps="handled" bounces={false}>
                 <View style={styles.modalHeader}>
                   <Text style={styles.modalTitle}>⛽ 新增加油紀錄</Text>
@@ -1941,33 +2371,108 @@ export default function App() {
                     <Ionicons name="close-circle" size={26} color="#9D174D" />
                   </TouchableOpacity>
                 </View>
-                <Text style={styles.modalSub}>
-                  車輛：{vehicles[selectedVehicleIdx]?.nickname || vehicles[0]?.nickname}
-                </Text>
 
-                <Text style={styles.inputLabel}>加油公升數 (L)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  keyboardType="decimal-pad"
-                  placeholder="例如：6.2"
-                  value={refuelLiters}
-                  onChangeText={setRefuelLiters}
-                />
+                {/* 下拉選單：選擇車輛 */}
+                <Text style={styles.inputLabel}>選擇車輛</Text>
+                <TouchableOpacity
+                  style={styles.dropdownTrigger}
+                  onPress={() => {
+                    setRefuelVehicleDropdownOpen(!refuelVehicleDropdownOpen);
+                    setRefuelFuelDropdownOpen(false);
+                  }}
+                >
+                  <Text style={styles.dropdownTriggerText}>
+                    {activeRefuelVehicle ? `${activeRefuelVehicle.nickname} (${activeRefuelVehicle.plate})` : '請選擇車輛'}
+                  </Text>
+                  <Ionicons name={refuelVehicleDropdownOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#9D174D" />
+                </TouchableOpacity>
+                {refuelVehicleDropdownOpen && (
+                  <View style={styles.dropdownList}>
+                    {vehicles.map((v) => (
+                      <TouchableOpacity
+                        key={v.id}
+                        style={styles.dropdownOption}
+                        onPress={() => {
+                          setRefuelVehicleId(v.id);
+                          setRefuelVehicleDropdownOpen(false);
+                        }}
+                      >
+                        <Text style={styles.dropdownOptionText}>{v.nickname} ({v.plate})</Text>
+                        {v.id === refuelVehicleId && <Ionicons name="checkmark" size={16} color="#DB2777" />}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
 
-                <Text style={styles.inputLabel}>總金額 (NT$)</Text>
+                {/* 下拉選單：選擇油品 */}
+                <Text style={styles.inputLabel}>選擇油品（依今日中油牌價自動換算）</Text>
+                <TouchableOpacity
+                  style={styles.dropdownTrigger}
+                  onPress={() => {
+                    setRefuelFuelDropdownOpen(!refuelFuelDropdownOpen);
+                    setRefuelVehicleDropdownOpen(false);
+                  }}
+                >
+                  <Text style={styles.dropdownTriggerText}>
+                    {FUEL_OPTIONS.find((f) => f.key === refuelFuelType)?.label}（${getFuelUnitPrice(refuelFuelType) || '--'}/L）
+                  </Text>
+                  <Ionicons name={refuelFuelDropdownOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#9D174D" />
+                </TouchableOpacity>
+                {refuelFuelDropdownOpen && (
+                  <View style={styles.dropdownList}>
+                    {FUEL_OPTIONS.map((f) => (
+                      <TouchableOpacity
+                        key={f.key}
+                        style={styles.dropdownOption}
+                        onPress={() => onSelectRefuelFuelType(f.key)}
+                      >
+                        <Text style={styles.dropdownOptionText}>
+                          {f.label} — ${getFuelUnitPrice(f.key) || '--'}/L
+                        </Text>
+                        {f.key === refuelFuelType && <Ionicons name="checkmark" size={16} color="#DB2777" />}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+
+                {/* 公升 / 原價金額 雙向自動推算 */}
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>加油公升數 (L)</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      keyboardType="decimal-pad"
+                      placeholder="輸入自動算金額"
+                      value={refuelLiters}
+                      onChangeText={onChangeRefuelLiters}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>原價金額 (NT$)</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      keyboardType="numeric"
+                      placeholder="輸入自動算公升"
+                      value={refuelOriginalAmount}
+                      onChangeText={onChangeRefuelOriginalAmount}
+                    />
+                  </View>
+                </View>
+
+                <Text style={styles.inputLabel}>折扣後實付金額 (NT$，選填 — 自助加油折扣用)</Text>
                 <TextInput
                   style={styles.textInput}
                   keyboardType="numeric"
-                  placeholder="例如：200"
-                  value={refuelAmount}
-                  onChangeText={setRefuelAmount}
+                  placeholder="無折扣可留空，將以原價金額計算"
+                  value={refuelDiscountedAmount}
+                  onChangeText={setRefuelDiscountedAmount}
                 />
 
                 <Text style={styles.inputLabel}>當前儀表總里程 (km)</Text>
                 <TextInput
                   style={styles.textInput}
                   keyboardType="numeric"
-                  placeholder={`前次里程：${vehicles[selectedVehicleIdx]?.mileage || 0}`}
+                  placeholder={`前次里程：${activeRefuelVehicle?.mileage || 0}`}
                   value={refuelKm}
                   onChangeText={setRefuelKm}
                 />
@@ -1980,53 +2485,127 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 保養紀錄 Modal（完整 KeyboardAvoidingView） ==================== */}
+        {/* ==================== 保養 / 維修紀錄 Modal（下拉選車 + 多項目自由新增） ==================== */}
         <Modal visible={maintModalVisible} transparent animationType="slide">
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalOverlay}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
-            <BlurView intensity={92} tint="light" style={styles.modalGlassSheet}>
+            <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '90%' }]}>
               <ScrollView keyboardShouldPersistTaps="handled" bounces={false}>
                 <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>🔧 新增保養紀錄</Text>
+                  <Text style={styles.modalTitle}>🔧 新增保養 / 維修紀錄</Text>
                   <TouchableOpacity onPress={() => setMaintModalVisible(false)}>
                     <Ionicons name="close-circle" size={26} color="#9D174D" />
                   </TouchableOpacity>
                 </View>
-                <Text style={styles.modalSub}>
-                  車輛：{vehicles[selectedVehicleIdx]?.nickname || vehicles[0]?.nickname}
-                </Text>
 
-                <Text style={styles.inputLabel}>保養項目</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="例如：更換機油 + 齒輪油"
-                  value={maintItem}
-                  onChangeText={setMaintItem}
-                />
+                {/* 下拉選單：選擇車輛 */}
+                <Text style={styles.inputLabel}>選擇車輛</Text>
+                <TouchableOpacity
+                  style={styles.dropdownTrigger}
+                  onPress={() => setMaintVehicleDropdownOpen(!maintVehicleDropdownOpen)}
+                >
+                  <Text style={styles.dropdownTriggerText}>
+                    {activeMaintVehicle ? `${activeMaintVehicle.nickname} (${activeMaintVehicle.plate})` : '請選擇車輛'}
+                  </Text>
+                  <Ionicons name={maintVehicleDropdownOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#9D174D" />
+                </TouchableOpacity>
+                {maintVehicleDropdownOpen && (
+                  <View style={styles.dropdownList}>
+                    {vehicles.map((v) => (
+                      <TouchableOpacity
+                        key={v.id}
+                        style={styles.dropdownOption}
+                        onPress={() => {
+                          setMaintVehicleId(v.id);
+                          setMaintVehicleDropdownOpen(false);
+                        }}
+                      >
+                        <Text style={styles.dropdownOptionText}>{v.nickname} ({v.plate})</Text>
+                        {v.id === maintVehicleId && <Ionicons name="checkmark" size={16} color="#DB2777" />}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
 
-                <Text style={styles.inputLabel}>花費金額 (NT$)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  keyboardType="numeric"
-                  placeholder="例如：450"
-                  value={maintCost}
-                  onChangeText={setMaintCost}
-                />
+                {/* 快速點選常見項目 */}
+                <Text style={styles.inputLabel}>快速點選加入常見項目</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 6 }}>
+                  {COMMON_MAINT_ITEMS.map((itemName) => (
+                    <TouchableOpacity
+                      key={itemName}
+                      style={styles.chipBtn}
+                      onPress={() => addMaintSubItem(itemName, '0')}
+                    >
+                      <Text style={styles.chipText}>+ {itemName}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+
+                {/* 自由新增自訂項目 */}
+                <Text style={styles.inputLabel}>或自行新增維修 / 保養項目</Text>
+                <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+                  <TextInput
+                    style={[styles.textInput, { flex: 1.6 }]}
+                    placeholder="項目名稱（例：更換碟盤）"
+                    value={maintCustomName}
+                    onChangeText={setMaintCustomName}
+                  />
+                  <TextInput
+                    style={[styles.textInput, { flex: 0.9 }]}
+                    keyboardType="numeric"
+                    placeholder="費用"
+                    value={maintCustomCost}
+                    onChangeText={setMaintCustomCost}
+                  />
+                  <TouchableOpacity style={styles.addSubItemBtn} onPress={() => addMaintSubItem()}>
+                    <Ionicons name="add" size={20} color="#FFF" />
+                  </TouchableOpacity>
+                </View>
+
+                {/* 已加入的多項目清單（可單獨改價與刪除） */}
+                {maintDraftItems.length > 0 && (
+                  <View style={styles.maintListBox}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: '#5B2333' }}>
+                        本次項目明細 ({maintDraftItems.length} 項)
+                      </Text>
+                      <Text style={{ fontSize: 12, fontWeight: '900', color: '#DB2777' }}>
+                        合計 NT$ {maintDraftTotal.toLocaleString()}
+                      </Text>
+                    </View>
+                    {maintDraftItems.map((it) => (
+                      <View key={it.id} style={styles.maintSubItemRow}>
+                        <Text style={{ flex: 1, fontSize: 13, fontWeight: '700', color: '#3B1525' }}>
+                          • {it.name}
+                        </Text>
+                        <TextInput
+                          style={styles.miniPriceInput}
+                          keyboardType="numeric"
+                          placeholder="$"
+                          value={it.cost > 0 ? String(it.cost) : ''}
+                          onChangeText={(val) => updateMaintItemCost(it.id, val)}
+                        />
+                        <TouchableOpacity onPress={() => removeMaintSubItem(it.id)} style={{ marginLeft: 8 }}>
+                          <Ionicons name="trash-outline" size={18} color="#DC2626" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </View>
+                )}
 
                 <Text style={styles.inputLabel}>保養當下里程 (km)</Text>
                 <TextInput
                   style={styles.textInput}
                   keyboardType="numeric"
-                  placeholder={`目前里程：${vehicles[selectedVehicleIdx]?.mileage || 0}`}
+                  placeholder={`目前里程：${activeMaintVehicle?.mileage || 0}`}
                   value={maintKm}
                   onChangeText={setMaintKm}
                 />
 
-                <TouchableOpacity style={styles.primaryPinkBtn} onPress={handleAddMaint}>
-                  <Text style={styles.primaryPinkBtnText}>儲存並更新下次保養里程</Text>
+                <TouchableOpacity style={styles.primaryPinkBtn} onPress={handleSaveMaint}>
+                  <Text style={styles.primaryPinkBtnText}>
+                    儲存保養紀錄（共 NT$ {maintDraftTotal.toLocaleString()}）
+                  </Text>
                 </TouchableOpacity>
               </ScrollView>
             </BlurView>
@@ -2037,7 +2616,7 @@ export default function App() {
         <Modal visible={statsModalVisible} transparent animationType="fade">
           <View style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
-            <BlurView intensity={92} tint="light" style={[styles.modalGlassSheet, { maxHeight: '75%' }]}>
+            <BlurView intensity={92} tint="light" style={[styles.modalGlassSheet, { maxHeight: '78%' }]}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>📊 油耗與歷史明細</Text>
                 <TouchableOpacity onPress={() => setStatsModalVisible(false)}>
@@ -2048,13 +2627,11 @@ export default function App() {
               <View style={styles.quotaRow}>
                 <View style={styles.quotaCol}>
                   <Text style={styles.quotaVal}>${totalFuelSpent}</Text>
-                  <Text style={styles.quotaLbl}>累積油資</Text>
+                  <Text style={styles.quotaLbl}>實付油資</Text>
                 </View>
                 <View style={styles.oilColDivider} />
                 <View style={styles.quotaCol}>
-                  <Text style={[styles.quotaVal, { color: '#DB2777' }]}>
-                    {totalFuelLiters.toFixed(1)} L
-                  </Text>
+                  <Text style={[styles.quotaVal, { color: '#DB2777' }]}>{totalFuelLiters.toFixed(1)} L</Text>
                   <Text style={styles.quotaLbl}>累積加油</Text>
                 </View>
                 <View style={styles.oilColDivider} />
@@ -2064,42 +2641,59 @@ export default function App() {
                 </View>
               </View>
 
-              <ScrollView style={{ marginTop: 14, maxHeight: 260 }}>
-                {refuelLogs.length === 0 ? (
-                  <Text style={styles.emptyText}>尚未有加油紀錄，點擊「加油紀錄」記下第一筆吧！</Text>
+              <ScrollView style={{ marginTop: 14, maxHeight: 280 }}>
+                {refuelLogs.length === 0 && maintLogs.length === 0 ? (
+                  <Text style={styles.emptyText}>尚未有加油或保養紀錄</Text>
                 ) : (
-                  refuelLogs.map((log) => (
-                    <View key={log.id} style={styles.plateResultRow}>
-                      <View>
-                        <Text style={styles.examStationTitle}>{log.vehicleName}</Text>
-                        <Text style={styles.plateOfficeText}>
-                          {log.date} • {log.liters}L • 里程 {log.odometer} km
-                        </Text>
-                      </View>
-                      <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={{ fontWeight: '900', color: '#BE185D' }}>NT$ {log.amount}</Text>
-                        {log.kmPerLiter ? (
-                          <Text style={{ fontSize: 11, color: '#059669', fontWeight: '700' }}>
-                            {log.kmPerLiter} km/L
+                  <>
+                    {refuelLogs.map((log) => (
+                      <View key={log.id} style={styles.plateResultRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.examStationTitle}>
+                            ⛽ {log.vehicleName}（{log.fuelLabel}）
                           </Text>
-                        ) : null}
+                          <Text style={styles.plateOfficeText}>
+                            {log.date} • {log.liters}L • 里程 {log.odometer} km
+                          </Text>
+                        </View>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={{ fontWeight: '900', color: '#BE185D' }}>NT$ {log.paidAmount}</Text>
+                          {log.originalAmount > log.paidAmount && (
+                            <Text style={{ fontSize: 10, color: '#059669' }}>
+                              省 ${Math.round(log.originalAmount - log.paidAmount)}
+                            </Text>
+                          )}
+                          {log.kmPerLiter ? (
+                            <Text style={{ fontSize: 11, color: '#059669', fontWeight: '700' }}>
+                              {log.kmPerLiter} km/L
+                            </Text>
+                          ) : null}
+                        </View>
                       </View>
-                    </View>
-                  ))
+                    ))}
+                    {maintLogs.map((m) => (
+                      <View key={m.id} style={styles.plateResultRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.examStationTitle}>🔧 {m.vehicleName}</Text>
+                          <Text style={styles.plateOfficeText}>
+                            {m.date} • {m.items.map((x) => x.name).join('、')}
+                          </Text>
+                        </View>
+                        <Text style={{ fontWeight: '900', color: '#5B2333' }}>NT$ {m.totalCost}</Text>
+                      </View>
+                    ))}
+                  </>
                 )}
               </ScrollView>
             </BlurView>
           </View>
         </Modal>
 
-        {/* ==================== 新增車輛 Modal（完整 KeyboardAvoidingView 解決鍵盤遮擋） ==================== */}
+        {/* ==================== 新增車輛 Modal（含出廠年月、上次定檢、強制險到期日） ==================== */}
         <Modal visible={addVehicleModalVisible} transparent animationType="slide">
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalOverlay}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
-            <BlurView intensity={92} tint="light" style={styles.modalGlassSheet}>
+            <BlurView intensity={95} tint="light" style={[styles.modalGlassSheet, { maxHeight: '90%' }]}>
               <ScrollView keyboardShouldPersistTaps="handled" bounces={false}>
                 <View style={styles.modalHeader}>
                   <Text style={styles.modalTitle}>✨ 新增愛車到車庫</Text>
@@ -2127,7 +2721,7 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                <Text style={styles.inputLabel}>愛車名稱 / 型號</Text>
+                <Text style={styles.inputLabel}>愛車名稱 / 型號 *</Text>
                 <TextInput
                   style={styles.textInput}
                   placeholder="例如：MMBCU 158 或 Honda Civic"
@@ -2135,22 +2729,56 @@ export default function App() {
                   onChangeText={setNewVehicleName}
                 />
 
-                <Text style={styles.inputLabel}>車牌號碼</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="例如：9969 或 PHP-9969"
-                  autoCapitalize="characters"
-                  value={newVehiclePlate}
-                  onChangeText={setNewVehiclePlate}
-                />
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>車牌號碼 *</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="例：PHP-9969"
+                      autoCapitalize="characters"
+                      value={newVehiclePlate}
+                      onChangeText={setNewVehiclePlate}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>目前里程 (km)</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      keyboardType="numeric"
+                      placeholder="例：5200"
+                      value={newVehicleKm}
+                      onChangeText={setNewVehicleKm}
+                    />
+                  </View>
+                </View>
 
-                <Text style={styles.inputLabel}>目前里程數 (km)</Text>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>出廠年月 (YYYY-MM)</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="例：2021-06"
+                      value={newVehicleMfgYM}
+                      onChangeText={setNewVehicleMfgYM}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>上次定檢 (選填)</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="YYYY-MM-DD"
+                      value={newVehicleLastInsp}
+                      onChangeText={setNewVehicleLastInsp}
+                    />
+                  </View>
+                </View>
+
+                <Text style={styles.inputLabel}>強制險到期日 (YYYY-MM-DD，選填)</Text>
                 <TextInput
                   style={styles.textInput}
-                  keyboardType="numeric"
-                  placeholder="例如：5200"
-                  value={newVehicleKm}
-                  onChangeText={setNewVehicleKm}
+                  placeholder="例：2027-05-20（未填則顯示尚未設定）"
+                  value={newVehicleInsExpiry}
+                  onChangeText={setNewVehicleInsExpiry}
                 />
 
                 <TouchableOpacity style={styles.primaryPinkBtn} onPress={handleAddVehicle}>
@@ -2247,6 +2875,20 @@ const styles = StyleSheet.create({
   scrollView: { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 118 },
   sectionStack: { gap: 14 },
+  // 橫幅圖片卡片
+  heroBannerImageWrap: {
+    width: '100%',
+    aspectRatio: 2.02,
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.92)',
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.16,
+    shadowRadius: 16,
+  },
+  heroBannerImage: { width: '100%', height: '100%' },
   // 地圖專屬佈局
   mapTabContainer: { flex: 1 },
   brandChip: {
@@ -2260,18 +2902,40 @@ const styles = StyleSheet.create({
   brandChipActive: { backgroundColor: '#5B2333', borderColor: '#5B2333' },
   brandChipText: { fontSize: 11, fontWeight: '700', color: '#6B4C5A' },
   brandChipTextActive: { color: '#FFFFFF' },
+  trafficSubTabRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginTop: 6,
+    gap: 8,
+  },
+  trafficSubBtn: {
+    flex: 1,
+    paddingVertical: 7,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.75)',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#F3D1E2',
+  },
+  trafficSubBtnActive: { backgroundColor: '#DB2777', borderColor: '#DB2777' },
+  trafficSubText: { fontSize: 11, fontWeight: '800', color: '#5B2333' },
+  trafficRefreshIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   mapFrame: {
-    height: 275,
+    height: 265,
     marginHorizontal: 16,
     marginTop: 8,
     borderRadius: 24,
     overflow: 'hidden',
     borderWidth: 1.5,
     borderColor: 'rgba(255, 255, 255, 0.95)',
-    shadowColor: '#BE185D',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
   },
   mapRegionFloatBtn: {
     position: 'absolute',
@@ -2286,19 +2950,6 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   mapRegionFloatText: { fontSize: 11, fontWeight: '800', color: '#5B2333' },
-  trafficLegendBox: {
-    position: 'absolute',
-    bottom: 10,
-    left: 10,
-    right: 10,
-    backgroundColor: 'rgba(255, 255, 255, 0.92)',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  trafficLegendText: { fontSize: 11, fontWeight: '700', color: '#374151' },
-  trafficHelpText: { fontSize: 12, color: '#6B4C5A', lineHeight: 19, marginTop: 6 },
   mapListWrap: { flex: 1, paddingHorizontal: 16, marginTop: 10 },
   poiRowCard: {
     flexDirection: 'row',
@@ -2314,7 +2965,7 @@ const styles = StyleSheet.create({
   poiBrandPill: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 },
   poiBrandText: { fontSize: 10, fontWeight: '800' },
   poiDistText: { fontSize: 11, fontWeight: '700', color: '#7C6270' },
-  poiNameText: { fontSize: 14, fontWeight: '800', color: '#3B1525', marginTop: 4 },
+  poiNameText: { fontSize: 14, fontWeight: '800', color: '#3B1525', marginTop: 3 },
   poiAddrText: { fontSize: 11, color: '#7C6270', marginTop: 2 },
   poiNavBtn: {
     flexDirection: 'row',
@@ -2327,57 +2978,7 @@ const styles = StyleSheet.create({
     marginLeft: 10,
   },
   poiNavBtnText: { color: '#FFF', fontSize: 11, fontWeight: '800' },
-  // 首頁 Hero Banner
-  heroBanner: {
-    borderRadius: 24,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    overflow: 'hidden',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.85)',
-  },
-  heroPetalDecor1: {
-    position: 'absolute',
-    top: -18,
-    right: -14,
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    backgroundColor: 'rgba(255, 255, 255, 0.35)',
-  },
-  heroPetalDecor2: {
-    position: 'absolute',
-    bottom: -24,
-    left: 60,
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(244, 114, 182, 0.18)',
-  },
-  heroMascotWrap: {
-    width: 78,
-    height: 78,
-    borderRadius: 24,
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    padding: 4,
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-  },
-  heroMascotImg: { width: '100%', height: '100%', borderRadius: 18 },
-  heroTextCol: { flex: 1, marginLeft: 14 },
-  heroTitle: { fontSize: 23, fontWeight: '900', color: '#6B1D3A', letterSpacing: 0.5 },
-  heroSubtitlePill: {
-    alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255, 255, 255, 0.78)',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    marginTop: 6,
-  },
-  heroSubtitle: { fontSize: 12, fontWeight: '700', color: '#9D174D' },
-  heroUserGreeting: { fontSize: 11, fontWeight: '700', color: '#BE185D', marginTop: 6 },
+  // 快捷格
   quickGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10 },
   quickTileWrapper: {
     width: '23.4%',
@@ -2662,6 +3263,7 @@ const styles = StyleSheet.create({
   },
   liquidTabLabel: { fontSize: 10, fontWeight: '700', color: '#7C6270', marginTop: 2 },
   liquidTabLabelActive: { color: '#DB2777', fontWeight: '900' },
+  // 彈窗與下拉選單
   modalOverlay: { flex: 1, justifyContent: 'flex-end' },
   modalGlassSheet: {
     borderTopLeftRadius: 30,
@@ -2676,7 +3278,79 @@ const styles = StyleSheet.create({
   },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   modalTitle: { fontSize: 18, fontWeight: '900', color: '#5B2333' },
-  modalSub: { fontSize: 12, color: '#9D174D', marginBottom: 10, fontWeight: '600' },
+  dropdownTrigger: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1.2,
+    borderColor: '#F3D1E2',
+  },
+  dropdownTriggerText: { fontSize: 14, fontWeight: '700', color: '#3B1525' },
+  dropdownList: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: '#F3D1E2',
+    overflow: 'hidden',
+  },
+  dropdownOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(244, 114, 182, 0.12)',
+  },
+  dropdownOptionText: { fontSize: 13, fontWeight: '600', color: '#3B1525' },
+  statusBoxCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#F3D1E2',
+  },
+  addSubItemBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#EC4899',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  maintListBox: {
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
+    borderRadius: 16,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#F3D1E2',
+  },
+  maintSubItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(244, 114, 182, 0.12)',
+  },
+  miniPriceInput: {
+    width: 72,
+    backgroundColor: '#FFF5F9',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 13,
+    textAlign: 'right',
+    color: '#3B1525',
+    borderWidth: 1,
+    borderColor: '#F3D1E2',
+  },
   gpsActionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2718,12 +3392,7 @@ const styles = StyleSheet.create({
   },
   fuelPrefChipActive: { backgroundColor: '#EC4899', borderColor: '#EC4899' },
   fuelPrefText: { fontSize: 12, fontWeight: '800', color: '#5B2333' },
-  switchRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-  },
+  switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
   chipBtn: {
     paddingHorizontal: 12,
     paddingVertical: 7,
@@ -2737,12 +3406,7 @@ const styles = StyleSheet.create({
   chipText: { fontSize: 12, fontWeight: '700', color: '#7C6270' },
   chipTextActive: { color: '#FFFFFF' },
   searchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
-  searchGoBtn: {
-    backgroundColor: '#EC4899',
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 14,
-  },
+  searchGoBtn: { backgroundColor: '#EC4899', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 14 },
   resultMeta: { fontSize: 11, color: '#9D174D', fontWeight: '600', marginVertical: 10 },
   emptyText: { textAlign: 'center', color: '#9CA3AF', paddingVertical: 24, fontSize: 13 },
   plateResultRow: {
