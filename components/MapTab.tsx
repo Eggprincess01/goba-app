@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -13,6 +14,7 @@ import MapView, { Marker, Region } from 'react-native-maps';
 import { styles } from '../styles/theme';
 import { GAS_BRAND_FILTERS, MapCategory } from '../types';
 import { LiveTrafficData, MapPOI, RegionInfo } from '../services/api';
+import { NavigationScreen } from '../screens/NavigationScreen';
 
 interface MapTabProps {
   mapRef: React.RefObject<MapView | null>;
@@ -61,6 +63,8 @@ export function MapTab({
   onRefreshTraffic,
   onOpenRegionModal,
 }: MapTabProps) {
+  const [navModalVisible, setNavModalVisible] = useState(false);
+
   const mapInitialRegion: Region = {
     latitude: region.lat,
     longitude: region.lon,
@@ -78,6 +82,63 @@ export function MapTab({
 
   return (
     <View style={styles.mapTabContainer}>
+      {/* GOBA Maps 第一階段入口卡片（獨立 NavigationScreen，不阻塞既有加油站/停車場/路況） */}
+      <TouchableOpacity
+        activeOpacity={0.9}
+        onPress={() => setNavModalVisible(true)}
+        style={{
+          marginHorizontal: 16,
+          marginBottom: 8,
+          paddingHorizontal: 14,
+          paddingVertical: 11,
+          borderRadius: 16,
+          backgroundColor: '#DB2777',
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          shadowColor: '#DB2777',
+          shadowOpacity: 0.25,
+          shadowRadius: 8,
+          elevation: 4,
+        }}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+          <View
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 17,
+              backgroundColor: 'rgba(255,255,255,0.2)',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Ionicons name="navigate" size={18} color="#FFFFFF" />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '800' }}>
+              開啟鍋巴地圖導航（Phase 1 測試版）
+            </Text>
+            <Text style={{ color: 'rgba(255,255,255,0.88)', fontSize: 11, marginTop: 1 }}>
+              MapLibre 向量地圖 • Valhalla 汽車路線規劃與轉彎預覽
+            </Text>
+          </View>
+        </View>
+        <Ionicons name="chevron-forward" size={18} color="#FFFFFF" />
+      </TouchableOpacity>
+
+      <Modal
+        visible={navModalVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setNavModalVisible(false)}
+      >
+        <NavigationScreen
+          initialCenter={{ lat: region.lat, lon: region.lon }}
+          onClose={() => setNavModalVisible(false)}
+        />
+      </Modal>
+
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}

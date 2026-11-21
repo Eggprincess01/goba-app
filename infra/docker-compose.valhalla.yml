@@ -1,0 +1,24 @@
+# GOBA Maps - 自架 Valhalla 路線引擎（台灣 OSM 圖資）
+# 建議規格：至少 2 vCPU / 4GB RAM / 15GB 磁碟（勿部署於 1GB RAM 主站 VPS，避免 OOM 影響官網）
+# 啟動方式：docker compose -f docker-compose.valhalla.yml up -d
+# 啟動完成後，於 GOBA 後端環境變數設定：
+#   VALHALLA_BASE_URL=http://<valhalla-host>:8002/route
+
+services:
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    container_name: goba-valhalla-taiwan
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./valhalla_data:/custom_files
+    environment:
+      - tile_urls=https://download.geofabrik.de/asia/taiwan-latest.osm.pbf
+      - use_tiles_ignore_pbf=True
+      - force_rebuild=False
+      - force_rebuild_elevation=False
+      - build_elevation=False
+      - build_admins=True
+      - build_time_zones=False
+      - serve_tiles=True

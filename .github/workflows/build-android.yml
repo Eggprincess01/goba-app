@@ -1,0 +1,62 @@
+name: Build Android APK (GOBA Maps)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Build Standalone Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Prebuild Android project
+        run: npx expo prebuild --platform android --clean
+
+      - name: Build Release APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Package & Sign Test APK
+        run: |
+          RAW_APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          echo "Found APK: $RAW_APK"
+          cp "$RAW_APK" 鍋巴GOBA-android.apk
+          # 若為 unsigned APK，以測試用 keystore 簽署以便 Android 實機直接安裝測試
+          if [[ "$RAW_APK" == *"unsigned"* ]]; then
+            keytool -genkey -v -keystore test-debug.keystore -storepass android -alias goba -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=GOBA Maps, OU=Dev, O=GOBA, L=Taipei, S=Taiwan, C=TW"
+            BUILD_TOOLS=$(ls -d "$ANDROID_HOME/build-tools/"* | sort -V | tail -n 1)
+            "$BUILD_TOOLS/zipalign" -f 4 "$RAW_APK" 鍋巴GOBA-aligned.apk
+            "$BUILD_TOOLS/apksigner" sign --ks test-debug.keystore --ks-pass pass:android --key-pass pass:android --out 鍋巴GOBA-android.apk 鍋巴GOBA-aligned.apk
+          fi
+          ls -lh 鍋巴GOBA-android.apk
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 鍋巴GOBA-android-apk
+          path: 鍋巴GOBA-android.apk
+          retention-days: 7
