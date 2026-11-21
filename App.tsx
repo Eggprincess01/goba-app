@@ -21,11 +21,27 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
 import * as WebBrowser from 'expo-web-browser';
 import * as Location from 'expo-location';
-import MapView, { Marker, Region } from 'react-native-maps';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import MapView from 'react-native-maps';
+
+import { styles } from './styles/theme';
+import {
+  AccountPrefs,
+  COMMON_MAINT_ITEMS,
+  DEFAULT_PREFS,
+  FUEL_OPTIONS,
+  FuelPref,
+  MaintLog,
+  MaintSubItem,
+  MapCategory,
+  RefuelLog,
+  TabType,
+  VehicleFilter,
+  VehicleItem,
+} from './types';
 import {
   API_BASE,
   TAIWAN_REGIONS,
@@ -52,159 +68,54 @@ import {
   addUserFavorite,
   fetchNearbyPOIs,
   fetchLiveTraffic,
+  fetchCloudGarage,
+  pushCloudGarage,
   calcDaysUntilDate,
   calcInspectionStatus,
+  getReadableError,
 } from './services/api';
+import {
+  deleteSecureToken,
+  loadLocalState,
+  saveLocalMaints,
+  saveLocalPrefs,
+  saveLocalRefuels,
+  saveLocalRegion,
+  saveLocalUser,
+  saveLocalVehicles,
+  setSecureToken,
+  touchLocalUpdatedAt,
+} from './services/storage';
+
+import { HomeTab } from './components/HomeTab';
+import { GarageTab } from './components/GarageTab';
+import { MapTab } from './components/MapTab';
+import { ServicesTab } from './components/ServicesTab';
+import { ProfileTab } from './components/ProfileTab';
 
 WebBrowser.maybeCompleteAuthSession();
 
-type TabType = 'home' | 'garage' | 'map' | 'services' | 'profile';
-type VehicleFilter = 'all' | 'scooter' | 'car';
-type MapCategory = 'gas' | 'parking' | 'traffic' | 'dmv';
-type FuelPref = '92' | '95' | '98' | 'diesel';
-
-interface VehicleItem {
-  id: string;
-  nickname: string;
-  plate: string;
-  category: 'scooter' | 'car';
-  typeLabel: string;
-  mileage: number;
-  nextMaintKm: number;
-  avgFuel: number;
-  manufactureYM?: string;      // 出廠年月 YYYY-MM
-  lastInspectionDate?: string; // 上次定檢日期 YYYY-MM-DD
-  insuranceExpiry?: string;    // 強制險到期日 YYYY-MM-DD（未設定時為空，不亂填假天數）
-  accentColor: string;
-}
-
-interface RefuelLog {
-  id: string;
-  vehicleId: string;
-  vehicleName: string;
-  date: string;
-  fuelType: FuelPref;
-  fuelLabel: string;
-  unitPrice: number;
-  liters: number;
-  originalAmount: number;
-  paidAmount: number; // 若有自助折扣，則為折扣後實付金額
-  odometer: number;
-  kmPerLiter?: number;
-}
-
-interface MaintSubItem {
-  id: string;
-  name: string;
-  cost: number;
-}
-
-interface MaintLog {
-  id: string;
-  vehicleId: string;
-  vehicleName: string;
-  date: string;
-  items: MaintSubItem[];
-  totalCost: number;
-  odometer: number;
-}
-
-interface AccountPrefs {
-  customNickname: string;
-  preferredFuel: FuelPref;
-  notifyOil: boolean;
-  notifyInsurance: boolean;
-  notifyMaint: boolean;
-}
-
-const STORAGE_KEYS = {
-  TOKEN: 'goba_session_token',
-  USER: 'goba_user_profile',
-  REGION: 'goba_selected_region_v1',
-  PREFS: 'goba_account_prefs_v1',
-  VEHICLES: 'goba_vehicles_v1',
-  VEHICLES_LEGACY_V2: 'goba_vehicles_v2',
-  REFUELS: 'goba_refuels_v1',
-  MAINTS: 'goba_maints_v1',
-};
-
-const DEFAULT_PREFS: AccountPrefs = {
-  customNickname: '',
-  preferredFuel: '95',
-  notifyOil: true,
-  notifyInsurance: true,
-  notifyMaint: true,
-};
-
-const DEFAULT_VEHICLES: VehicleItem[] = [
-  {
-    id: '1',
-    nickname: 'Kawasaki Ninja 400',
-    plate: '9969',
-    category: 'scooter',
-    typeLabel: '大型重機 (黃牌)',
-    mileage: 12860,
-    nextMaintKm: 15000,
-    avgFuel: 26.4,
-    manufactureYM: '',
-    lastInspectionDate: '',
-    insuranceExpiry: '',
-    accentColor: '#16A34A',
-  },
-  {
-    id: '2',
-    nickname: 'JET SL+ 158',
-    plate: '9969',
-    category: 'scooter',
-    typeLabel: '普通重型機車 (白牌)',
-    mileage: 8320,
-    nextMaintKm: 10000,
-    avgFuel: 39.2,
-    manufactureYM: '',
-    lastInspectionDate: '',
-    insuranceExpiry: '',
-    accentColor: '#EC4899',
-  },
-];
-
-const GAS_BRAND_FILTERS = ['全部', '台灣中油', '台塑石油', '統一速邁樂', '全國加油站', '台亞石油', '山隆加油站'];
-
-const FUEL_OPTIONS: { key: FuelPref; label: string }[] = [
-  { key: '92', label: '92 無鉛汽油' },
-  { key: '95', label: '95 無鉛汽油' },
-  { key: '98', label: '98 無鉛汽油' },
-  { key: 'diesel', label: '超級柴油' },
-];
-
-const COMMON_MAINT_ITEMS = [
-  '更換機油',
-  '更換齒輪油',
-  '更換空氣濾網',
-  '更換前輪胎',
-  '更換後輪胎',
-  '更換煞車皮',
-  '更換電瓶',
-  '傳動清潔',
-  '火星塞',
-];
+// P0 #3: 統一由 app.json 單一來源讀取版本號
+const APP_VERSION = Constants.expoConfig?.version || '1.1.0';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('home');
   const [region, setRegion] = useState<RegionInfo>(TAIWAN_REGIONS[3]);
   const [refreshing, setRefreshing] = useState(false);
 
-  // 即時真實資料
+  // 即時真實資料 + 錯誤狀態 (P1 #4)
   const [weather, setWeather] = useState<LiveWeather | null>(null);
   const [aqi, setAqi] = useState<LiveAqi | null>(null);
   const [oilPrices, setOilPrices] = useState<LiveOilPrices | null>(null);
   const [loadingLive, setLoadingLive] = useState(true);
+  const [liveError, setLiveError] = useState<string | null>(null);
 
   // 地區設定 Modal + GPS
   const [regionModalVisible, setRegionModalVisible] = useState(false);
   const [regionSearch, setRegionSearch] = useState('');
   const [gpsLoading, setGpsLoading] = useState(false);
 
-  // 登入與帳戶偏好
+  // 登入與帳戶偏好 (P0 #1 Keychain Token)
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [userTasks, setUserTasks] = useState<any[]>([]);
@@ -215,11 +126,14 @@ export default function App() {
   const [accountSettingsVisible, setAccountSettingsVisible] = useState(false);
   const [draftNickname, setDraftNickname] = useState('');
 
-  // 車庫持久化資料
+  // 車庫持久化資料 (P0 #2: 預設空陣列，無示範假車) + P1 #6 雲端同步
   const [vehicleFilter, setVehicleFilter] = useState<VehicleFilter>('all');
-  const [vehicles, setVehicles] = useState<VehicleItem[]>(DEFAULT_VEHICLES);
+  const [vehicles, setVehicles] = useState<VehicleItem[]>([]);
   const [refuelLogs, setRefuelLogs] = useState<RefuelLog[]>([]);
   const [maintLogs, setMaintLogs] = useState<MaintLog[]>([]);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState('');
+  const [isSyncingCloud, setIsSyncingCloud] = useState(false);
+  const localUpdatedAtRef = useRef<number>(0);
 
   // 內建真實地圖 + 高公局 1968 即時路況
   const mapRef = useRef<MapView | null>(null);
@@ -228,15 +142,17 @@ export default function App() {
   const [gasBrandFilter, setGasBrandFilter] = useState('全部');
   const [mapPois, setMapPois] = useState<MapPOI[]>([]);
   const [mapLoading, setMapLoading] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
   const [selectedPoi, setSelectedPoi] = useState<MapPOI | null>(null);
 
   const [trafficData, setTrafficData] = useState<LiveTrafficData | null>(null);
   const [trafficLoading, setTrafficLoading] = useState(false);
+  const [trafficError, setTrafficError] = useState<string | null>(null);
   const [trafficSubTab, setTrafficSubTab] = useState<'speeds' | 'incidents'>('speeds');
 
-  // 加油紀錄 Modal（含車輛下拉選單、油品下拉選單、公升/原價自動換算、自助折扣後實付）
+  // 加油紀錄 Modal
   const [refuelModalVisible, setRefuelModalVisible] = useState(false);
-  const [refuelVehicleId, setRefuelVehicleId] = useState<string>('1');
+  const [refuelVehicleId, setRefuelVehicleId] = useState<string>('');
   const [refuelVehicleDropdownOpen, setRefuelVehicleDropdownOpen] = useState(false);
   const [refuelFuelType, setRefuelFuelType] = useState<FuelPref>('95');
   const [refuelFuelDropdownOpen, setRefuelFuelDropdownOpen] = useState(false);
@@ -245,32 +161,29 @@ export default function App() {
   const [refuelDiscountedAmount, setRefuelDiscountedAmount] = useState('');
   const [refuelKm, setRefuelKm] = useState('');
 
-  // 保養紀錄 Modal（含車輛下拉選單 + 多項目清單自由新增）
+  // 保養紀錄 Modal
   const [maintModalVisible, setMaintModalVisible] = useState(false);
-  const [maintVehicleId, setMaintVehicleId] = useState<string>('1');
+  const [maintVehicleId, setMaintVehicleId] = useState<string>('');
   const [maintVehicleDropdownOpen, setMaintVehicleDropdownOpen] = useState(false);
   const [maintDraftItems, setMaintDraftItems] = useState<MaintSubItem[]>([]);
   const [maintCustomName, setMaintCustomName] = useState('');
   const [maintCustomCost, setMaintCustomCost] = useState('');
   const [maintKm, setMaintKm] = useState('');
 
-  // 保險提醒管理 Modal（真實設定到期日，不再亂寫 180 天）
+  // 保險 / 驗車 / 統計 / 新增車輛 Modals
   const [insuranceModalVisible, setInsuranceModalVisible] = useState(false);
-  const [insVehicleId, setInsVehicleId] = useState<string>('1');
+  const [insVehicleId, setInsVehicleId] = useState<string>('');
   const [insVehicleDropdownOpen, setInsVehicleDropdownOpen] = useState(false);
   const [insExpiryInput, setInsExpiryInput] = useState('');
 
-  // 驗車 / 排氣定檢管理 Modal（出廠年月 + 上次定檢日期）
   const [inspectionModalVisible, setInspectionModalVisible] = useState(false);
-  const [inspVehicleId, setInspVehicleId] = useState<string>('1');
+  const [inspVehicleId, setInspVehicleId] = useState<string>('');
   const [inspVehicleDropdownOpen, setInspVehicleDropdownOpen] = useState(false);
   const [inspMfgInput, setInspMfgInput] = useState('');
   const [inspLastDateInput, setInspLastDateInput] = useState('');
 
-  // 油耗與歷史明細 Modal
   const [statsModalVisible, setStatsModalVisible] = useState(false);
 
-  // 新增車輛 Modal（含出廠年月、強制險到期日）
   const [addVehicleModalVisible, setAddVehicleModalVisible] = useState(false);
   const [newVehicleName, setNewVehicleName] = useState('');
   const [newVehiclePlate, setNewVehiclePlate] = useState('');
@@ -280,7 +193,7 @@ export default function App() {
   const [newVehicleInsExpiry, setNewVehicleInsExpiry] = useState('');
   const [newVehicleCategory, setNewVehicleCategory] = useState<'scooter' | 'car'>('scooter');
 
-  // 內建真實「車牌查詢」Modal
+  // 車牌查詢 & 考照雷達 Modals
   const [plateModalVisible, setPlateModalVisible] = useState(false);
   const [plateQuery, setPlateQuery] = useState('9969');
   const [selectedCarType, setSelectedCarType] = useState<CarTypeOption>(PLATE_CAR_TYPES[0]);
@@ -289,7 +202,6 @@ export default function App() {
   const [plateUpdatedTime, setPlateUpdatedTime] = useState('');
   const [plateLoading, setPlateLoading] = useState(false);
 
-  // 內建真實「考照名額雷達」Modal
   const [examModalVisible, setExamModalVisible] = useState(false);
   const [examLicenseType, setExamLicenseType] = useState('3');
   const [examFilterText, setExamFilterText] = useState('');
@@ -297,7 +209,6 @@ export default function App() {
   const [examAvailCount, setExamAvailCount] = useState(0);
   const [examLoading, setExamLoading] = useState(false);
 
-  // 依所選油品取得今日官方單價
   const getFuelUnitPrice = useCallback(
     (fuel: FuelPref): number => {
       if (!oilPrices) return 0;
@@ -315,36 +226,210 @@ export default function App() {
     [oilPrices]
   );
 
-  // -------------------- 載入即時天氣、AQI、中油官方牌價 --------------------
+  // -------------------- P1 #4: 即時天氣、AQI、油價（含離線/錯誤提示） --------------------
   const loadLiveData = useCallback(async (targetRegion: RegionInfo) => {
+    setLoadingLive(true);
+    setLiveError(null);
     try {
       const [wRes, aRes, oRes] = await Promise.allSettled([
         fetchLiveWeather(targetRegion.lat, targetRegion.lon),
         fetchLiveAqi(targetRegion.lat, targetRegion.lon),
         fetchLiveOilPrices(),
       ]);
+      let failCount = 0;
       if (wRes.status === 'fulfilled') setWeather(wRes.value);
+      else failCount++;
       if (aRes.status === 'fulfilled') setAqi(aRes.value);
       if (oRes.status === 'fulfilled') setOilPrices(oRes.value);
+      else failCount++;
+
+      if (failCount === 2) {
+        setLiveError('目前無法更新即時氣象與油價，請檢查網路連線');
+      } else if (failCount === 1) {
+        setLiveError('部分即時資料暫時無法取得，顯示快取內容');
+      }
+    } catch (err) {
+      setLiveError(getReadableError(err));
     } finally {
       setLoadingLive(false);
     }
   }, []);
 
-  // -------------------- 載入高公局 1968 即時路況 --------------------
+  // -------------------- P1 #6: 車庫雲端雙向同步 --------------------
+  const pushGarageToCloud = useCallback(
+    async (
+      token: string | null,
+      nextVehicles: VehicleItem[],
+      nextRefuels: RefuelLog[],
+      nextMaints: MaintLog[],
+      nextPrefs: AccountPrefs,
+      nextRegion: RegionInfo,
+      ts: number
+    ) => {
+      if (!token) return;
+      setIsSyncingCloud(true);
+      try {
+        const res = await pushCloudGarage(
+          token,
+          {
+            vehicles: nextVehicles,
+            refuelLogs: nextRefuels,
+            maintLogs: nextMaints,
+            prefs: nextPrefs,
+            region: nextRegion,
+          },
+          ts
+        );
+        localUpdatedAtRef.current = res.updated_at;
+        await touchLocalUpdatedAt(res.updated_at);
+        const now = new Date();
+        setCloudSyncStatus(
+          `雲端已同步 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+        );
+      } catch {
+        setCloudSyncStatus('本機已儲存（待連線同步）');
+      } finally {
+        setIsSyncingCloud(false);
+      }
+    },
+    []
+  );
+
+  const syncCloudGarageOnLogin = useCallback(
+    async (
+      token: string,
+      curVehicles: VehicleItem[],
+      curRefuels: RefuelLog[],
+      curMaints: MaintLog[],
+      curPrefs: AccountPrefs,
+      curRegion: RegionInfo,
+      localTs: number
+    ) => {
+      setIsSyncingCloud(true);
+      try {
+        const cloud = await fetchCloudGarage(token);
+        if (cloud.exists && cloud.data && cloud.updated_at > localTs) {
+          const cv = Array.isArray(cloud.data.vehicles) ? cloud.data.vehicles : [];
+          const cr = Array.isArray(cloud.data.refuelLogs) ? cloud.data.refuelLogs : [];
+          const cm = Array.isArray(cloud.data.maintLogs) ? cloud.data.maintLogs : [];
+          setVehicles(cv);
+          setRefuelLogs(cr);
+          setMaintLogs(cm);
+          await Promise.all([
+            saveLocalVehicles(cv),
+            saveLocalRefuels(cr),
+            saveLocalMaints(cm),
+            touchLocalUpdatedAt(cloud.updated_at),
+          ]);
+          localUpdatedAtRef.current = cloud.updated_at;
+          if (cv.length > 0) {
+            setRefuelVehicleId(cv[0].id);
+            setMaintVehicleId(cv[0].id);
+            setInsVehicleId(cv[0].id);
+            setInspVehicleId(cv[0].id);
+          }
+          setCloudSyncStatus('已從雲端還原車庫');
+        } else if (curVehicles.length > 0 || curRefuels.length > 0 || curMaints.length > 0) {
+          await pushGarageToCloud(token, curVehicles, curRefuels, curMaints, curPrefs, curRegion, localTs || Date.now());
+        } else {
+          setCloudSyncStatus('雲端同步已啟用');
+        }
+      } catch {
+        setCloudSyncStatus('雲端連線異常（使用本機資料）');
+      } finally {
+        setIsSyncingCloud(false);
+      }
+    },
+    [pushGarageToCloud]
+  );
+
+  const syncBackendAccount = useCallback(
+    async (
+      token: string,
+      curVehicles: VehicleItem[],
+      curRefuels: RefuelLog[],
+      curMaints: MaintLog[],
+      curPrefs: AccountPrefs,
+      curRegion: RegionInfo,
+      localTs: number
+    ) => {
+      try {
+        const profile = await fetchAuthMe(token);
+        if (profile) {
+          setUser(profile);
+          setSessionToken(token);
+          await saveLocalUser(profile);
+          const [tasks, favs] = await Promise.all([
+            fetchUserTasks(token),
+            fetchUserFavorites(token),
+          ]);
+          setUserTasks(tasks);
+          setUserFavorites(favs);
+          syncCloudGarageOnLogin(token, curVehicles, curRefuels, curMaints, curPrefs, curRegion, localTs);
+          return profile;
+        } else {
+          await deleteSecureToken();
+          setUser(null);
+          setSessionToken(null);
+        }
+      } catch {
+        // 離線時保留已快取之登入狀態
+      }
+      return null;
+    },
+    [syncCloudGarageOnLogin]
+  );
+
+  // -------------------- 啟動初始化 --------------------
+  useEffect(() => {
+    const bootstrap = async () => {
+      const local = await loadLocalState();
+      setRegion(local.region);
+      setPrefs(local.prefs);
+      setRefuelFuelType(local.prefs.preferredFuel);
+      setVehicles(local.vehicles);
+      setRefuelLogs(local.refuelLogs);
+      setMaintLogs(local.maintLogs);
+      localUpdatedAtRef.current = local.localUpdatedAt;
+
+      if (local.vehicles.length > 0) {
+        setRefuelVehicleId(local.vehicles[0].id);
+        setMaintVehicleId(local.vehicles[0].id);
+        setInsVehicleId(local.vehicles[0].id);
+        setInspVehicleId(local.vehicles[0].id);
+      }
+      if (local.user) setUser(local.user);
+      if (local.token) {
+        setSessionToken(local.token);
+        syncBackendAccount(
+          local.token,
+          local.vehicles,
+          local.refuelLogs,
+          local.maintLogs,
+          local.prefs,
+          local.region,
+          local.localUpdatedAt
+        );
+      }
+      loadLiveData(local.region);
+    };
+    bootstrap();
+  }, [loadLiveData, syncBackendAccount]);
+
+  // -------------------- 地圖與高公局 1968 即時路況 --------------------
   const loadLiveTraffic = useCallback(async () => {
     setTrafficLoading(true);
+    setTrafficError(null);
     try {
       const data = await fetchLiveTraffic();
       setTrafficData(data);
-    } catch {
-      // 保留前次資料不清空
+    } catch (err) {
+      setTrafficError(getReadableError(err, '無法取得高公局即時路況'));
     } finally {
       setTrafficLoading(false);
     }
   }, []);
 
-  // -------------------- 載入內建地圖真實 POI（請求 ID 保護 + 不閃退不清空） --------------------
   const loadMapPois = useCallback(
     async (lat: number, lon: number, cat: MapCategory) => {
       if (cat === 'traffic') {
@@ -353,13 +438,16 @@ export default function App() {
       }
       const reqId = ++poiReqIdRef.current;
       setMapLoading(true);
+      setMapError(null);
       try {
         const pois = await fetchNearbyPOIs(lat, lon, cat);
         if (reqId === poiReqIdRef.current && pois.length > 0) {
           setMapPois(pois);
         }
-      } catch {
-        // 失敗時保留現有站點，絕不把畫面清空
+      } catch (err) {
+        if (reqId === poiReqIdRef.current) {
+          setMapError(getReadableError(err, '無法取得周邊站點資料'));
+        }
       } finally {
         if (reqId === poiReqIdRef.current) {
           setMapLoading(false);
@@ -369,93 +457,36 @@ export default function App() {
     [loadLiveTraffic]
   );
 
-  // -------------------- 同步會員資料 --------------------
-  const syncBackendAccount = useCallback(async (token: string) => {
-    try {
-      const profile = await fetchAuthMe(token);
-      if (profile) {
-        setUser(profile);
-        setSessionToken(token);
-        await AsyncStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(profile));
-        const [tasks, favs] = await Promise.all([
-          fetchUserTasks(token),
-          fetchUserFavorites(token),
-        ]);
-        setUserTasks(tasks);
-        setUserFavorites(favs);
-        return profile;
-      } else {
-        await AsyncStorage.multiRemove([STORAGE_KEYS.TOKEN, STORAGE_KEYS.USER]);
-        setUser(null);
-        setSessionToken(null);
-      }
-    } catch {
-      // keep cached
-    }
-    return null;
-  }, []);
-
-  // -------------------- 啟動初始化 --------------------
-  useEffect(() => {
-    const bootstrap = async () => {
-      let initialRegion = TAIWAN_REGIONS[3];
-      try {
-        const [savedToken, savedUser, savedRegion, savedPrefs, savedV1, savedV2, savedRefuels, savedMaints] =
-          await Promise.all([
-            AsyncStorage.getItem(STORAGE_KEYS.TOKEN),
-            AsyncStorage.getItem(STORAGE_KEYS.USER),
-            AsyncStorage.getItem(STORAGE_KEYS.REGION),
-            AsyncStorage.getItem(STORAGE_KEYS.PREFS),
-            AsyncStorage.getItem(STORAGE_KEYS.VEHICLES),
-            AsyncStorage.getItem(STORAGE_KEYS.VEHICLES_LEGACY_V2),
-            AsyncStorage.getItem(STORAGE_KEYS.REFUELS),
-            AsyncStorage.getItem(STORAGE_KEYS.MAINTS),
-          ]);
-        if (savedRegion) {
-          initialRegion = JSON.parse(savedRegion);
-          setRegion(initialRegion);
-        }
-        if (savedPrefs) {
-          const parsedPrefs = { ...DEFAULT_PREFS, ...JSON.parse(savedPrefs) };
-          setPrefs(parsedPrefs);
-          setRefuelFuelType(parsedPrefs.preferredFuel);
-        }
-        const rawVehicles = savedV1 || savedV2;
-        if (rawVehicles) {
-          const parsedV: VehicleItem[] = JSON.parse(rawVehicles).map((v: any) => ({
-            ...v,
-            manufactureYM: v.manufactureYM || '',
-            lastInspectionDate: v.lastInspectionDate || '',
-            insuranceExpiry: v.insuranceExpiry || '',
-          }));
-          if (parsedV.length > 0) {
-            setVehicles(parsedV);
-            setRefuelVehicleId(parsedV[0].id);
-            setMaintVehicleId(parsedV[0].id);
-            setInsVehicleId(parsedV[0].id);
-            setInspVehicleId(parsedV[0].id);
-          }
-        }
-        if (savedRefuels) setRefuelLogs(JSON.parse(savedRefuels));
-        if (savedMaints) setMaintLogs(JSON.parse(savedMaints));
-        if (savedUser) setUser(JSON.parse(savedUser));
-        if (savedToken) {
-          setSessionToken(savedToken);
-          syncBackendAccount(savedToken);
-        }
-      } catch {
-        // ignore
-      }
-      loadLiveData(initialRegion);
-    };
-    bootstrap();
-  }, [loadLiveData, syncBackendAccount]);
-
   useEffect(() => {
     if (activeTab === 'map') {
       loadMapPois(region.lat, region.lon, mapCategory);
     }
   }, [activeTab, mapCategory, region.lat, region.lon, loadMapPois]);
+
+  // -------------------- Deep Link 登入回調 --------------------
+  const handleAuthCallbackUrl = useCallback(
+    async (url: string) => {
+      if (!url || !url.startsWith('goba://')) return;
+      const tokenMatch = url.match(/[?&]token=([^&]+)/);
+      const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : '';
+      if (token) {
+        await setSecureToken(token);
+        const profile = await syncBackendAccount(
+          token,
+          vehicles,
+          refuelLogs,
+          maintLogs,
+          prefs,
+          region,
+          localUpdatedAtRef.current
+        );
+        if (profile) {
+          Alert.alert('登入成功 🎉', `歡迎回來，${profile.name}！`);
+        }
+      }
+    },
+    [syncBackendAccount, vehicles, refuelLogs, maintLogs, prefs, region]
+  );
 
   useEffect(() => {
     const sub = Linking.addEventListener('url', ({ url }) => handleAuthCallbackUrl(url));
@@ -463,36 +494,20 @@ export default function App() {
       if (url) handleAuthCallbackUrl(url);
     });
     return () => sub.remove();
-  }, []);
+  }, [handleAuthCallbackUrl]);
 
-  const handleAuthCallbackUrl = async (url: string) => {
-    if (!url || !url.startsWith('goba://')) return;
-    const tokenMatch = url.match(/[?&]token=([^&]+)/);
-    const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : '';
-    if (token) {
-      await AsyncStorage.setItem(STORAGE_KEYS.TOKEN, token);
-      const profile = await syncBackendAccount(token);
-      if (profile) {
-        Alert.alert('登入成功 🎉', `歡迎回來，${profile.name}！`);
-      }
-    }
-  };
-
-  // -------------------- 選擇地區 / GPS 定位 --------------------
+  // -------------------- 地區與 GPS 定位 --------------------
   const selectRegion = async (nextRegion: RegionInfo) => {
     setRegion(nextRegion);
-    await AsyncStorage.setItem(STORAGE_KEYS.REGION, JSON.stringify(nextRegion));
+    const ts = await saveLocalRegion(nextRegion);
+    localUpdatedAtRef.current = ts;
     setRegionModalVisible(false);
     setRegionSearch('');
     loadLiveData(nextRegion);
+    pushGarageToCloud(sessionToken, vehicles, refuelLogs, maintLogs, prefs, nextRegion, ts);
     if (activeTab === 'map') {
       mapRef.current?.animateToRegion(
-        {
-          latitude: nextRegion.lat,
-          longitude: nextRegion.lon,
-          latitudeDelta: 0.035,
-          longitudeDelta: 0.035,
-        },
+        { latitude: nextRegion.lat, longitude: nextRegion.lon, latitudeDelta: 0.035, longitudeDelta: 0.035 },
         450
       );
     }
@@ -527,7 +542,7 @@ export default function App() {
     }
   };
 
-  // -------------------- Google 一鍵登入 --------------------
+  // -------------------- Google 一鍵登入 / 登出 --------------------
   const handleGoogleLogin = async () => {
     setIsLoadingAuth(true);
     try {
@@ -551,33 +566,40 @@ export default function App() {
         style: 'destructive',
         onPress: async () => {
           if (sessionToken) await logoutAuth(sessionToken);
-          await AsyncStorage.multiRemove([STORAGE_KEYS.TOKEN, STORAGE_KEYS.USER]);
+          await deleteSecureToken();
           setSessionToken(null);
           setUser(null);
           setUserTasks([]);
           setUserFavorites([]);
+          setCloudSyncStatus('');
           Alert.alert('已登出', '您已安全登出鍋巴 GOBA。');
         },
       },
     ]);
   };
 
-  const saveAccountPrefs = async (next: AccountPrefs) => {
+  const saveAccountPrefsAndSync = async (next: AccountPrefs) => {
     setPrefs(next);
-    await AsyncStorage.setItem(STORAGE_KEYS.PREFS, JSON.stringify(next));
+    const ts = await saveLocalPrefs(next);
+    localUpdatedAtRef.current = ts;
+    pushGarageToCloud(sessionToken, vehicles, refuelLogs, maintLogs, next, region, ts);
   };
 
   const onPullRefresh = async () => {
     setRefreshing(true);
     await loadLiveData(region);
-    if (sessionToken) await syncBackendAccount(sessionToken);
+    if (sessionToken) {
+      await syncBackendAccount(sessionToken, vehicles, refuelLogs, maintLogs, prefs, region, localUpdatedAtRef.current);
+    }
     setRefreshing(false);
   };
 
-  // -------------------- 車庫 CRUD --------------------
-  const persistVehicles = async (next: VehicleItem[]) => {
-    setVehicles(next);
-    await AsyncStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(next));
+  // -------------------- 車庫 CRUD（本機儲存 + 雲端自動同步） --------------------
+  const persistVehiclesAndSync = async (nextVehicles: VehicleItem[]) => {
+    setVehicles(nextVehicles);
+    const ts = await saveLocalVehicles(nextVehicles);
+    localUpdatedAtRef.current = ts;
+    pushGarageToCloud(sessionToken, nextVehicles, refuelLogs, maintLogs, prefs, region, ts);
   };
 
   const handleAddVehicle = async () => {
@@ -613,7 +635,14 @@ export default function App() {
       insuranceExpiry: newVehicleInsExpiry.trim(),
       accentColor: newVehicleCategory === 'scooter' ? '#EC4899' : '#2563EB',
     };
-    await persistVehicles([item, ...vehicles]);
+    const nextList = [item, ...vehicles];
+    await persistVehiclesAndSync(nextList);
+    if (nextList.length === 1) {
+      setRefuelVehicleId(item.id);
+      setMaintVehicleId(item.id);
+      setInsVehicleId(item.id);
+      setInspVehicleId(item.id);
+    }
     setAddVehicleModalVisible(false);
     setNewVehicleName('');
     setNewVehiclePlate('');
@@ -631,33 +660,27 @@ export default function App() {
         text: '移除',
         style: 'destructive',
         onPress: async () => {
-          await persistVehicles(vehicles.filter((item) => item.id !== v.id));
+          await persistVehiclesAndSync(vehicles.filter((item) => item.id !== v.id));
         },
       },
     ]);
   };
 
-  // -------------------- 加油雙向自動推算（公升 <-> 原價金額） --------------------
+  // -------------------- 加油雙向換算與儲存 --------------------
   const onChangeRefuelLiters = (val: string) => {
     setRefuelLiters(val);
     const l = parseFloat(val);
     const unit = getFuelUnitPrice(refuelFuelType);
-    if (!isNaN(l) && l > 0 && unit > 0) {
-      setRefuelOriginalAmount(String(Math.round(l * unit)));
-    } else if (!val.trim()) {
-      setRefuelOriginalAmount('');
-    }
+    if (!isNaN(l) && l > 0 && unit > 0) setRefuelOriginalAmount(String(Math.round(l * unit)));
+    else if (!val.trim()) setRefuelOriginalAmount('');
   };
 
   const onChangeRefuelOriginalAmount = (val: string) => {
     setRefuelOriginalAmount(val);
     const amt = parseFloat(val);
     const unit = getFuelUnitPrice(refuelFuelType);
-    if (!isNaN(amt) && amt > 0 && unit > 0) {
-      setRefuelLiters((amt / unit).toFixed(2));
-    } else if (!val.trim()) {
-      setRefuelLiters('');
-    }
+    if (!isNaN(amt) && amt > 0 && unit > 0) setRefuelLiters((amt / unit).toFixed(2));
+    else if (!val.trim()) setRefuelLiters('');
   };
 
   const onSelectRefuelFuelType = (fuel: FuelPref) => {
@@ -665,9 +688,7 @@ export default function App() {
     setRefuelFuelDropdownOpen(false);
     const unit = getFuelUnitPrice(fuel);
     const l = parseFloat(refuelLiters);
-    if (!isNaN(l) && l > 0 && unit > 0) {
-      setRefuelOriginalAmount(String(Math.round(l * unit)));
-    }
+    if (!isNaN(l) && l > 0 && unit > 0) setRefuelOriginalAmount(String(Math.round(l * unit)));
   };
 
   const handleAddRefuel = async () => {
@@ -711,7 +732,7 @@ export default function App() {
 
     const nextLogs = [newLog, ...refuelLogs];
     setRefuelLogs(nextLogs);
-    await AsyncStorage.setItem(STORAGE_KEYS.REFUELS, JSON.stringify(nextLogs));
+    await saveLocalRefuels(nextLogs);
 
     const nextVehicles = vehicles.map((v) =>
       v.id === target.id
@@ -722,7 +743,10 @@ export default function App() {
           }
         : v
     );
-    await persistVehicles(nextVehicles);
+    setVehicles(nextVehicles);
+    const ts = await saveLocalVehicles(nextVehicles);
+    localUpdatedAtRef.current = ts;
+    pushGarageToCloud(sessionToken, nextVehicles, nextLogs, maintLogs, prefs, region, ts);
 
     setRefuelModalVisible(false);
     setRefuelLiters('');
@@ -738,7 +762,7 @@ export default function App() {
     );
   };
 
-  // -------------------- 多項目保養 / 維修紀錄 --------------------
+  // -------------------- 多項目保養紀錄 --------------------
   const addMaintSubItem = (nameToAdd?: string, costToAdd?: string) => {
     const nm = (nameToAdd !== undefined ? nameToAdd : maintCustomName).trim();
     if (!nm) {
@@ -784,15 +808,16 @@ export default function App() {
     };
     const nextLogs = [newLog, ...maintLogs];
     setMaintLogs(nextLogs);
-    await AsyncStorage.setItem(STORAGE_KEYS.MAINTS, JSON.stringify(nextLogs));
+    await saveLocalMaints(nextLogs);
 
     const interval = target.category === 'scooter' ? 2000 : 5000;
     const nextVehicles = vehicles.map((v) =>
-      v.id === target.id
-        ? { ...v, mileage: Math.max(v.mileage, odo), nextMaintKm: odo + interval }
-        : v
+      v.id === target.id ? { ...v, mileage: Math.max(v.mileage, odo), nextMaintKm: odo + interval } : v
     );
-    await persistVehicles(nextVehicles);
+    setVehicles(nextVehicles);
+    const ts = await saveLocalVehicles(nextVehicles);
+    localUpdatedAtRef.current = ts;
+    pushGarageToCloud(sessionToken, nextVehicles, refuelLogs, nextLogs, prefs, region, ts);
 
     setMaintModalVisible(false);
     setMaintDraftItems([]);
@@ -805,16 +830,7 @@ export default function App() {
     );
   };
 
-  // -------------------- 儲存保險到期日 --------------------
-  const openInsuranceModal = () => {
-    const v = vehicles.find((x) => x.id === insVehicleId) || vehicles[0];
-    if (v) {
-      setInsVehicleId(v.id);
-      setInsExpiryInput(v.insuranceExpiry || '');
-    }
-    setInsuranceModalVisible(true);
-  };
-
+  // -------------------- 保險 & 定檢日期儲存 --------------------
   const handleSaveInsurance = async () => {
     if (insExpiryInput.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(insExpiryInput.trim())) {
       Alert.alert('格式錯誤', '強制險到期日請輸入 YYYY-MM-DD（例如：2027-05-20）');
@@ -824,20 +840,9 @@ export default function App() {
     const next = vehicles.map((v) =>
       v.id === insVehicleId ? { ...v, insuranceExpiry: insExpiryInput.trim() } : v
     );
-    await persistVehicles(next);
+    await persistVehiclesAndSync(next);
     setInsuranceModalVisible(false);
     Alert.alert('已更新 🛡️', '強制險到期日已儲存！');
-  };
-
-  // -------------------- 儲存出廠年月與上次定檢日期 --------------------
-  const openInspectionModal = () => {
-    const v = vehicles.find((x) => x.id === inspVehicleId) || vehicles[0];
-    if (v) {
-      setInspVehicleId(v.id);
-      setInspMfgInput(v.manufactureYM || '');
-      setInspLastDateInput(v.lastInspectionDate || '');
-    }
-    setInspectionModalVisible(true);
   };
 
   const handleSaveInspection = async () => {
@@ -855,12 +860,12 @@ export default function App() {
         ? { ...v, manufactureYM: inspMfgInput.trim(), lastInspectionDate: inspLastDateInput.trim() }
         : v
     );
-    await persistVehicles(next);
+    await persistVehiclesAndSync(next);
     setInspectionModalVisible(false);
     Alert.alert('已更新 ✅', '車輛出廠年月與定檢紀錄已儲存！');
   };
 
-  // -------------------- 車牌查詢 ＆ 考照雷達 --------------------
+  // -------------------- 車牌查詢 & 考照雷達 --------------------
   const runPlateSearch = async (queryOverride?: string, typeOverride?: CarTypeOption) => {
     const q = queryOverride !== undefined ? queryOverride : plateQuery;
     const ct = typeOverride !== undefined ? typeOverride : selectedCarType;
@@ -870,8 +875,8 @@ export default function App() {
       setPlateResults(res.plates);
       setPlateTotal(res.total);
       setPlateUpdatedTime(res.updated_time);
-    } catch {
-      Alert.alert('查詢失敗', '無法連線至車牌資料庫，請確認網路狀態後再試！');
+    } catch (err) {
+      Alert.alert('查詢失敗', getReadableError(err, '無法連線至車牌資料庫'));
     } finally {
       setPlateLoading(false);
     }
@@ -890,12 +895,21 @@ export default function App() {
       ]);
       return;
     }
-    const ok = await addUserFavorite(sessionToken, item.plate_number, selectedCarType.apiValue, item.motor_vehicles_office);
-    if (ok) {
-      Alert.alert('收藏成功 ❤️', `已將【${item.plate_number}】加入您的收藏清單！`);
-      syncBackendAccount(sessionToken);
-    } else {
-      Alert.alert('提示', '此車牌可能已在您的收藏清單中。');
+    try {
+      const ok = await addUserFavorite(
+        sessionToken,
+        item.plate_number,
+        selectedCarType.apiValue,
+        item.motor_vehicles_office
+      );
+      if (ok) {
+        Alert.alert('收藏成功 ❤️', `已將【${item.plate_number}】加入您的收藏清單！`);
+        syncBackendAccount(sessionToken, vehicles, refuelLogs, maintLogs, prefs, region, localUpdatedAtRef.current);
+      } else {
+        Alert.alert('提示', '此車牌可能已在您的收藏清單中。');
+      }
+    } catch (err) {
+      Alert.alert('收藏失敗', getReadableError(err));
     }
   };
 
@@ -906,8 +920,8 @@ export default function App() {
       const res = await fetchExamSlots(lt);
       setExamSlots(res.slots.filter((s) => !s.is_full && s.quota > 0));
       setExamAvailCount(res.available_slots);
-    } catch {
-      Alert.alert('連線失敗', '無法取得監理站考照名額，請稍後再試！');
+    } catch (err) {
+      Alert.alert('連線失敗', getReadableError(err, '無法取得監理站考照名額'));
     } finally {
       setExamLoading(false);
     }
@@ -935,18 +949,9 @@ export default function App() {
   };
 
   const displayName = prefs.customNickname.trim() || user?.name || '鍋巴車友';
-  const filteredVehicles =
-    vehicleFilter === 'all' ? vehicles : vehicles.filter((v) => v.category === vehicleFilter);
-
-  const visibleMapPois =
-    mapCategory === 'gas' && gasBrandFilter !== '全部'
-      ? mapPois.filter((p) => p.brand === gasBrandFilter)
-      : mapPois;
-
   const filteredRegions = TAIWAN_REGIONS.filter((r) =>
     regionSearch.trim() ? r.name.includes(regionSearch.trim()) : true
   );
-
   const filteredExamSlots = examSlots
     .filter((s) => {
       if (!examFilterText.trim()) return true;
@@ -963,44 +968,6 @@ export default function App() {
   const activeMaintVehicle = vehicles.find((v) => v.id === maintVehicleId) || vehicles[0];
   const activeInsVehicle = vehicles.find((v) => v.id === insVehicleId) || vehicles[0];
   const activeInspVehicle = vehicles.find((v) => v.id === inspVehicleId) || vehicles[0];
-
-  const homeQuickActions = [
-    { label: '我的車庫', icon: 'car-sport', color: '#EC4899', bg: '#FCE7F3', onPress: () => setActiveTab('garage') },
-    {
-      label: '油價查詢',
-      icon: 'flame',
-      color: '#F97316',
-      bg: '#FFEDD5',
-      onPress: () =>
-        Alert.alert(
-          `台灣中油官方牌價${oilPrices?.updateDate ? `（${oilPrices.updateDate}）` : ''}`,
-          `92 無鉛：$${oilPrices?.price92 || '--'} / 公升\n95 無鉛：$${oilPrices?.price95 || '--'} / 公升\n98 無鉛：$${oilPrices?.price98 || '--'} / 公升\n超級柴油：$${oilPrices?.priceDiesel || '--'} / 公升`
-        ),
-    },
-    {
-      label: '天氣資訊',
-      icon: 'partly-sunny',
-      color: '#0EA5E9',
-      bg: '#E0F2FE',
-      onPress: () =>
-        Alert.alert(
-          `${region.name} 即時氣象`,
-          `目前氣溫：${weather?.temp ?? '--'}°C（${weather?.desc ?? '讀取中'}）\n今日高低溫：${weather?.high ?? '--'}°C / ${weather?.low ?? '--'}°C\n降雨機率：${weather?.rainProb ?? '--'}%\n相對濕度：${weather?.humidity ?? '--'}%\n風速：${weather?.windSpeed ?? '--'} km/h\n空氣品質 AQI：${aqi?.usAqi ?? '--'}（${aqi?.label ?? '--'}）`
-        ),
-    },
-    { label: '即時路況', icon: 'navigate-circle', color: '#F43F5E', bg: '#FFE4E6', onPress: () => { setMapCategory('traffic'); setActiveTab('map'); } },
-    { label: '考照服務', icon: 'card', color: '#3B82F6', bg: '#DBEAFE', onPress: openExamRadarModal },
-    { label: '車牌服務', icon: 'pricetag', color: '#DB2777', bg: '#FCE7F3', onPress: openPlateSearchModal },
-    { label: '停車資訊', icon: 'location', color: '#2563EB', bg: '#DBEAFE', onPress: () => { setMapCategory('parking'); setActiveTab('map'); } },
-    { label: '更多服務', icon: 'ellipsis-horizontal-circle', color: '#A855F7', bg: '#F3E8FF', onPress: () => setActiveTab('services') },
-  ] as const;
-
-  const mapInitialRegion: Region = {
-    latitude: region.lat,
-    longitude: region.lon,
-    latitudeDelta: 0.035,
-    longitudeDelta: 0.035,
-  };
 
   return (
     <LinearGradient
@@ -1073,269 +1040,32 @@ export default function App() {
           </View>
         )}
 
-        {/* ==================== 內建真實地圖頁（高公局 1968 即時路況 + 高速多品牌加油站/停車場） ==================== */}
+        {/* ==================== 5 大模組分頁 ==================== */}
         {activeTab === 'map' ? (
-          <View style={styles.mapTabContainer}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={{ maxHeight: 44 }}
-              contentContainerStyle={{ paddingHorizontal: 16, gap: 8, alignItems: 'center' }}
-            >
-              {[
-                { key: 'gas', label: '⛽ 加油站' },
-                { key: 'parking', label: '🅿️ 停車場' },
-                { key: 'traffic', label: '🚦 即時路況' },
-                { key: 'dmv', label: '🏢 監理站' },
-              ].map((item) => {
-                const active = mapCategory === item.key;
-                return (
-                  <TouchableOpacity
-                    key={item.key}
-                    style={[styles.mapFilterPill, active && styles.mapFilterPillActive]}
-                    onPress={() => setMapCategory(item.key as MapCategory)}
-                  >
-                    <Text style={[styles.mapFilterText, active && styles.mapFilterTextActive]}>
-                      {item.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-
-            {/* 加油站多品牌篩選列 */}
-            {mapCategory === 'gas' && (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={{ maxHeight: 38, marginTop: 6 }}
-                contentContainerStyle={{ paddingHorizontal: 16, gap: 6, alignItems: 'center' }}
-              >
-                {GAS_BRAND_FILTERS.map((brand) => {
-                  const active = gasBrandFilter === brand;
-                  return (
-                    <TouchableOpacity
-                      key={brand}
-                      style={[styles.brandChip, active && styles.brandChipActive]}
-                      onPress={() => setGasBrandFilter(brand)}
-                    >
-                      <Text style={[styles.brandChipText, active && styles.brandChipTextActive]}>
-                        {brand}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-            )}
-
-            {/* 即時路況子頁籤：國道即時車速 / 1968 即時事件 */}
-            {mapCategory === 'traffic' && (
-              <View style={styles.trafficSubTabRow}>
-                <TouchableOpacity
-                  style={[styles.trafficSubBtn, trafficSubTab === 'speeds' && styles.trafficSubBtnActive]}
-                  onPress={() => setTrafficSubTab('speeds')}
-                >
-                  <Text style={[styles.trafficSubText, trafficSubTab === 'speeds' && { color: '#FFF' }]}>
-                    ⚡ 國道即時車速 ({trafficData?.speeds.length || 0})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.trafficSubBtn, trafficSubTab === 'incidents' && styles.trafficSubBtnActive]}
-                  onPress={() => setTrafficSubTab('incidents')}
-                >
-                  <Text style={[styles.trafficSubText, trafficSubTab === 'incidents' && { color: '#FFF' }]}>
-                    ⚠️ 1968 即時事件 ({trafficData?.incidents.length || 0})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.trafficRefreshIcon} onPress={loadLiveTraffic}>
-                  <Ionicons name="refresh" size={16} color="#9D174D" />
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {/* 內建原生互動地圖 */}
-            <View style={[styles.mapFrame, mapCategory === 'traffic' && { height: 200 }]}>
-              <MapView
-                ref={mapRef}
-                style={StyleSheet.absoluteFill}
-                initialRegion={mapInitialRegion}
-                showsUserLocation
-                showsMyLocationButton={false}
-                showsTraffic={mapCategory === 'traffic'}
-              >
-              {mapCategory !== 'traffic' &&
-                  visibleMapPois
-                    .filter((p) => p.category === mapCategory)
-                    .map((poi) => (
-                      <Marker
-                        key={poi.id}
-                        coordinate={{ latitude: poi.lat, longitude: poi.lon }}
-                        title={poi.name}
-                        description={
-                          poi.category === 'parking'
-                            ? `${poi.brand}${poi.rate ? ` • ${poi.rate}` : ''} • ${poi.distanceKm} km`
-                            : `${poi.brand} • 距離 ${poi.distanceKm} km`
-                        }
-                        pinColor={poi.brandColor}
-                        onPress={() => setSelectedPoi(poi)}
-                      />
-                    ))}
-                {mapCategory === 'traffic' &&
-                  (trafficData?.incidents || [])
-                    .filter((inc) => inc.lat && inc.lon)
-                    .map((inc) => (
-                      <Marker
-                        key={inc.id}
-                        coordinate={{ latitude: inc.lat!, longitude: inc.lon! }}
-                        title={inc.title}
-                        description={`${inc.type}：${inc.detail}`}
-                        pinColor="#DC2626"
-                      />
-                    ))}
-              </MapView>
-
-              <TouchableOpacity style={styles.mapRegionFloatBtn} onPress={() => setRegionModalVisible(true)}>
-                <Ionicons name="location" size={13} color="#DB2777" />
-                <Text style={styles.mapRegionFloatText}>{region.name}</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* 下方資料列表 */}
-            <View style={styles.mapListWrap}>
-              {mapCategory === 'traffic' ? (
-                trafficLoading && !trafficData ? (
-                  <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-                    <ActivityIndicator size="small" color="#EC4899" />
-                    <Text style={{ fontSize: 12, color: '#9D174D', marginTop: 6 }}>
-                      正在抓取高公局 1968 官方即時路況...
-                    </Text>
-                  </View>
-                ) : (
-                  <ScrollView
-                    showsVerticalScrollIndicator={false}
-                    contentContainerStyle={{ paddingBottom: 110, gap: 8 }}
-                  >
-                    <Text style={{ fontSize: 11, color: '#9D174D', fontWeight: '600', marginBottom: 2 }}>
-                      資料來源：{trafficData?.source || '高公局 1968'} • 更新 {trafficData?.updated_at || '--:--'}
-                    </Text>
-
-                    {trafficSubTab === 'speeds' ? (
-                      (trafficData?.speeds || []).length === 0 ? (
-                        <Text style={styles.emptyText}>暫無國道車速回報資料</Text>
-                      ) : (
-                        (trafficData?.speeds || []).map((sp) => (
-                          <BlurView key={sp.id} intensity={68} tint="light" style={styles.poiRowCard}>
-                            <View style={{ flex: 1 }}>
-                              <Text style={styles.poiNameText}>{sp.section}</Text>
-                              <Text style={styles.poiAddrText}>{sp.road}</Text>
-                            </View>
-                            <View style={{ alignItems: 'flex-end' }}>
-                              <Text style={{ fontSize: 16, fontWeight: '900', color: sp.color }}>
-                                {sp.speed} km/h
-                              </Text>
-                              <View style={[styles.poiBrandPill, { backgroundColor: `${sp.color}18`, marginTop: 2 }]}>
-                                <Text style={[styles.poiBrandText, { color: sp.color }]}>{sp.status}</Text>
-                              </View>
-                            </View>
-                          </BlurView>
-                        ))
-                      )
-                    ) : (trafficData?.incidents || []).length === 0 ? (
-                      <Text style={styles.emptyText}>目前全台國道無通報事件 🟢</Text>
-                    ) : (
-                      (trafficData?.incidents || []).map((inc) => (
-                        <BlurView key={inc.id} intensity={68} tint="light" style={styles.poiRowCard}>
-                          <View style={{ flex: 1 }}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                              <View style={[styles.poiBrandPill, { backgroundColor: '#FEE2E2' }]}>
-                                <Text style={[styles.poiBrandText, { color: '#DC2626' }]}>{inc.type}</Text>
-                              </View>
-                              <Text style={styles.poiDistText}>{inc.time}</Text>
-                            </View>
-                            <Text style={styles.poiNameText}>{inc.title}</Text>
-                            <Text style={styles.poiAddrText}>{inc.detail}</Text>
-                          </View>
-                        </BlurView>
-                      ))
-                    )}
-                  </ScrollView>
-                )
-              ) : mapLoading && mapPois.length === 0 ? (
-                <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-                  <ActivityIndicator size="small" color="#EC4899" />
-                  <Text style={{ fontSize: 12, color: '#9D174D', marginTop: 6 }}>
-                    正在載入 {region.name} 周邊站點...
-                  </Text>
-                </View>
-              ) : (
-                <ScrollView
-                  showsVerticalScrollIndicator={false}
-                  contentContainerStyle={{ paddingBottom: 110, gap: 8 }}
-                >
-                  {visibleMapPois.filter((p) => p.category === mapCategory).length === 0 ? (
-                    <Text style={styles.emptyText}>此篩選條件下暫無站點，可切換「全部」或更換地區</Text>
-                  ) : (
-                    visibleMapPois
-                      .filter((p) => p.category === mapCategory)
-                      .map((poi) => {
-                        const isSel = selectedPoi?.id === poi.id;
-                        return (
-                          <TouchableOpacity key={poi.id} activeOpacity={0.82} onPress={() => focusPoiOnMap(poi)}>
-                            <BlurView
-                              intensity={68}
-                              tint="light"
-                              style={[styles.poiRowCard, isSel && styles.poiRowCardSelected]}
-                            >
-                              <View style={{ flex: 1 }}>
-                                <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                                  <View style={[styles.poiBrandPill, { backgroundColor: `${poi.brandColor}18` }]}>
-                                    <Text style={[styles.poiBrandText, { color: poi.brandColor }]}>
-                                      {poi.brand}
-                                    </Text>
-                                  </View>
-                                  {poi.availableMotor != null && poi.availableMotor >= 0 && (
-                                    <View style={[styles.poiBrandPill, { backgroundColor: '#FCE7F3' }]}>
-                                      <Text style={[styles.poiBrandText, { color: '#BE185D' }]}>
-                                        機車剩 {poi.availableMotor} 位
-                                      </Text>
-                                    </View>
-                                  )}
-                                  {poi.isSelfService && (
-                                    <View style={[styles.poiBrandPill, { backgroundColor: '#FEF3C7' }]}>
-                                      <Text style={[styles.poiBrandText, { color: '#B45309' }]}>刷卡自助</Text>
-                                    </View>
-                                  )}
-                                  <Text style={styles.poiDistText}>{poi.distanceKm} km</Text>
-                                </View>
-                                <Text style={styles.poiNameText} numberOfLines={1}>
-                                  {poi.name}
-                                </Text>
-                                {poi.rate ? (
-                                  <Text style={styles.poiRateText} numberOfLines={2}>
-                                    💰 {poi.rate}
-                                  </Text>
-                                ) : null}
-                                {poi.address ? (
-                                  <Text style={styles.poiAddrText} numberOfLines={1}>
-                                    {poi.address}
-                                  </Text>
-                                ) : null}
-                              </View>
-                              <TouchableOpacity style={styles.poiNavBtn} onPress={() => openPoiNavigation(poi)}>
-                                <Ionicons name="navigate" size={14} color="#FFF" />
-                                <Text style={styles.poiNavBtnText}>導航</Text>
-                              </TouchableOpacity>
-                            </BlurView>
-                          </TouchableOpacity>
-                        );
-                      })
-                  )}
-                </ScrollView>
-              )}
-            </View>
-          </View>
+          <MapTab
+            mapRef={mapRef}
+            region={region}
+            mapCategory={mapCategory}
+            onChangeCategory={setMapCategory}
+            gasBrandFilter={gasBrandFilter}
+            onChangeGasBrand={setGasBrandFilter}
+            mapPois={mapPois}
+            mapLoading={mapLoading}
+            mapError={mapError}
+            selectedPoi={selectedPoi}
+            onSelectPoi={setSelectedPoi}
+            onFocusPoi={focusPoiOnMap}
+            onNavigatePoi={openPoiNavigation}
+            onRetryPois={() => loadMapPois(region.lat, region.lon, mapCategory)}
+            trafficData={trafficData}
+            trafficLoading={trafficLoading}
+            trafficError={trafficError}
+            trafficSubTab={trafficSubTab}
+            onChangeTrafficSubTab={setTrafficSubTab}
+            onRefreshTraffic={loadLiveTraffic}
+            onOpenRegionModal={() => setRegionModalVisible(true)}
+          />
         ) : (
-          /* ==================== 其他 4 分頁主要滑動區域 ==================== */
           <ScrollView
             style={styles.scrollView}
             contentContainerStyle={styles.scrollContent}
@@ -1344,550 +1074,117 @@ export default function App() {
               <RefreshControl refreshing={refreshing} onRefresh={onPullRefresh} tintColor="#EC4899" />
             }
           >
-            {/* -------------------- TAB 1: 首頁 -------------------- */}
             {activeTab === 'home' && (
-              <View style={styles.sectionStack}>
-                {/* 專屬櫻花粉鍋巴橫幅圖片 */}
-                <View style={styles.heroBannerImageWrap}>
-                  <Image
-                    source={require('./assets/hero-banner.jpg')}
-                    style={styles.heroBannerImage}
-                    resizeMode="cover"
-                  />
-                </View>
-
-                {/* 4x2 晶透玻璃快捷方格 */}
-                <View style={styles.quickGrid}>
-                  {homeQuickActions.map((item) => (
-                    <TouchableOpacity
-                      key={item.label}
-                      style={styles.quickTileWrapper}
-                      activeOpacity={0.78}
-                      onPress={item.onPress}
-                    >
-                      <BlurView intensity={55} tint="light" style={styles.quickTileGlass}>
-                        <View style={[styles.quickIconBox, { backgroundColor: item.bg }]}>
-                          <Ionicons name={item.icon as any} size={23} color={item.color} />
-                        </View>
-                        <Text style={styles.quickTileLabel}>{item.label}</Text>
-                      </BlurView>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {/* 今日資訊標題列 */}
-                <View style={styles.sectionHeaderRow}>
-                  <Text style={styles.sectionTitle}>今日資訊</Text>
-                  <TouchableOpacity style={styles.refreshBtn} onPress={onPullRefresh}>
-                    <Ionicons name="refresh" size={13} color="#9D174D" />
-                    <Text style={styles.refreshText}>
-                      {loadingLive ? '同步中...' : `更新 ${weather?.updatedAt || '--:--'}`}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* 真實即時天氣動態玻璃卡片 */}
-                <TouchableOpacity activeOpacity={0.85} onPress={() => setRegionModalVisible(true)}>
-                  <BlurView intensity={65} tint="light" style={styles.glassCard}>
-                    <View style={styles.weatherRow}>
-                      <View style={styles.weatherLeft}>
-                        <View style={styles.weatherIconCircle}>
-                          <Ionicons
-                            name={(weather?.icon as any) || 'partly-sunny'}
-                            size={36}
-                            color={weather?.icon === 'rainy' ? '#3B82F6' : '#F59E0B'}
-                          />
-                        </View>
-                        <View style={{ marginLeft: 12 }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                            <Ionicons name={region.isGps ? 'navigate' : 'location'} size={12} color="#DB2777" />
-                            <Text style={styles.weatherLocation}>{region.name} ▾</Text>
-                          </View>
-                          <Text style={styles.weatherTemp}>
-                            {weather ? `${weather.temp}°C` : '--°C'}
-                          </Text>
-                          <Text style={styles.weatherDesc}>
-                            {weather ? `${weather.desc} • 濕度 ${weather.humidity}%` : '即時氣象載入中...'}
-                          </Text>
-                        </View>
-                      </View>
-                      <View style={styles.weatherRight}>
-                        <Text style={styles.weatherHiLo}>
-                          <Text style={{ color: '#EF4444', fontWeight: '700' }}>
-                            ↑ {weather?.high ?? '--'}°C
-                          </Text>
-                          {'  '}
-                          <Text style={{ color: '#3B82F6', fontWeight: '700' }}>
-                            ↓ {weather?.low ?? '--'}°C
-                          </Text>
-                        </Text>
-                        <View style={styles.rainRow}>
-                          <Ionicons name="water" size={13} color="#3B82F6" />
-                          <Text style={styles.rainText}>降雨機率 {weather?.rainProb ?? '--'}%</Text>
-                        </View>
-                        {aqi && (
-                          <Text style={{ fontSize: 11, fontWeight: '700', color: aqi.color }}>
-                            AQI {aqi.usAqi} {aqi.label}
-                          </Text>
-                        )}
-                      </View>
-                    </View>
-                  </BlurView>
-                </TouchableOpacity>
-
-                {/* 真實中油官方今日油價玻璃卡片 */}
-                <BlurView intensity={65} tint="light" style={styles.glassCard}>
-                  <View style={styles.oilHeaderRow}>
-                    <Text style={styles.oilCardTitle}>
-                      今日油價 (中油官方{oilPrices?.updateDate ? ` ${oilPrices.updateDate}` : ''})
-                    </Text>
-                    <Text style={styles.oilUnit}>元/公升</Text>
-                  </View>
-                  <View style={styles.oilColumnsRow}>
-                    {[
-                      { key: '92' as FuelPref, label: '92 無鉛', val: oilPrices?.price92 || '--' },
-                      { key: '95' as FuelPref, label: '95 無鉛', val: oilPrices?.price95 || '--' },
-                      { key: '98' as FuelPref, label: '98 無鉛', val: oilPrices?.price98 || '--' },
-                      { key: 'diesel' as FuelPref, label: '超柴', val: oilPrices?.priceDiesel || '--' },
-                    ].map((f, idx) => {
-                      const isPref = prefs.preferredFuel === f.key;
-                      return (
-                        <React.Fragment key={f.key}>
-                          {idx > 0 && <View style={styles.oilColDivider} />}
-                          <View style={styles.oilCol}>
-                            <Text style={[styles.oilColLabel, isPref && { color: '#BE185D', fontWeight: '800' }]}>
-                              {f.label}
-                            </Text>
-                            <Text style={[styles.oilColPrice, isPref && { color: '#BE185D' }]}>
-                              {f.val}
-                            </Text>
-                          </View>
-                        </React.Fragment>
-                      );
-                    })}
-                  </View>
-                </BlurView>
-              </View>
+              <HomeTab
+                region={region}
+                weather={weather}
+                aqi={aqi}
+                oilPrices={oilPrices}
+                loadingLive={loadingLive}
+                liveError={liveError}
+                prefs={prefs}
+                onRefresh={onPullRefresh}
+                onOpenRegionModal={() => setRegionModalVisible(true)}
+                onSelectTab={setActiveTab}
+                onOpenMapWithCategory={(cat) => {
+                  setMapCategory(cat);
+                  setActiveTab('map');
+                }}
+                onOpenExamModal={openExamRadarModal}
+                onOpenPlateModal={openPlateSearchModal}
+              />
             )}
 
-            {/* -------------------- TAB 2: 我的車庫 -------------------- */}
             {activeTab === 'garage' && (
-              <View style={styles.sectionStack}>
-                <BlurView intensity={60} tint="light" style={styles.segmentedBar}>
-                  {[
-                    { key: 'all', label: `全部 (${vehicles.length})` },
-                    { key: 'scooter', label: '機車' },
-                    { key: 'car', label: '汽車' },
-                  ].map((seg) => {
-                    const active = vehicleFilter === seg.key;
-                    return (
-                      <TouchableOpacity
-                        key={seg.key}
-                        style={[styles.segmentBtn, active && styles.segmentBtnActive]}
-                        onPress={() => setVehicleFilter(seg.key as VehicleFilter)}
-                      >
-                        <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-                          {seg.label}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </BlurView>
-
-                {filteredVehicles.map((v) => {
-                  const insDays = calcDaysUntilDate(v.insuranceExpiry);
-                  const insp = calcInspectionStatus(v.category, v.manufactureYM, v.lastInspectionDate);
-                  return (
-                    <BlurView key={v.id} intensity={70} tint="light" style={styles.garageVehicleCard}>
-                      <View style={styles.garageTopRow}>
-                        <View style={[styles.vehicleThumbBox, { backgroundColor: `${v.accentColor}15` }]}>
-                          <MaterialCommunityIcons
-                            name={v.category === 'scooter' ? 'motorbike' : 'car'}
-                            size={38}
-                            color={v.accentColor}
-                          />
-                        </View>
-                        <View style={{ flex: 1, marginLeft: 14 }}>
-                          <View style={styles.vehicleTitleRow}>
-                            <Text style={styles.vehicleName}>{v.nickname}</Text>
-                            <TouchableOpacity
-                              onPress={() =>
-                                Alert.alert(
-                                  v.nickname,
-                                  `車種：${v.typeLabel}\n出廠年月：${v.manufactureYM || '尚未設定'}\n定檢狀態：${insp.statusText}\n強制險到期：${v.insuranceExpiry ? `${v.insuranceExpiry} (剩 ${insDays} 天)` : '尚未設定'}`,
-                                  [
-                                    { text: '關閉', style: 'cancel' },
-                                    {
-                                      text: '🛡️ 設定保險日期',
-                                      onPress: () => {
-                                        setInsVehicleId(v.id);
-                                        setInsExpiryInput(v.insuranceExpiry || '');
-                                        setInsuranceModalVisible(true);
-                                      },
-                                    },
-                                    {
-                                      text: '✅ 設定出廠/定檢',
-                                      onPress: () => {
-                                        setInspVehicleId(v.id);
-                                        setInspMfgInput(v.manufactureYM || '');
-                                        setInspLastDateInput(v.lastInspectionDate || '');
-                                        setInspectionModalVisible(true);
-                                      },
-                                    },
-                                    {
-                                      text: '移除車輛',
-                                      style: 'destructive',
-                                      onPress: () => handleDeleteVehicle(v),
-                                    },
-                                  ]
-                                )
-                              }
-                            >
-                              <Ionicons name="ellipsis-horizontal" size={20} color="#9D174D" />
-                            </TouchableOpacity>
-                          </View>
-                          <View style={styles.pinkPlateBadge}>
-                            <Text style={styles.pinkPlateText}>{v.plate}</Text>
-                          </View>
-                        </View>
-                      </View>
-
-                      <View style={styles.garageMetaRow}>
-                        <View style={styles.garageMetaItem}>
-                          <Ionicons name="speedometer-outline" size={14} color="#9D174D" />
-                          <Text style={styles.garageMetaText}>里程 {v.mileage.toLocaleString()} km</Text>
-                        </View>
-                        <View style={styles.garageMetaItem}>
-                          <Ionicons name="shield-checkmark-outline" size={14} color="#DB2777" />
-                          <Text style={styles.garageMetaText}>下次保養 {v.nextMaintKm.toLocaleString()} km</Text>
-                        </View>
-                      </View>
-                    </BlurView>
-                  );
-                })}
-
-                <TouchableOpacity activeOpacity={0.8} onPress={() => setAddVehicleModalVisible(true)}>
-                  <LinearGradient
-                    colors={['rgba(251, 207, 232, 0.72)', 'rgba(244, 114, 182, 0.35)']}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={styles.addVehicleWideBtn}
-                  >
-                    <Ionicons name="add" size={20} color="#9D174D" />
-                    <Text style={styles.addVehicleWideText}>新增車輛</Text>
-                  </LinearGradient>
-                </TouchableOpacity>
-
-                <View style={styles.garageToolsGrid}>
-                  {[
-                    {
-                      label: '加油紀錄',
-                      icon: 'water-outline',
-                      color: '#F97316',
-                      bg: '#FFEDD5',
-                      action: () => {
-                        if (vehicles.length > 0 && !vehicles.find((v) => v.id === refuelVehicleId)) {
-                          setRefuelVehicleId(vehicles[0].id);
-                        }
-                        setRefuelModalVisible(true);
-                      },
-                    },
-                    {
-                      label: '保養紀錄',
-                      icon: 'build-outline',
-                      color: '#EC4899',
-                      bg: '#FCE7F3',
-                      action: () => {
-                        if (vehicles.length > 0 && !vehicles.find((v) => v.id === maintVehicleId)) {
-                          setMaintVehicleId(vehicles[0].id);
-                        }
-                        setMaintModalVisible(true);
-                      },
-                    },
-                    {
-                      label: '油耗統計',
-                      icon: 'bar-chart-outline',
-                      color: '#8B5CF6',
-                      bg: '#EDE9FE',
-                      action: () => setStatsModalVisible(true),
-                    },
-                    {
-                      label: '保險提醒',
-                      icon: 'shield-outline',
-                      color: '#3B82F6',
-                      bg: '#DBEAFE',
-                      action: openInsuranceModal,
-                    },
-                    {
-                      label: '驗車提醒',
-                      icon: 'checkmark-done-circle-outline',
-                      color: '#10B981',
-                      bg: '#D1FAE5',
-                      action: openInspectionModal,
-                    },
-                    {
-                      label: '稅金提醒',
-                      icon: 'wallet-outline',
-                      color: '#F59E0B',
-                      bg: '#FEF3C7',
-                      action: () =>
-                        Alert.alert('牌照稅 ＆ 燃料費繳納月份 💰', '• 4 月 1 日 ~ 4 月 30 日：使用牌照稅\n• 7 月 1 日 ~ 7 月 31 日：汽機車燃料使用費'),
-                    },
-                  ].map((tool) => (
-                    <TouchableOpacity
-                      key={tool.label}
-                      style={styles.garageToolWrapper}
-                      activeOpacity={0.78}
-                      onPress={tool.action}
-                    >
-                      <BlurView intensity={60} tint="light" style={styles.garageToolGlass}>
-                        <View style={[styles.garageToolIconBox, { backgroundColor: tool.bg }]}>
-                          <Ionicons name={tool.icon as any} size={24} color={tool.color} />
-                        </View>
-                        <Text style={styles.garageToolLabel}>{tool.label}</Text>
-                      </BlurView>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
+              <GarageTab
+                vehicles={vehicles}
+                vehicleFilter={vehicleFilter}
+                onChangeFilter={setVehicleFilter}
+                onOpenAddVehicle={() => setAddVehicleModalVisible(true)}
+                onDeleteVehicle={handleDeleteVehicle}
+                onOpenRefuel={(vid) => {
+                  if (vid) setRefuelVehicleId(vid);
+                  else if (vehicles.length > 0 && !vehicles.find((v) => v.id === refuelVehicleId)) {
+                    setRefuelVehicleId(vehicles[0].id);
+                  }
+                  setRefuelModalVisible(true);
+                }}
+                onOpenMaint={(vid) => {
+                  if (vid) setMaintVehicleId(vid);
+                  else if (vehicles.length > 0 && !vehicles.find((v) => v.id === maintVehicleId)) {
+                    setMaintVehicleId(vehicles[0].id);
+                  }
+                  setMaintModalVisible(true);
+                }}
+                onOpenStats={() => setStatsModalVisible(true)}
+                onOpenInsurance={(vid) => {
+                  const target = vehicles.find((v) => v.id === (vid || insVehicleId)) || vehicles[0];
+                  if (target) {
+                    setInsVehicleId(target.id);
+                    setInsExpiryInput(target.insuranceExpiry || '');
+                  }
+                  setInsuranceModalVisible(true);
+                }}
+                onOpenInspection={(vid) => {
+                  const target = vehicles.find((v) => v.id === (vid || inspVehicleId)) || vehicles[0];
+                  if (target) {
+                    setInspVehicleId(target.id);
+                    setInspMfgInput(target.manufactureYM || '');
+                    setInspLastDateInput(target.lastInspectionDate || '');
+                  }
+                  setInspectionModalVisible(true);
+                }}
+                cloudSyncStatus={cloudSyncStatus}
+              />
             )}
 
-            {/* -------------------- TAB 4: 服務大廳 -------------------- */}
             {activeTab === 'services' && (
-              <View style={styles.sectionStack}>
-                <Text style={styles.sectionTitle}>考照服務</Text>
-                <TouchableOpacity activeOpacity={0.82} onPress={openExamRadarModal}>
-                  <BlurView intensity={68} tint="light" style={styles.serviceBannerCard}>
-                    <View style={[styles.serviceLeadIcon, { backgroundColor: '#FCE7F3' }]}>
-                      <Ionicons name="id-card" size={26} color="#DB2777" />
-                    </View>
-                    <View style={{ flex: 1, marginLeft: 12 }}>
-                      <Text style={styles.serviceCardTitle}>考照報名助手</Text>
-                      <Text style={styles.serviceCardSub}>全台 37 站監理所即時剩餘名額查詢</Text>
-                    </View>
-                    <Image source={require('./assets/icon.png')} style={styles.serviceMascotMini} />
-                  </BlurView>
-                </TouchableOpacity>
-
-                <Text style={styles.sectionTitle}>車牌服務</Text>
-                <TouchableOpacity activeOpacity={0.82} onPress={openPlateSearchModal}>
-                  <BlurView intensity={68} tint="light" style={styles.serviceBannerCard}>
-                    <View style={styles.pinkPlateBadgeLarge}>
-                      <Text style={styles.pinkPlateTextLarge}>9969</Text>
-                    </View>
-                    <View style={{ flex: 1, marginLeft: 12 }}>
-                      <Text style={styles.serviceCardTitle}>車牌尋找 ＆ 庫存查詢</Text>
-                      <Text style={styles.serviceCardSub}>白牌・黃牌・紅牌・汽車等 14 種車牌即時搜尋</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={20} color="#9D174D" />
-                  </BlurView>
-                </TouchableOpacity>
-
-                <Text style={styles.sectionTitle}>交通相關</Text>
-                <View style={styles.quickGrid}>
-                  {[
-                    { label: '加油站地圖', icon: 'flame', color: '#F97316', bg: '#FFEDD5', onPress: () => { setMapCategory('gas'); setActiveTab('map'); } },
-                    { label: '停車資訊', icon: 'location', color: '#2563EB', bg: '#DBEAFE', onPress: () => { setMapCategory('parking'); setActiveTab('map'); } },
-                    { label: '即時路況', icon: 'car', color: '#EC4899', bg: '#FCE7F3', onPress: () => { setMapCategory('traffic'); setActiveTab('map'); } },
-                    { label: '監理站據點', icon: 'business', color: '#8B5CF6', bg: '#EDE9FE', onPress: () => { setMapCategory('dmv'); setActiveTab('map'); } },
-                  ].map((item) => (
-                    <TouchableOpacity key={item.label} style={styles.quickTileWrapper} onPress={item.onPress}>
-                      <BlurView intensity={58} tint="light" style={styles.quickTileGlass}>
-                        <View style={[styles.quickIconBox, { backgroundColor: item.bg }]}>
-                          <Ionicons name={item.icon as any} size={22} color={item.color} />
-                        </View>
-                        <Text style={styles.quickTileLabel}>{item.label}</Text>
-                      </BlurView>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                <Text style={styles.sectionTitle}>生活工具</Text>
-                <View style={styles.quickGrid}>
-                  {[
-                    { label: '天氣資訊', icon: 'partly-sunny', color: '#0EA5E9', bg: '#E0F2FE', onPress: () => setActiveTab('home') },
-                    {
-                      label: '空氣品質',
-                      icon: 'cloud-outline',
-                      color: '#84CC16',
-                      bg: '#ECFCCB',
-                      onPress: () =>
-                        Alert.alert(
-                          `${region.name} 即時空氣品質`,
-                          `US AQI：${aqi?.usAqi ?? '--'}（${aqi?.label ?? '讀取中'}）\nPM2.5：${aqi?.pm25 ?? '--'} μg/m³`
-                        ),
-                    },
-                    { label: '地區設定', icon: 'navigate', color: '#14B8A6', bg: '#CCFBF1', onPress: () => setRegionModalVisible(true) },
-                    { label: '官網主站', icon: 'globe-outline', color: '#EC4899', bg: '#FCE7F3', onPress: () => Linking.openURL('https://mmlovenn.com') },
-                  ].map((item) => (
-                    <TouchableOpacity key={item.label} style={styles.quickTileWrapper} onPress={item.onPress}>
-                      <BlurView intensity={58} tint="light" style={styles.quickTileGlass}>
-                        <View style={[styles.quickIconBox, { backgroundColor: item.bg }]}>
-                          <Ionicons name={item.icon as any} size={22} color={item.color} />
-                        </View>
-                        <Text style={styles.quickTileLabel}>{item.label}</Text>
-                      </BlurView>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
+              <ServicesTab
+                region={region}
+                aqi={aqi}
+                onOpenExamModal={openExamRadarModal}
+                onOpenPlateModal={openPlateSearchModal}
+                onOpenMapWithCategory={(cat) => {
+                  setMapCategory(cat);
+                  setActiveTab('map');
+                }}
+                onSelectTab={setActiveTab}
+                onOpenRegionModal={() => setRegionModalVisible(true)}
+              />
             )}
 
-            {/* -------------------- TAB 5: 我的 -------------------- */}
             {activeTab === 'profile' && (
-              <View style={styles.sectionStack}>
-                {user ? (
-                  <>
-                    <BlurView intensity={72} tint="light" style={styles.glassCard}>
-                      <View style={styles.profileTopRow}>
-                        <Image
-                          source={
-                            user.picture || user.avatar
-                              ? { uri: user.picture || user.avatar }
-                              : require('./assets/icon.png')
-                          }
-                          style={styles.profileAvatar}
-                        />
-                        <View style={{ flex: 1, marginLeft: 14 }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                            <Text style={styles.profileName}>{displayName}</Text>
-                            <View style={user.role === 'admin' || user.is_admin ? styles.adminBadge : styles.vipBadge}>
-                              <Text style={user.role === 'admin' || user.is_admin ? styles.adminBadgeText : styles.vipBadgeText}>
-                                {user.role === 'admin' || user.is_admin ? '管理員' : user.role.toUpperCase()}
-                              </Text>
-                            </View>
-                          </View>
-                          <Text style={styles.profileEmail}>{user.email}</Text>
-                        </View>
-                      </View>
-
-                      <View style={styles.quotaRow}>
-                        <View style={styles.quotaCol}>
-                          <Text style={styles.quotaVal}>{user.task_quota ?? 2}</Text>
-                          <Text style={styles.quotaLbl}>監控配額</Text>
-                        </View>
-                        <View style={styles.oilColDivider} />
-                        <View style={styles.quotaCol}>
-                          <Text style={[styles.quotaVal, { color: '#059669' }]}>{userTasks.length}</Text>
-                          <Text style={styles.quotaLbl}>進行中任務</Text>
-                        </View>
-                        <View style={styles.oilColDivider} />
-                        <View style={styles.quotaCol}>
-                          <Text style={[styles.quotaVal, { color: '#DB2777' }]}>{userFavorites.length}</Text>
-                          <Text style={styles.quotaLbl}>收藏車牌</Text>
-                        </View>
-                      </View>
-
-                      <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-                        <Text style={styles.logoutBtnText}>登出此帳號</Text>
-                      </TouchableOpacity>
-                    </BlurView>
-
-                    {userFavorites.length > 0 && (
-                      <BlurView intensity={65} tint="light" style={styles.glassCard}>
-                        <Text style={styles.oilCardTitle}>❤️ 我的收藏車牌 ({userFavorites.length})</Text>
-                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
-                          {userFavorites.slice(0, 12).map((fav: any, i: number) => (
-                            <View key={i} style={styles.pinkPlateBadge}>
-                              <Text style={styles.pinkPlateText}>
-                                {fav.plate_number || fav.plate || String(fav)}
-                              </Text>
-                            </View>
-                          ))}
-                        </View>
-                      </BlurView>
-                    )}
-                  </>
-                ) : (
-                  <BlurView intensity={72} tint="light" style={styles.loginGlassCard}>
-                    <Image source={require('./assets/icon.png')} style={styles.loginLogo} />
-                    <Text style={styles.loginTitle}>登入 鍋巴 GOBA</Text>
-                    <Text style={styles.loginSubtitle}>
-                      登入 Google 帳號即可同步您的收藏車牌、監控任務與個人化設定。
-                    </Text>
-
-                    <TouchableOpacity
-                      style={styles.googleBtn}
-                      onPress={handleGoogleLogin}
-                      disabled={isLoadingAuth}
-                    >
-                      {isLoadingAuth ? (
-                        <ActivityIndicator color="#1F2937" />
-                      ) : (
-                        <>
-                          <Ionicons name="logo-google" size={18} color="#EA4335" style={{ marginRight: 10 }} />
-                          <Text style={styles.googleBtnText}>以 Google 帳號一鍵登入</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
-                  </BlurView>
-                )}
-
-                <BlurView intensity={65} tint="light" style={styles.glassCard}>
-                  <Text style={styles.oilCardTitle}>帳戶與系統設定</Text>
-
-                  <TouchableOpacity
-                    style={styles.settingItem}
-                    onPress={() => {
-                      setDraftNickname(prefs.customNickname || user?.name || '');
-                      setAccountSettingsVisible(true);
-                    }}
-                  >
-                    <View style={styles.settingLeft}>
-                      <Ionicons name="person-circle-outline" size={20} color="#DB2777" />
-                      <Text style={styles.settingText}>帳戶資訊設定</Text>
-                    </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <Text style={{ fontSize: 12, color: '#9CA3AF' }}>{displayName}</Text>
-                      <Ionicons name="chevron-forward" size={16} color="#9CA3AF" />
-                    </View>
-                  </TouchableOpacity>
-
-                  <View style={styles.softDivider} />
-
-                  <TouchableOpacity style={styles.settingItem} onPress={() => setRegionModalVisible(true)}>
-                    <View style={styles.settingLeft}>
-                      <Ionicons name="location-outline" size={20} color="#2563EB" />
-                      <Text style={styles.settingText}>地區與定位設定</Text>
-                    </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                      <Text style={{ fontSize: 12, color: '#9CA3AF' }}>{region.name}</Text>
-                      <Ionicons name="chevron-forward" size={16} color="#9CA3AF" />
-                    </View>
-                  </TouchableOpacity>
-
-                  <View style={styles.softDivider} />
-
-                  <TouchableOpacity
-                    style={styles.settingItem}
-                    onPress={() => Linking.openURL('https://plate.mmlovenn.com')}
-                  >
-                    <View style={styles.settingLeft}>
-                      <Ionicons name="globe-outline" size={20} color="#059669" />
-                      <Text style={styles.settingText}>車牌尋找助手網頁版</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={16} color="#9CA3AF" />
-                  </TouchableOpacity>
-
-                  <View style={styles.softDivider} />
-
-                  <TouchableOpacity
-                    style={styles.settingItem}
-                    onPress={() =>
-                      Alert.alert(
-                        '關於 鍋巴 GOBA',
-                        '鍋巴 GOBA v2.3\n即時氣象：Open-Meteo\n官方油價：台灣中油\n即時路況：交通部高公局 1968'
-                      )
-                    }
-                  >
-                    <View style={styles.settingLeft}>
-                      <Ionicons name="sparkles-outline" size={20} color="#8B5CF6" />
-                      <Text style={styles.settingText}>關於 鍋巴 GOBA</Text>
-                    </View>
-                    <Text style={{ fontSize: 12, color: '#9CA3AF' }}>v2.3</Text>
-                  </TouchableOpacity>
-                </BlurView>
-              </View>
+              <ProfileTab
+                appVersion={APP_VERSION}
+                user={user}
+                displayName={displayName}
+                userTasksCount={userTasks.length}
+                userFavorites={userFavorites}
+                isLoadingAuth={isLoadingAuth}
+                region={region}
+                cloudSyncStatus={cloudSyncStatus}
+                isSyncingCloud={isSyncingCloud}
+                onGoogleLogin={handleGoogleLogin}
+                onLogout={handleLogout}
+                onOpenAccountSettings={() => {
+                  setDraftNickname(prefs.customNickname || user?.name || '');
+                  setAccountSettingsVisible(true);
+                }}
+                onOpenRegionModal={() => setRegionModalVisible(true)}
+                onManualCloudSync={() => {
+                  if (sessionToken) {
+                    pushGarageToCloud(
+                      sessionToken,
+                      vehicles,
+                      refuelLogs,
+                      maintLogs,
+                      prefs,
+                      region,
+                      Date.now()
+                    );
+                  }
+                }}
+              />
             )}
           </ScrollView>
         )}
@@ -1924,7 +1221,7 @@ export default function App() {
           </BlurView>
         </View>
 
-        {/* ==================== 地區與 GPS 定位設定 Modal ==================== */}
+        {/* ==================== 地區與 GPS 定位 Modal ==================== */}
         <Modal visible={regionModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2018,7 +1315,7 @@ export default function App() {
                       <TouchableOpacity
                         key={f.key}
                         style={[styles.fuelPrefChip, active && styles.fuelPrefChipActive]}
-                        onPress={() => saveAccountPrefs({ ...prefs, preferredFuel: f.key })}
+                        onPress={() => saveAccountPrefsAndSync({ ...prefs, preferredFuel: f.key })}
                       >
                         <Text style={[styles.fuelPrefText, active && { color: '#FFF' }]}>{f.label}</Text>
                       </TouchableOpacity>
@@ -2031,7 +1328,7 @@ export default function App() {
                   <Text style={styles.settingText}>中油官方油價更新通知</Text>
                   <Switch
                     value={prefs.notifyOil}
-                    onValueChange={(val) => saveAccountPrefs({ ...prefs, notifyOil: val })}
+                    onValueChange={(val) => saveAccountPrefsAndSync({ ...prefs, notifyOil: val })}
                     trackColor={{ true: '#F472B6' }}
                   />
                 </View>
@@ -2039,7 +1336,7 @@ export default function App() {
                   <Text style={styles.settingText}>強制險到期前提醒</Text>
                   <Switch
                     value={prefs.notifyInsurance}
-                    onValueChange={(val) => saveAccountPrefs({ ...prefs, notifyInsurance: val })}
+                    onValueChange={(val) => saveAccountPrefsAndSync({ ...prefs, notifyInsurance: val })}
                     trackColor={{ true: '#F472B6' }}
                   />
                 </View>
@@ -2047,7 +1344,7 @@ export default function App() {
                   <Text style={styles.settingText}>愛車保養里程提醒</Text>
                   <Switch
                     value={prefs.notifyMaint}
-                    onValueChange={(val) => saveAccountPrefs({ ...prefs, notifyMaint: val })}
+                    onValueChange={(val) => saveAccountPrefsAndSync({ ...prefs, notifyMaint: val })}
                     trackColor={{ true: '#F472B6' }}
                   />
                 </View>
@@ -2056,7 +1353,7 @@ export default function App() {
                   style={styles.primaryPinkBtn}
                   onPress={async () => {
                     Keyboard.dismiss();
-                    await saveAccountPrefs({ ...prefs, customNickname: draftNickname.trim() });
+                    await saveAccountPrefsAndSync({ ...prefs, customNickname: draftNickname.trim() });
                     setAccountSettingsVisible(false);
                     Alert.alert('已儲存 ✨', '您的帳戶資訊與個人偏好設定已更新！');
                   }}
@@ -2068,7 +1365,7 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 保險到期提醒管理 Modal ==================== */}
+        {/* ==================== 保險到期提醒 Modal ==================== */}
         <Modal visible={insuranceModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2137,7 +1434,7 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 驗車 / 排氣定檢管理 Modal ==================== */}
+        {/* ==================== 驗車 / 排氣定檢 Modal ==================== */}
         <Modal visible={inspectionModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2180,17 +1477,18 @@ export default function App() {
                   </View>
                 )}
 
-                {activeInspVehicle && (() => {
-                  const st = calcInspectionStatus(activeInspVehicle.category, inspMfgInput, inspLastDateInput);
-                  return (
-                    <View style={styles.statusBoxCard}>
-                      <Text style={{ fontSize: 13, fontWeight: '800', color: st.isDueSoon ? '#DC2626' : '#059669' }}>
-                        {st.statusText}
-                      </Text>
-                      <Text style={{ fontSize: 11, color: '#6B4C5A', marginTop: 3 }}>{st.detail}</Text>
-                    </View>
-                  );
-                })()}
+                {activeInspVehicle &&
+                  (() => {
+                    const st = calcInspectionStatus(activeInspVehicle.category, inspMfgInput, inspLastDateInput);
+                    return (
+                      <View style={styles.statusBoxCard}>
+                        <Text style={{ fontSize: 13, fontWeight: '800', color: st.isDueSoon ? '#DC2626' : '#059669' }}>
+                          {st.statusText}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: '#6B4C5A', marginTop: 3 }}>{st.detail}</Text>
+                      </View>
+                    );
+                  })()}
 
                 <Text style={styles.inputLabel}>出廠年月 (YYYY-MM)</Text>
                 <TextInput
@@ -2216,7 +1514,7 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 內建真實「車牌即時查詢」Modal ==================== */}
+        {/* ==================== 車牌查詢 Modal ==================== */}
         <Modal visible={plateModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2289,10 +1587,7 @@ export default function App() {
                           <View
                             style={[
                               styles.authenticPlateBadge,
-                              {
-                                backgroundColor: selectedCarType.plateBg,
-                                borderColor: selectedCarType.plateBorder,
-                              },
+                              { backgroundColor: selectedCarType.plateBg, borderColor: selectedCarType.plateBorder },
                             ]}
                           >
                             <Text style={[styles.authenticPlateText, { color: selectedCarType.plateText }]}>
@@ -2314,7 +1609,7 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 內建真實「考照名額雷達」Modal ==================== */}
+        {/* ==================== 考照雷達 Modal ==================== */}
         <Modal visible={examModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2392,7 +1687,7 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 加油記帳 Modal（下拉選車 + 下拉選油品 + 公升/原價自動推算 + 自助折扣實付） ==================== */}
+        {/* ==================== 加油記帳 Modal ==================== */}
         <Modal visible={refuelModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2405,7 +1700,6 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                {/* 下拉選單：選擇車輛 */}
                 <Text style={styles.inputLabel}>選擇車輛</Text>
                 <TouchableOpacity
                   style={styles.dropdownTrigger}
@@ -2437,7 +1731,6 @@ export default function App() {
                   </View>
                 )}
 
-                {/* 下拉選單：選擇油品 */}
                 <Text style={styles.inputLabel}>選擇油品（依今日中油牌價自動換算）</Text>
                 <TouchableOpacity
                   style={styles.dropdownTrigger}
@@ -2468,7 +1761,6 @@ export default function App() {
                   </View>
                 )}
 
-                {/* 公升 / 原價金額 雙向自動推算 */}
                 <View style={{ flexDirection: 'row', gap: 10 }}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.inputLabel}>加油公升數 (L)</Text>
@@ -2518,7 +1810,7 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 保養 / 維修紀錄 Modal（下拉選車 + 多項目自由新增） ==================== */}
+        {/* ==================== 保養紀錄 Modal ==================== */}
         <Modal visible={maintModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2531,7 +1823,6 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                {/* 下拉選單：選擇車輛 */}
                 <Text style={styles.inputLabel}>選擇車輛</Text>
                 <TouchableOpacity
                   style={styles.dropdownTrigger}
@@ -2560,7 +1851,6 @@ export default function App() {
                   </View>
                 )}
 
-                {/* 快速點選常見項目 */}
                 <Text style={styles.inputLabel}>快速點選加入常見項目</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 6 }}>
                   {COMMON_MAINT_ITEMS.map((itemName) => (
@@ -2574,7 +1864,6 @@ export default function App() {
                   ))}
                 </ScrollView>
 
-                {/* 自由新增自訂項目 */}
                 <Text style={styles.inputLabel}>或自行新增維修 / 保養項目</Text>
                 <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
                   <TextInput
@@ -2595,7 +1884,6 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                {/* 已加入的多項目清單（可單獨改價與刪除） */}
                 {maintDraftItems.length > 0 && (
                   <View style={styles.maintListBox}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -2645,7 +1933,7 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* ==================== 油耗與養車統計 Modal ==================== */}
+        {/* ==================== 油耗與歷史明細 Modal ==================== */}
         <Modal visible={statsModalVisible} transparent animationType="fade">
           <View style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2722,7 +2010,7 @@ export default function App() {
           </View>
         </Modal>
 
-        {/* ==================== 新增車輛 Modal（含出廠年月、上次定檢、強制險到期日） ==================== */}
+        {/* ==================== 新增車輛 Modal ==================== */}
         <Modal visible={addVehicleModalVisible} transparent animationType="slide">
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
             <BlurView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2825,682 +2113,3 @@ export default function App() {
     </LinearGradient>
   );
 }
-
-const styles = StyleSheet.create({
-  rootGradient: { flex: 1 },
-  ambientOrbTopRight: {
-    position: 'absolute',
-    top: -60,
-    right: -60,
-    width: 240,
-    height: 240,
-    borderRadius: 120,
-    backgroundColor: 'rgba(244, 114, 182, 0.22)',
-  },
-  ambientOrbBottomLeft: {
-    position: 'absolute',
-    bottom: 40,
-    left: -70,
-    width: 260,
-    height: 260,
-    borderRadius: 130,
-    backgroundColor: 'rgba(192, 132, 252, 0.16)',
-  },
-  safeArea: { flex: 1 },
-  homeTopBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-  },
-  brandRow: { flexDirection: 'row', alignItems: 'center' },
-  topMascotLogo: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
-    marginRight: 8,
-    borderWidth: 1.5,
-    borderColor: '#FFFFFF',
-  },
-  homeBrandTitle: { fontSize: 19, fontWeight: '900', color: '#5B2333', letterSpacing: 0.3 },
-  regionTopPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    maxWidth: 135,
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
-  },
-  regionTopPillText: { fontSize: 12, fontWeight: '700', color: '#5B2333', flexShrink: 1 },
-  iconCircleBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255, 255, 255, 0.65)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-  },
-  centeredTopBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-  },
-  centeredTitle: { fontSize: 19, fontWeight: '900', color: '#5B2333' },
-  addCircleBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1.5,
-    borderColor: '#F472B6',
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  scrollView: { flex: 1 },
-  scrollContent: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 118 },
-  sectionStack: { gap: 14 },
-  // 橫幅圖片卡片
-  heroBannerImageWrap: {
-    width: '100%',
-    aspectRatio: 2.02,
-    borderRadius: 24,
-    overflow: 'hidden',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
-    shadowColor: '#EC4899',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.16,
-    shadowRadius: 16,
-  },
-  heroBannerImage: { width: '100%', height: '100%' },
-  // 地圖專屬佈局
-  mapTabContainer: { flex: 1 },
-  brandChip: {
-    paddingHorizontal: 11,
-    paddingVertical: 5,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.95)',
-  },
-  brandChipActive: { backgroundColor: '#5B2333', borderColor: '#5B2333' },
-  brandChipText: { fontSize: 11, fontWeight: '700', color: '#6B4C5A' },
-  brandChipTextActive: { color: '#FFFFFF' },
-  trafficSubTabRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginTop: 6,
-    gap: 8,
-  },
-  trafficSubBtn: {
-    flex: 1,
-    paddingVertical: 7,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255, 255, 255, 0.75)',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-  },
-  trafficSubBtnActive: { backgroundColor: '#DB2777', borderColor: '#DB2777' },
-  trafficSubText: { fontSize: 11, fontWeight: '800', color: '#5B2333' },
-  trafficRefreshIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  mapFrame: {
-    height: 265,
-    marginHorizontal: 16,
-    marginTop: 8,
-    borderRadius: 24,
-    overflow: 'hidden',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.95)',
-  },
-  mapRegionFloatBtn: {
-    position: 'absolute',
-    top: 10,
-    left: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.92)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 14,
-  },
-  mapRegionFloatText: { fontSize: 11, fontWeight: '800', color: '#5B2333' },
-  mapListWrap: { flex: 1, paddingHorizontal: 16, marginTop: 10 },
-  poiRowCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 18,
-    padding: 12,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
-    borderWidth: 1.2,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
-  },
-  poiRowCardSelected: { borderColor: '#EC4899', borderWidth: 1.8 },
-  poiBrandPill: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 },
-  poiBrandText: { fontSize: 10, fontWeight: '800' },
-  poiDistText: { fontSize: 11, fontWeight: '700', color: '#7C6270' },
-  poiNameText: { fontSize: 14, fontWeight: '800', color: '#3B1525', marginTop: 3 },
-  poiRateText: { fontSize: 11, fontWeight: '700', color: '#9D174D', marginTop: 2 },
-  poiAddrText: { fontSize: 11, color: '#7C6270', marginTop: 2 },
-  poiNavBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#EC4899',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 12,
-    marginLeft: 10,
-  },
-  poiNavBtnText: { color: '#FFF', fontSize: 11, fontWeight: '800' },
-  // 快捷格
-  quickGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10 },
-  quickTileWrapper: {
-    width: '23.4%',
-    borderRadius: 18,
-    overflow: 'hidden',
-    borderWidth: 1.2,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-  },
-  quickTileGlass: {
-    paddingVertical: 12,
-    paddingHorizontal: 4,
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.58)',
-  },
-  quickIconBox: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  quickTileLabel: { fontSize: 11, fontWeight: '700', color: '#5B2333' },
-  sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 },
-  sectionTitle: { fontSize: 16, fontWeight: '900', color: '#5B2333' },
-  refreshBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.65)',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-  },
-  refreshText: { fontSize: 11, fontWeight: '600', color: '#9D174D' },
-  glassCard: {
-    borderRadius: 22,
-    padding: 16,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.62)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
-  },
-  weatherRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  weatherLeft: { flexDirection: 'row', alignItems: 'center' },
-  weatherIconCircle: {
-    width: 56,
-    height: 56,
-    borderRadius: 20,
-    backgroundColor: 'rgba(254, 243, 199, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  weatherLocation: { fontSize: 12, fontWeight: '700', color: '#9D174D' },
-  weatherTemp: { fontSize: 28, fontWeight: '900', color: '#3B1525', lineHeight: 34 },
-  weatherDesc: { fontSize: 11, fontWeight: '600', color: '#7C6270' },
-  weatherRight: { alignItems: 'flex-end', gap: 5 },
-  weatherHiLo: { fontSize: 13 },
-  rainRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(224, 242, 254, 0.75)',
-    paddingHorizontal: 9,
-    paddingVertical: 3,
-    borderRadius: 10,
-  },
-  rainText: { fontSize: 11, fontWeight: '700', color: '#1E40AF' },
-  oilHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  oilCardTitle: { fontSize: 15, fontWeight: '800', color: '#5B2333' },
-  oilUnit: { fontSize: 11, color: '#9D174D', fontWeight: '600' },
-  oilColumnsRow: { flexDirection: 'row', alignItems: 'center' },
-  oilCol: { flex: 1, alignItems: 'center' },
-  oilColDivider: { width: 1, height: 28, backgroundColor: 'rgba(244, 114, 182, 0.22)' },
-  oilColLabel: { fontSize: 11, color: '#7C6270', marginBottom: 4 },
-  oilColPrice: { fontSize: 18, fontWeight: '900', color: '#3B1525' },
-  segmentedBar: {
-    flexDirection: 'row',
-    borderRadius: 22,
-    padding: 4,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.58)',
-    borderWidth: 1.2,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-  },
-  segmentBtn: { flex: 1, paddingVertical: 8, borderRadius: 18, alignItems: 'center' },
-  segmentBtnActive: {
-    backgroundColor: 'rgba(244, 114, 182, 0.28)',
-    borderWidth: 1,
-    borderColor: 'rgba(244, 114, 182, 0.45)',
-  },
-  segmentText: { fontSize: 13, fontWeight: '700', color: '#7C6270' },
-  segmentTextActive: { color: '#9D174D', fontWeight: '900' },
-  garageVehicleCard: {
-    borderRadius: 22,
-    padding: 15,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.68)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.95)',
-  },
-  garageTopRow: { flexDirection: 'row', alignItems: 'center' },
-  vehicleThumbBox: { width: 68, height: 60, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-  vehicleTitleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  vehicleName: { fontSize: 16, fontWeight: '900', color: '#3B1525' },
-  pinkPlateBadge: {
-    alignSelf: 'flex-start',
-    marginTop: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 3,
-    borderRadius: 8,
-    backgroundColor: '#FFF0F6',
-    borderWidth: 1.5,
-    borderColor: '#F472B6',
-  },
-  pinkPlateText: { fontSize: 13, fontWeight: '900', color: '#BE185D', letterSpacing: 1.2 },
-  authenticPlateBadge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 8,
-    borderWidth: 1.8,
-  },
-  authenticPlateText: { fontSize: 14, fontWeight: '900', letterSpacing: 1.2 },
-  garageMetaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 12,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(244, 114, 182, 0.16)',
-  },
-  garageMetaItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  garageMetaText: { fontSize: 12, fontWeight: '600', color: '#6B4C5A' },
-  addVehicleWideBtn: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 13,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-  },
-  addVehicleWideText: { fontSize: 14, fontWeight: '800', color: '#9D174D' },
-  garageToolsGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10 },
-  garageToolWrapper: {
-    width: '31.5%',
-    borderRadius: 20,
-    overflow: 'hidden',
-    borderWidth: 1.3,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
-  },
-  garageToolGlass: { paddingVertical: 16, alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.62)' },
-  garageToolIconBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 15,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  garageToolLabel: { fontSize: 12, fontWeight: '800', color: '#5B2333' },
-  mapFilterPill: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255, 255, 255, 0.68)',
-    borderWidth: 1.2,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
-  },
-  mapFilterPillActive: { backgroundColor: '#EC4899', borderColor: '#EC4899' },
-  mapFilterText: { fontSize: 12, fontWeight: '700', color: '#7C6270' },
-  mapFilterTextActive: { color: '#FFFFFF' },
-  softDivider: { height: 1, backgroundColor: 'rgba(244, 114, 182, 0.16)', marginVertical: 5 },
-  serviceBannerCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 22,
-    padding: 15,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.68)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.94)',
-  },
-  serviceLeadIcon: { width: 48, height: 48, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-  serviceCardTitle: { fontSize: 15, fontWeight: '900', color: '#3B1525' },
-  serviceCardSub: { fontSize: 11, color: '#7C6270', marginTop: 3, fontWeight: '500' },
-  serviceMascotMini: { width: 48, height: 48, borderRadius: 16, marginLeft: 8 },
-  pinkPlateBadgeLarge: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: '#FFF0F6',
-    borderWidth: 1.8,
-    borderColor: '#F472B6',
-  },
-  pinkPlateTextLarge: { fontSize: 13, fontWeight: '900', color: '#BE185D', letterSpacing: 1 },
-  loginGlassCard: {
-    borderRadius: 26,
-    padding: 24,
-    alignItems: 'center',
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.95)',
-  },
-  loginLogo: { width: 68, height: 68, borderRadius: 22, borderWidth: 2, borderColor: '#F472B6', marginBottom: 12 },
-  loginTitle: { fontSize: 20, fontWeight: '900', color: '#5B2333' },
-  loginSubtitle: { fontSize: 12, color: '#7C6270', textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 20 },
-  googleBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '100%',
-    backgroundColor: '#FFFFFF',
-    paddingVertical: 14,
-    borderRadius: 18,
-    borderWidth: 1.2,
-    borderColor: '#F3D1E2',
-  },
-  googleBtnText: { fontSize: 14, fontWeight: '800', color: '#3B1525' },
-  profileTopRow: { flexDirection: 'row', alignItems: 'center' },
-  profileAvatar: { width: 56, height: 56, borderRadius: 18, borderWidth: 2, borderColor: '#EC4899' },
-  profileName: { fontSize: 17, fontWeight: '900', color: '#3B1525' },
-  profileEmail: { fontSize: 12, color: '#7C6270', marginTop: 3 },
-  adminBadge: { backgroundColor: '#FEE2E2', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginLeft: 8 },
-  adminBadgeText: { fontSize: 10, fontWeight: '800', color: '#DC2626' },
-  vipBadge: { backgroundColor: '#FEF3C7', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginLeft: 8 },
-  vipBadgeText: { fontSize: 10, fontWeight: '800', color: '#D97706' },
-  quotaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 245, 249, 0.78)',
-    borderRadius: 16,
-    paddingVertical: 12,
-    marginTop: 14,
-  },
-  quotaCol: { flex: 1, alignItems: 'center' },
-  quotaVal: { fontSize: 16, fontWeight: '900', color: '#3B1525' },
-  quotaLbl: { fontSize: 10, color: '#7C6270', marginTop: 2 },
-  logoutBtn: {
-    marginTop: 14,
-    paddingVertical: 10,
-    borderRadius: 14,
-    backgroundColor: 'rgba(254, 226, 226, 0.72)',
-    alignItems: 'center',
-  },
-  logoutBtnText: { fontSize: 12, fontWeight: '800', color: '#DC2626' },
-  settingItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12 },
-  settingLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  settingText: { fontSize: 13, fontWeight: '700', color: '#3B1525' },
-  liquidTabOuter: {
-    position: 'absolute',
-    bottom: Platform.OS === 'ios' ? 22 : 14,
-    left: 14,
-    right: 14,
-    borderRadius: 34,
-    overflow: 'hidden',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
-    shadowColor: '#BE185D',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.18,
-    shadowRadius: 20,
-  },
-  liquidTabBlur: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 6,
-    paddingVertical: 6,
-    backgroundColor: 'rgba(255, 240, 246, 0.58)',
-  },
-  liquidTabItem: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 7, borderRadius: 28 },
-  liquidTabItemActive: {
-    backgroundColor: 'rgba(244, 114, 182, 0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.85)',
-  },
-  liquidTabLabel: { fontSize: 10, fontWeight: '700', color: '#7C6270', marginTop: 2 },
-  liquidTabLabelActive: { color: '#DB2777', fontWeight: '900' },
-  // 彈窗與下拉選單
-  modalOverlay: { flex: 1, justifyContent: 'flex-end' },
-  modalGlassSheet: {
-    borderTopLeftRadius: 30,
-    borderTopRightRadius: 30,
-    paddingHorizontal: 22,
-    paddingTop: 20,
-    paddingBottom: Platform.OS === 'ios' ? 32 : 22,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 245, 249, 0.96)',
-    borderTopWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.95)',
-  },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  modalTitle: { fontSize: 18, fontWeight: '900', color: '#5B2333' },
-  dropdownTrigger: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1.2,
-    borderColor: '#F3D1E2',
-  },
-  dropdownTriggerText: { fontSize: 14, fontWeight: '700', color: '#3B1525' },
-  dropdownList: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    marginTop: 4,
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-    overflow: 'hidden',
-  },
-  dropdownOption: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(244, 114, 182, 0.12)',
-  },
-  dropdownOptionText: { fontSize: 13, fontWeight: '600', color: '#3B1525' },
-  statusBoxCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    borderRadius: 14,
-    padding: 12,
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-  },
-  addSubItemBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#EC4899',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  maintListBox: {
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    borderRadius: 16,
-    padding: 12,
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-  },
-  maintSubItemRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(244, 114, 182, 0.12)',
-  },
-  miniPriceInput: {
-    width: 72,
-    backgroundColor: '#FFF5F9',
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    fontSize: 13,
-    textAlign: 'right',
-    color: '#3B1525',
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-  },
-  gpsActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#2563EB',
-    paddingVertical: 13,
-    borderRadius: 16,
-    marginTop: 6,
-  },
-  gpsActionBtnText: { color: '#FFF', fontSize: 13, fontWeight: '800' },
-  regionRowItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(244, 114, 182, 0.14)',
-  },
-  regionRowItemActive: { backgroundColor: 'rgba(252, 231, 243, 0.6)', borderRadius: 12 },
-  regionRowText: { fontSize: 14, fontWeight: '600', color: '#3B1525' },
-  readOnlyField: {
-    backgroundColor: 'rgba(243, 244, 246, 0.85)',
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-  },
-  fuelPrefChip: {
-    flex: 1,
-    paddingVertical: 9,
-    borderRadius: 12,
-    backgroundColor: '#FFF',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-  },
-  fuelPrefChipActive: { backgroundColor: '#EC4899', borderColor: '#EC4899' },
-  fuelPrefText: { fontSize: 12, fontWeight: '800', color: '#5B2333' },
-  switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
-  chipBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255, 255, 255, 0.88)',
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-    marginRight: 8,
-  },
-  chipBtnActive: { backgroundColor: '#EC4899', borderColor: '#EC4899' },
-  chipText: { fontSize: 12, fontWeight: '700', color: '#7C6270' },
-  chipTextActive: { color: '#FFFFFF' },
-  searchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
-  searchGoBtn: { backgroundColor: '#EC4899', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 14 },
-  resultMeta: { fontSize: 11, color: '#9D174D', fontWeight: '600', marginVertical: 10 },
-  emptyText: { textAlign: 'center', color: '#9CA3AF', paddingVertical: 24, fontSize: 13 },
-  plateResultRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(244, 114, 182, 0.14)',
-  },
-  plateOfficeText: { fontSize: 11, color: '#7C6270', marginTop: 4 },
-  examStationTitle: { fontSize: 14, fontWeight: '800', color: '#3B1525' },
-  favSmallBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#FFF0F6',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#F9A8D4',
-  },
-  favSmallText: { fontSize: 11, fontWeight: '800', color: '#DB2777' },
-  quotaGreenBadge: { backgroundColor: '#D1FAE5', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10 },
-  quotaGreenText: { fontSize: 12, fontWeight: '900', color: '#047857' },
-  categorySwitchRow: { flexDirection: 'row', gap: 10, marginVertical: 10 },
-  catBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255, 255, 255, 0.75)',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-  },
-  catBtnActive: { backgroundColor: '#EC4899', borderColor: '#EC4899' },
-  catBtnText: { fontSize: 13, fontWeight: '700', color: '#7C6270' },
-  catBtnTextActive: { color: '#FFFFFF' },
-  inputLabel: { fontSize: 12, fontWeight: '700', color: '#5B2333', marginTop: 10, marginBottom: 5 },
-  textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.94)',
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    fontSize: 14,
-    color: '#3B1525',
-    borderWidth: 1,
-    borderColor: '#F3D1E2',
-  },
-  primaryPinkBtn: {
-    backgroundColor: '#EC4899',
-    borderRadius: 16,
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginTop: 16,
-    shadowColor: '#EC4899',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-  },
-  primaryPinkBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '900' },
-});

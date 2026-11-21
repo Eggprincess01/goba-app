@@ -1,5 +1,29 @@
 export const API_BASE = 'https://mmlovenn.com';
 
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = 10000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error('連線逾時，請檢查網路狀態後重試');
+    }
+    throw new Error('無法連線至伺服器，請確認裝置網路是否開啟');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function getReadableError(err: unknown, fallback = '資料載入失敗，請稍後重試'): string {
+  if (err instanceof Error && err.message) return err.message;
+  return fallback;
+}
+
 export interface RegionInfo {
   name: string;
   lat: number;
@@ -237,7 +261,7 @@ export async function fetchNearbyPOIs(
   // 1. 停車場：優先使用政府即時停車位 & 費率 API（雙北精準至 0.1km，附真實費率與剩餘車位數）
   if (category === 'parking') {
     try {
-      const res = await fetch(`${API_BASE}/api/map/parking?lat=${lat}&lon=${lon}`);
+      const res = await fetchWithTimeout(`${API_BASE}/api/map/parking?lat=${lat}&lon=${lon}`, {}, 10000);
       if (res.ok) {
         const json = await res.json();
         const officialParks: MapPOI[] = Array.isArray(json.pois) ? json.pois : [];
@@ -257,11 +281,11 @@ export async function fetchNearbyPOIs(
 
   if (category === 'gas') {
     const [cpcRes, photonRes] = await Promise.allSettled([
-      fetch(`${API_BASE}/api/map/gas?lat=${lat}&lon=${lon}`).then((r) => (r.ok ? r.json() : { pois: [] })),
+      fetchWithTimeout(`${API_BASE}/api/map/gas?lat=${lat}&lon=${lon}`, {}, 10000).then((r) => (r.ok ? r.json() : { pois: [] })),
       Promise.allSettled(
         ['台塑石油', '統一速邁樂', '全國加油站', '台亞加油站'].map(async (q) => {
           const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}&limit=15`;
-          const r = await fetch(url);
+          const r = await fetchWithTimeout(url, {}, 8000);
           if (!r.ok) return [];
           const j = await r.json();
           return Array.isArray(j.features) ? j.features : [];
@@ -324,7 +348,7 @@ export async function fetchNearbyPOIs(
   // 3. 雙北以外縣市的停車場備援（Photon）
   try {
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent('停車場')}&lat=${lat}&lon=${lon}&limit=25`;
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, {}, 8000);
     if (res.ok) {
       const json = await res.json();
       for (const feat of Array.isArray(json.features) ? json.features : []) {
@@ -365,8 +389,8 @@ export async function fetchNearbyPOIs(
 }
 
 export async function fetchLiveTraffic(): Promise<LiveTrafficData> {
-  const res = await fetch(`${API_BASE}/api/traffic/live`);
-  if (!res.ok) throw new Error('Traffic API error');
+  const res = await fetchWithTimeout(`${API_BASE}/api/traffic/live`, {}, 10000);
+  if (!res.ok) throw new Error('即時路況服務暫時無法連線');
   return await res.json();
 }
 
@@ -460,8 +484,8 @@ export async function fetchLiveWeather(lat: number, lon: number): Promise<LiveWe
     `&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m` +
     `&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
     `&timezone=Asia%2FTaipei&forecast_days=1`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('Weather API error');
+  const res = await fetchWithTimeout(url, {}, 8000);
+  if (!res.ok) throw new Error('天氣資訊暫時無法取得');
   const data = await res.json();
   const cur = data.current || {};
   const daily = data.daily || {};
@@ -483,8 +507,8 @@ export async function fetchLiveAqi(lat: number, lon: number): Promise<LiveAqi> {
   const url =
     `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}` +
     `&current=us_aqi,pm2_5&timezone=Asia%2FTaipei`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('AQI API error');
+  const res = await fetchWithTimeout(url, {}, 8000);
+  if (!res.ok) throw new Error('空氣品質資訊暫時無法取得');
   const data = await res.json();
   const aqi = Math.round(Number(data.current?.us_aqi ?? 35));
   const pm25 = Number(data.current?.pm2_5 ?? 10).toFixed(1);
@@ -504,8 +528,8 @@ export async function fetchLiveAqi(lat: number, lon: number): Promise<LiveAqi> {
 }
 
 export async function fetchLiveOilPrices(): Promise<LiveOilPrices> {
-  const res = await fetch('https://www.cpc.com.tw/GetOilPriceJson.aspx?type=TodayOilPriceString');
-  if (!res.ok) throw new Error('CPC Oil API error');
+  const res = await fetchWithTimeout('https://www.cpc.com.tw/GetOilPriceJson.aspx?type=TodayOilPriceString', {}, 8000);
+  if (!res.ok) throw new Error('中油油價資料暫時無法取得');
   const data = await res.json();
   return {
     price92: String(data.sPrice1 || '--'),
@@ -517,9 +541,9 @@ export async function fetchLiveOilPrices(): Promise<LiveOilPrices> {
 }
 
 export async function fetchAuthMe(token: string): Promise<UserProfile | null> {
-  const res = await fetch(`${API_BASE}/api/auth/me`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/auth/me`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 8000);
   if (!res.ok) return null;
   const data = await res.json();
   if (data.logged_in && data.user) return data.user as UserProfile;
@@ -527,10 +551,10 @@ export async function fetchAuthMe(token: string): Promise<UserProfile | null> {
 }
 
 export async function logoutAuth(token: string): Promise<void> {
-  await fetch(`${API_BASE}/api/auth/logout`, {
+  await fetchWithTimeout(`${API_BASE}/api/auth/logout`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-  }).catch(() => {});
+  }, 6000).catch(() => {});
 }
 
 export async function searchLivePlates(
@@ -544,8 +568,8 @@ export async function searchLivePlates(
     `&page=1`;
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/plates/live-search?${qs}`, { headers });
-  if (!res.ok) throw new Error('Plate search failed');
+  const res = await fetchWithTimeout(`${API_BASE}/api/plates/live-search?${qs}`, { headers }, 12000);
+  if (!res.ok) throw new Error('車牌查詢失敗，請稍後重試');
   const data = await res.json();
   return {
     total: Number(data.total || 0),
@@ -560,8 +584,8 @@ export async function fetchExamSlots(licenseType: string = '3'): Promise<{
   last_updated: string;
   slots: ExamSlot[];
 }> {
-  const res = await fetch(`${API_BASE}/api/exam/slots?license_type=${encodeURIComponent(licenseType)}`);
-  if (!res.ok) throw new Error('Exam slots failed');
+  const res = await fetchWithTimeout(`${API_BASE}/api/exam/slots?license_type=${encodeURIComponent(licenseType)}`, {}, 12000);
+  if (!res.ok) throw new Error('考照名額查詢失敗，請稍後重試');
   const data = await res.json();
   const slots: ExamSlot[] = Array.isArray(data.slots) ? data.slots : [];
   return {
@@ -573,18 +597,18 @@ export async function fetchExamSlots(licenseType: string = '3'): Promise<{
 }
 
 export async function fetchUserTasks(token: string): Promise<any[]> {
-  const res = await fetch(`${API_BASE}/api/tasks`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/tasks`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 8000);
   if (!res.ok) return [];
   const data = await res.json();
   return Array.isArray(data.tasks) ? data.tasks : Array.isArray(data) ? data : [];
 }
 
 export async function fetchUserFavorites(token: string): Promise<any[]> {
-  const res = await fetch(`${API_BASE}/api/favorites`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/favorites`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 8000);
   if (!res.ok) return [];
   const data = await res.json();
   return Array.isArray(data.favorites) ? data.favorites : Array.isArray(data) ? data : [];
@@ -596,7 +620,7 @@ export async function addUserFavorite(
   carType: string,
   office: string
 ): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/api/favorites`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/favorites`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -609,4 +633,51 @@ export async function addUserFavorite(
     }),
   });
   return res.ok;
+}
+
+export async function fetchCloudGarage(token: string): Promise<{
+  exists: boolean;
+  updated_at: number;
+  data: {
+    vehicles?: any[];
+    refuelLogs?: any[];
+    maintLogs?: any[];
+    prefs?: any;
+    region?: any;
+  } | null;
+}> {
+  const res = await fetchWithTimeout(
+    `${API_BASE}/api/goba/garage`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    10000
+  );
+  if (!res.ok) throw new Error('無法讀取雲端車庫備份');
+  return await res.json();
+}
+
+export async function pushCloudGarage(
+  token: string,
+  bundle: {
+    vehicles: any[];
+    refuelLogs: any[];
+    maintLogs: any[];
+    prefs?: any;
+    region?: any;
+  },
+  clientUpdatedAt: number
+): Promise<{ updated_at: number }> {
+  const res = await fetchWithTimeout(
+    `${API_BASE}/api/goba/garage`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ ...bundle, clientUpdatedAt }),
+    },
+    10000
+  );
+  if (!res.ok) throw new Error('雲端車庫同步失敗');
+  return await res.json();
 }
