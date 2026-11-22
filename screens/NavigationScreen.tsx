@@ -371,15 +371,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     };
   }, [hdDetailActive, hdGridLat, hdGridLon]);
 
-  // P2 #10：縮放至街區等級（zoom >= 15.2）且非正式導航時，載入可互動公車站牌（具獨立 ID、方向與停靠路線）
+  // P2 #10 & 現代化公車站牌圖層：依縮放層級與地標重要性（及大眾運輸模式）決定載入與顯示密度
+  const isTransitFocus =
+    nav.vehicleType === 'transit' ||
+    Boolean(selectedTransitStop) ||
+    (isSearchOpen && /公車|站牌|轉運/.test(searchQuery));
   const transitGridLat = Math.round(signalQueryCenter.lat / 0.005) * 0.005;
   const transitGridLon = Math.round(signalQueryCenter.lon / 0.005) * 0.005;
-  const showInteractiveTransitStops = uiState === 'browse' && zoomLevel >= 15.2;
+  const showInteractiveTransitStops =
+    uiState !== 'navigation' && zoomLevel >= (isTransitFocus ? 13.8 : 14.6);
   useEffect(() => {
     if (!showInteractiveTransitStops) return;
     let active = true;
     const timer = setTimeout(() => {
-      fetchTransitStopsNear({ lat: transitGridLat, lon: transitGridLon }, 650).then((stops) => {
+      fetchTransitStopsNear(
+        { lat: transitGridLat, lon: transitGridLon },
+        isTransitFocus ? 900 : 650
+      ).then((stops) => {
         if (active) setTransitStops(stops);
       });
     }, 320);
@@ -387,7 +395,47 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       active = false;
       clearTimeout(timer);
     };
-  }, [showInteractiveTransitStops, transitGridLat, transitGridLon]);
+  }, [showInteractiveTransitStops, transitGridLat, transitGridLon, isTransitFocus]);
+
+  const displayedTransitStops = useMemo(() => {
+    if (!showInteractiveTransitStops || transitStops.length === 0) return [];
+    const sorted = [...transitStops].sort((a, b) => {
+      if (selectedTransitStop?.id === a.id) return -1;
+      if (selectedTransitStop?.id === b.id) return 1;
+      const routeDiff = (b.routes?.length || 0) - (a.routes?.length || 0);
+      if (routeDiff !== 0) return routeDiff;
+      return (a.distanceKm ?? 99) - (b.distanceKm ?? 99);
+    });
+    const minSpacingKm = isTransitFocus
+      ? zoomLevel < 15.0
+        ? 0.1
+        : 0.03
+      : zoomLevel < 15.8
+      ? 0.18
+      : 0.06;
+    const maxCount = isTransitFocus ? 26 : zoomLevel < 15.8 ? 8 : 16;
+    const kept: TransitBusStop[] = [];
+    for (const stop of sorted) {
+      if (kept.length >= maxCount) break;
+      // 一般中距瀏覽時（<15.8）優先顯示具多條停靠路線的重要站點，避免孤立小站造成擁擠
+      if (
+        !isTransitFocus &&
+        zoomLevel < 15.8 &&
+        selectedTransitStop?.id !== stop.id &&
+        (stop.routes?.length || 0) < 2 &&
+        kept.length >= 4
+      ) {
+        continue;
+      }
+      const tooClose = kept.some(
+        (k) =>
+          k.id !== selectedTransitStop?.id &&
+          haversineKm(k.lat, k.lon, stop.lat, stop.lon) < minSpacingKm
+      );
+      if (!tooClose) kept.push(stop);
+    }
+    return kept;
+  }, [showInteractiveTransitStops, transitStops, isTransitFocus, zoomLevel, selectedTransitStop]);
 
   // 任務三：依畫面狀態與縮放等級進行紅綠燈視覺防碰撞聚類（絕不修改 nav.route.trafficSignals 導航核心資料！）
   const displayedTrafficSignals = useMemo(() => {
@@ -1378,56 +1426,104 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </Marker>
         ))}
 
-        {/* P2 #10：可互動公車站牌標記（點擊查看站牌方向、停靠路線與設為目的地） */}
-        {showInteractiveTransitStops &&
-          transitStops.slice(0, 18).map((stop) => {
-            const isSel = selectedTransitStop?.id === stop.id;
-            return (
-              <Marker
-                key={stop.id}
-                id={`transit-stop-${stop.id}`}
-                lngLat={[stop.lon, stop.lat]}
-                anchor="center"
-                onPress={() => {
-                  lastMarkerTapTsRef.current = Date.now();
-                  setSelectedTransitStop(stop);
-                  setSelectedYouBike(null);
-                  setCategoryListOpen(false);
-                  nav.setInspectedPlace(null);
-                  setSheetCollapsed(false);
-                  cameraRef.current?.easeTo({
-                    center: [stop.lon, stop.lat],
-                    zoom: Math.max(zoomLevel, 16.5),
-                    duration: 380,
-                  });
-                }}
-              >
+        {/* GOBA 自訂現代化可互動公車站牌標記（取代底圖舊式藍底方塊公車圖示） */}
+        {displayedTransitStops.map((stop) => {
+          const isSel = selectedTransitStop?.id === stop.id;
+          const showLabel = isSel || zoomLevel >= 15.8 || isTransitFocus;
+          return (
+            <Marker
+              key={stop.id}
+              id={`transit-stop-${stop.id}`}
+              lngLat={[stop.lon, stop.lat]}
+              anchor="center"
+              onPress={() => {
+                lastMarkerTapTsRef.current = Date.now();
+                setSelectedTransitStop(stop);
+                setSelectedYouBike(null);
+                setCategoryListOpen(false);
+                nav.setInspectedPlace(null);
+                setSheetCollapsed(false);
+                cameraRef.current?.easeTo({
+                  center: [stop.lon, stop.lat],
+                  zoom: Math.max(zoomLevel, 16.5),
+                  duration: 380,
+                });
+              }}
+            >
+              {showLabel ? (
                 <View
                   style={{
                     flexDirection: 'row',
                     alignItems: 'center',
-                    gap: 3,
-                    backgroundColor: isSel ? '#1D4ED8' : '#2563EB',
-                    paddingHorizontal: isSel ? 7 : 5,
-                    paddingVertical: isSel ? 4 : 3,
-                    borderRadius: 10,
-                    borderWidth: 1.5,
-                    borderColor: '#FFFFFF',
+                    gap: 4,
+                    backgroundColor: isSel
+                      ? '#1D4ED8'
+                      : isNight
+                      ? 'rgba(15, 23, 42, 0.92)'
+                      : 'rgba(255, 255, 255, 0.95)',
+                    paddingLeft: 3,
+                    paddingRight: 7,
+                    paddingVertical: 3,
+                    borderRadius: 14,
+                    borderWidth: 1,
+                    borderColor: isSel
+                      ? '#FFFFFF'
+                      : isNight
+                      ? 'rgba(96, 165, 250, 0.45)'
+                      : 'rgba(37, 99, 235, 0.28)',
                     shadowColor: '#000',
-                    shadowOpacity: 0.2,
-                    shadowRadius: 3,
+                    shadowOpacity: 0.16,
+                    shadowRadius: 4,
+                    elevation: 3,
+                    maxWidth: 135,
                   }}
                 >
-                  <Ionicons name="bus" size={isSel ? 13 : 11} color="#FFFFFF" />
-                  {isSel && (
-                    <Text style={{ fontSize: 10, fontWeight: '800', color: '#FFFFFF' }} numberOfLines={1}>
-                      {stop.name}
-                    </Text>
-                  )}
+                  <View
+                    style={{
+                      width: 18,
+                      height: 18,
+                      borderRadius: 9,
+                      backgroundColor: isSel ? 'rgba(255,255,255,0.22)' : '#2563EB',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Ionicons name="bus" size={10} color="#FFFFFF" />
+                  </View>
+                  <Text
+                    style={{
+                      fontSize: 10.5,
+                      fontWeight: '700',
+                      color: isSel ? '#FFFFFF' : isNight ? '#E2E8F0' : '#1E3A8A',
+                    }}
+                    numberOfLines={1}
+                  >
+                    {stop.name}
+                  </Text>
                 </View>
-              </Marker>
-            );
-          })}
+              ) : (
+                <View
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 10,
+                    backgroundColor: '#2563EB',
+                    borderWidth: 2,
+                    borderColor: '#FFFFFF',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    shadowColor: '#000',
+                    shadowOpacity: 0.18,
+                    shadowRadius: 3,
+                    elevation: 2,
+                  }}
+                >
+                  <Ionicons name="bus" size={10} color="#FFFFFF" />
+                </View>
+              )}
+            </Marker>
+          );
+        })}
 
         {/* P2 #11：YouBike 2.0 / 2.0E 即時站點標記（顯示即時可借車輛數，絕不使用假數字） */}
         {uiState === 'browse' &&
