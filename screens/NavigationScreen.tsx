@@ -37,10 +37,11 @@ import {
 } from '../navigation/gpsReplayTester';
 import { getEffectiveMapStyleUrl, MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
 import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
-import { Coordinate, SearchPlace, TrafficSignalNode } from '../navigation/types';
+import { Coordinate, HdRoadsPayload, SearchPlace, TrafficSignalNode } from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
   fetchAdminFeedbackQueue,
+  fetchHdRoadsNear,
   fetchTrafficSignalsNear,
   formatDurationZh,
   formatEtaTime,
@@ -110,6 +111,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [replayResults, setReplayResults] = useState<ReplayScenarioResult[]>([]);
   const [viewportSignals, setViewportSignals] = useState<TrafficSignalNode[]>([]);
   const [showTrafficSignals, setShowTrafficSignals] = useState(true);
+  const [hdRoads, setHdRoads] = useState<HdRoadsPayload | null>(null);
+  // Section 5：預留未來合法即時路況圖層槽位（無合法路況來源時嚴格維持 null，絕不將道路邊界塗綠假裝順暢）
+  const [liveTrafficGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
   const [feedbackModalVisible, setFeedbackModalVisible] = useState(false);
   const [feedbackIssueType, setFeedbackIssueType] = useState<
     'address_wrong' | 'relocated' | 'closed' | 'name_wrong' | 'duplicate' | 'missing_place' | 'other'
@@ -278,6 +282,26 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     Math.round(signalQueryCenter.lat * 200),
     Math.round(signalQueryCenter.lon * 200),
   ]);
+
+  // 縮放達路口細節等級（zoom >= 16.0 或正式導航 3D 視角）時，依 0.003° 網格載入真實 OSM HD 道路面積與車道標線
+  const hdGridLat = Math.round(signalQueryCenter.lat / 0.003) * 0.003;
+  const hdGridLon = Math.round(signalQueryCenter.lon / 0.003) * 0.003;
+  const hdDetailActive = zoomLevel >= 16.0 || uiState === 'navigation';
+  useEffect(() => {
+    if (!hdDetailActive) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      fetchHdRoadsNear({ lat: hdGridLat, lon: hdGridLon }).then((res) => {
+        if (active && res) {
+          setHdRoads(res);
+        }
+      });
+    }, 220);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [hdDetailActive, hdGridLat, hdGridLon]);
 
   // 合併視野內紅綠燈與當前規劃路線沿途紅綠燈（導航/路線預覽時標示 isOnRoute 並對下一個即將通過的紅綠燈發光高亮）
   const displayedTrafficSignals = useMemo(() => {
@@ -797,6 +821,204 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
         {nav.gpsPermission === 'granted' && uiState !== 'navigation' && (
           <UserLocation animated accuracy heading />
+        )}
+
+        {/* ==================== 高精度道路面積、平滑路口、分隔島與真實車道標線（Zoom >= 16.0） ==================== */}
+        {hdDetailActive && hdRoads?.layers?.road_surfaces && (
+          <GeoJSONSource id="goba-hd-surfaces-src" data={hdRoads.layers.road_surfaces}>
+            <Layer
+              id="goba-hd-road-casing"
+              type="fill"
+              minzoom={16}
+              paint={{
+                'fill-color': isNight ? '#1E293B' : '#94A0B0',
+                'fill-opacity': 1,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.road_asphalt && (
+          <GeoJSONSource id="goba-hd-asphalt-src" data={hdRoads.layers.road_asphalt}>
+            <Layer
+              id="goba-hd-road-fill"
+              type="fill"
+              minzoom={16}
+              paint={{
+                'fill-color': isNight
+                  ? '#334155'
+                  : [
+                      'match',
+                      ['get', 'road_class'],
+                      'primary',
+                      '#A8B1BE',
+                      'secondary',
+                      '#B2BAC5',
+                      'tertiary',
+                      '#B2BAC5',
+                      '#C4CBD4',
+                    ],
+                'fill-opacity': 1,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_surfaces && (
+          <GeoJSONSource id="goba-hd-bridge-casing-src" data={hdRoads.layers.bridge_surfaces}>
+            <Layer
+              id="goba-hd-bridge-casing"
+              type="fill"
+              minzoom={16}
+              paint={{
+                'fill-color': isNight ? '#475569' : '#7A8696',
+                'fill-opacity': 1,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_asphalt && (
+          <GeoJSONSource id="goba-hd-bridge-asphalt-src" data={hdRoads.layers.bridge_asphalt}>
+            <Layer
+              id="goba-hd-bridge-fill"
+              type="fill"
+              minzoom={16}
+              paint={{
+                'fill-color': isNight ? '#3B4A62' : '#B2BAC5',
+                'fill-opacity': 1,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.medians && (
+          <GeoJSONSource id="goba-hd-medians-src" data={hdRoads.layers.medians}>
+            <Layer
+              id="goba-hd-medians-fill"
+              type="fill"
+              minzoom={16}
+              paint={{
+                'fill-color': isNight ? '#14532D' : '#A3DFA9',
+                'fill-outline-color': isNight ? '#166534' : '#7BC686',
+                'fill-opacity': 0.96,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.edge_lines && (
+          <GeoJSONSource id="goba-hd-edges-src" data={hdRoads.layers.edge_lines}>
+            <Layer
+              id="goba-hd-edge-lines"
+              type="line"
+              minzoom={16.5}
+              layout={{ 'line-cap': 'round', 'line-join': 'round' }}
+              paint={{
+                'line-color': isNight ? 'rgba(203,213,225,0.45)' : 'rgba(255,255,255,0.72)',
+                'line-width': 1.2,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.center_lines && (
+          <GeoJSONSource id="goba-hd-center-src" data={hdRoads.layers.center_lines}>
+            <Layer
+              id="goba-hd-yellow-center"
+              type="line"
+              minzoom={16.5}
+              layout={{ 'line-cap': 'butt', 'line-join': 'round' }}
+              paint={{
+                'line-color': '#F4C44E',
+                'line-width': 1.6,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.lane_dividers && (
+          <GeoJSONSource id="goba-hd-lanes-src" data={hdRoads.layers.lane_dividers}>
+            <Layer
+              id="goba-hd-lane-dashes"
+              type="line"
+              minzoom={16.8}
+              layout={{ 'line-cap': 'butt' }}
+              paint={{
+                'line-color': isNight ? 'rgba(226,232,240,0.68)' : 'rgba(255,255,255,0.88)',
+                'line-width': 1.4,
+                'line-dasharray': [5, 5],
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.crosswalks && (
+          <GeoJSONSource id="goba-hd-crosswalks-src" data={hdRoads.layers.crosswalks}>
+            <Layer
+              id="goba-hd-crosswalk-stripes"
+              type="line"
+              minzoom={16.8}
+              layout={{ 'line-cap': 'butt' }}
+              paint={{
+                'line-color': isNight ? 'rgba(241,245,249,0.72)' : 'rgba(255,255,255,0.92)',
+                'line-width': 2.2,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.stop_lines && (
+          <GeoJSONSource id="goba-hd-stoplines-src" data={hdRoads.layers.stop_lines}>
+            <Layer
+              id="goba-hd-stop-line"
+              type="line"
+              minzoom={16.8}
+              layout={{ 'line-cap': 'butt' }}
+              paint={{
+                'line-color': isNight ? 'rgba(248,250,252,0.82)' : 'rgba(255,255,255,0.95)',
+                'line-width': 2.4,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.arrows && (
+          <GeoJSONSource id="goba-hd-arrows-src" data={hdRoads.layers.arrows}>
+            <Layer
+              id="goba-hd-arrow-symbols"
+              type="symbol"
+              minzoom={17.2}
+              layout={{
+                'text-field': ['get', 'symbol'],
+                'text-size': 15,
+                'text-rotate': ['get', 'bearing'],
+                'text-rotation-alignment': 'map',
+                'text-allow-overlap': true,
+                'text-ignore-placement': true,
+              }}
+              paint={{
+                'text-color': isNight ? 'rgba(226,232,240,0.7)' : 'rgba(255,255,255,0.85)',
+              }}
+            />
+          </GeoJSONSource>
+        )}
+
+        {/* 預留合法即時路況圖層（僅在接入真實合法路況來源時渲染，無資料時絕不偽造綠色順暢線） */}
+        {liveTrafficGeoJSON && (
+          <GeoJSONSource id="goba-live-traffic-source" data={liveTrafficGeoJSON}>
+            <Layer
+              id="goba-live-traffic-line"
+              type="line"
+              layout={{ 'line-cap': 'round', 'line-join': 'round' }}
+              paint={{
+                'line-color': [
+                  'match',
+                  ['get', 'congestion'],
+                  'smooth',
+                  '#22C55E',
+                  'moderate',
+                  '#F59E0B',
+                  'heavy',
+                  '#EF4444',
+                  'severe',
+                  '#991B1B',
+                  'transparent',
+                ],
+                'line-width': 3.5,
+              }}
+            />
+          </GeoJSONSource>
         )}
 
         {/* 已行駛路線（灰化） */}

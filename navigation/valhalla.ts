@@ -1,6 +1,7 @@
 import { API_BASE, fetchWithTimeout } from '../services/api';
 import {
   Coordinate,
+  HdRoadsPayload,
   NavigationRoute,
   RouteManeuver,
   SearchPlace,
@@ -464,6 +465,28 @@ export async function fetchTrafficSignalsNear(
   } catch {
     return [];
   }
+}
+
+/**
+ * 放大至路口等級（zoom >= 16.0）時取得真實 OSM 高精度道路面積、路口輪廓、中央分隔島、
+ * 真實車道分隔線、雙黃線、斑馬線與停止線（GET /api/maps/hd-roads）
+ */
+export async function fetchHdRoadsNear(center: Coordinate): Promise<HdRoadsPayload | null> {
+  try {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/api/maps/hd-roads?lat=${center.lat.toFixed(5)}&lon=${center.lon.toFixed(5)}`,
+      {},
+      9500
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json?.status === 'ok' && json?.layers) {
+      return json as HdRoadsPayload;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 export function formatDurationZh(seconds: number): string {

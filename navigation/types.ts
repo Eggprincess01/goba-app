@@ -55,6 +55,35 @@ export interface TrafficSignalNode {
   streetName?: string;
 }
 
+export interface HdRoadsPayload {
+  status: string;
+  cached?: boolean;
+  latency_ms?: number;
+  source?: string;
+  stats?: {
+    roads_total: number;
+    roads_with_osm_lanes: number;
+    intersections: number;
+    medians: number;
+    crosswalk_stripes: number;
+    stop_lines: number;
+    arrows: number;
+  };
+  layers: {
+    road_surfaces?: GeoJSON.FeatureCollection;
+    road_asphalt?: GeoJSON.FeatureCollection;
+    bridge_surfaces?: GeoJSON.FeatureCollection;
+    bridge_asphalt?: GeoJSON.FeatureCollection;
+    medians?: GeoJSON.FeatureCollection;
+    edge_lines?: GeoJSON.FeatureCollection;
+    center_lines?: GeoJSON.FeatureCollection;
+    lane_dividers?: GeoJSON.FeatureCollection;
+    crosswalks?: GeoJSON.FeatureCollection;
+    stop_lines?: GeoJSON.FeatureCollection;
+    arrows?: GeoJSON.FeatureCollection;
+  };
+}
+
 export interface RouteManeuver {
   index: number;
   type: number;
