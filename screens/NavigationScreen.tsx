@@ -30,11 +30,9 @@ import {
   UserLocation,
 } from '@maplibre/maplibre-react-native';
 import { LiquidGlassSurface } from '../components/LiquidGlassSurface';
-import {
-  ComplexJunctionCard,
-  isComplexJunctionManeuver,
-  ManeuverArrowIcon,
-} from '../components/ManeuverArrowIcon';
+import { ManeuverArrowIcon } from '../components/ManeuverArrowIcon';
+import { HdRoadLayers } from '../components/navigation/HdRoadLayers';
+import { NavHudOverlay } from '../components/navigation/NavHudOverlay';
 import { OpeningHoursPicker } from '../components/OpeningHoursPicker';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
 import type { ReplayScenarioResult } from '../navigation/gpsReplayTester';
@@ -574,7 +572,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     } finally {
       setSearching(false);
     }
-  }, [searchQuery, nav, mapMovedCenter]);
+  }, [searchQuery, nav.gps, nav.effectiveOrigin, nav.setErrorMessage, mapMovedCenter]);
 
   // 任務一（P0）：搜尋流程修正 — 搜尋地點 -> 顯示地點資訊 (PLACE_DETAILS) -> 點擊「路線規劃」才進入 ROUTE_PREVIEW！
   // 絕不因選取搜尋結果而自動呼叫路線引擎或直接跳進路線預覽。
@@ -649,7 +647,17 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         }
       }
     },
-    [bindingAnchorSlot, nav]
+    [
+      bindingAnchorSlot,
+      editingOriginMode,
+      nav.setErrorMessage,
+      nav.setCustomOrigin,
+      nav.handleSetCommuteAnchor,
+      nav.setInspectedPlace,
+      nav.route,
+      nav.clearRoute,
+      nav.effectiveOrigin,
+    ]
   );
 
   // Browse 狀態下點擊地圖或 POI：先展開「地點詳細資訊卡」，並自動清除過期搜尋錯誤訊息
@@ -678,7 +686,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         duration: 420,
       });
     },
-    [nav, zoomLevel]
+    [nav.effectiveOrigin, nav.setInspectedPlace, zoomLevel]
   );
 
   // Section 四：地標 Marker 點擊專用處理器
@@ -704,7 +712,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         }
       }
     },
-    [nearbyPins, handleInspectPlaceOnMap, nav]
+    [nearbyPins, handleInspectPlaceOnMap, nav.effectiveOrigin]
   );
 
   // 點擊或長按地圖任意處：反查台灣真實地址並顯示地點詳細資訊卡（絕不覆蓋剛點擊的 Marker！）
@@ -857,7 +865,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         }
       }
     },
-    [activePoiCat, nav, mapMovedCenter, handleInspectPlaceOnMap]
+    [
+      activePoiCat,
+      nav.setInspectedPlace,
+      nav.setErrorMessage,
+      nav.effectiveOrigin,
+      mapMovedCenter,
+      handleInspectPlaceOnMap,
+    ]
   );
 
   // 地圖移動後點擊「搜尋這個區域」
@@ -1099,7 +1114,16 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     }
     setSheetCollapsed(false);
     nav.startNavigation();
-  }, [activeProfile, nav]);
+  }, [
+    activeProfile,
+    nav.isCustomOrigin,
+    nav.customOrigin,
+    nav.effectiveOrigin,
+    nav.setCustomOrigin,
+    nav.setVehicleType,
+    nav.startNavigation,
+    nav.startSimulatedNavigation,
+  ]);
 
   const handleOverviewRoute = useCallback(() => {
     if (!nav.route) return;
@@ -1112,7 +1136,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       bearing: 0,
       duration: 600,
     });
-  }, [nav]);
+  }, [nav.route, nav.setFollowMode]);
 
   const handleRecenterCockpit = useCallback(() => {
     nav.setFollowMode('course');
@@ -1127,7 +1151,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         duration: 400,
       });
     }
-  }, [nav, vehicleDisplayCoord]);
+  }, [nav.setFollowMode, nav.gps, vehicleDisplayCoord]);
 
   const handleCycleFollowMode = useCallback(() => {
     const order: Array<'follow' | 'heading' | 'course'> = ['follow', 'heading', 'course'];
@@ -1142,23 +1166,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         duration: 450,
       });
     }
-  }, [nav, zoomLevel, is3D]);
-
-  const handleToggle3D = useCallback(async () => {
-    const t0 = Date.now();
-    const next3D = !is3D;
-    setIs3D(next3D);
-    const center = (await mapRef.current?.getCenter().catch(() => null)) || [
-      nav.effectiveOrigin.lon,
-      nav.effectiveOrigin.lat,
-    ];
-    cameraRef.current?.easeTo({
-      center,
-      pitch: next3D ? 55 : 0,
-      duration: 280,
-    });
-    setToggle2D3DMs(Math.max(12, Date.now() - t0));
-  }, [is3D, nav.effectiveOrigin]);
+  }, [nav.followMode, nav.setFollowMode, nav.gps, zoomLevel, is3D]);
 
   const handleToggleAvoidOption = useCallback(
     async (kind: 'tolls' | 'highways') => {
@@ -1173,7 +1181,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         });
       }
     },
-    [nav]
+    [
+      nav.avoidTolls,
+      nav.avoidHighways,
+      nav.setAvoidTolls,
+      nav.setAvoidHighways,
+      nav.destination,
+      nav.calculateRoute,
+    ]
   );
 
   const followIconName =
@@ -1275,298 +1290,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           <UserLocation animated accuracy heading />
         )}
 
-        {/* ==================== 高精度道路面積、平滑路口、分隔島與真實車道標線（Zoom >= 16.0） ==================== */}
-        {hdDetailActive && hdRoads?.layers?.road_surfaces && (
-          <GeoJSONSource id="goba-hd-surfaces-src" data={hdRoads.layers.road_surfaces}>
-            <Layer
-              id="goba-hd-road-casing"
-              type="fill"
-              minzoom={16}
-              paint={{
-                'fill-color': isNight ? '#1E293B' : '#94A0B0',
-                'fill-opacity': 1,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.road_asphalt && (
-          <GeoJSONSource id="goba-hd-asphalt-src" data={hdRoads.layers.road_asphalt}>
-            <Layer
-              id="goba-hd-road-fill"
-              type="fill"
-              minzoom={16}
-              paint={{
-                'fill-color': isNight
-                  ? '#334155'
-                  : [
-                      'match',
-                      ['get', 'road_class'],
-                      'primary',
-                      '#A8B1BE',
-                      'secondary',
-                      '#B2BAC5',
-                      'tertiary',
-                      '#B2BAC5',
-                      '#C4CBD4',
-                    ],
-                'fill-opacity': 1,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.medians && (
-          <GeoJSONSource id="goba-hd-medians-src" data={hdRoads.layers.medians}>
-            <Layer
-              id="goba-hd-medians-fill"
-              type="fill"
-              minzoom={16}
-              paint={{
-                'fill-color': isNight ? '#14532D' : '#A3DFA9',
-                'fill-outline-color': isNight ? '#166534' : '#7BC686',
-                'fill-opacity': 0.96,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bus_lanes && (
-          <GeoJSONSource id="goba-hd-buslanes-src" data={hdRoads.layers.bus_lanes}>
-            <Layer
-              id="goba-hd-buslanes-fill"
-              type="fill"
-              minzoom={16.5}
-              paint={{
-                'fill-color': isNight ? 'rgba(59, 130, 246, 0.28)' : 'rgba(59, 130, 246, 0.22)',
-                'fill-outline-color': 'rgba(37, 99, 235, 0.45)',
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.edge_lines && (
-          <GeoJSONSource id="goba-hd-edges-src" data={hdRoads.layers.edge_lines}>
-            <Layer
-              id="goba-hd-edge-lines"
-              type="line"
-              minzoom={16.5}
-              layout={{ 'line-cap': 'round', 'line-join': 'round' }}
-              paint={{
-                'line-color': isNight ? 'rgba(203,213,225,0.45)' : 'rgba(255,255,255,0.72)',
-                'line-width': 1.2,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.center_lines && (
-          <GeoJSONSource id="goba-hd-center-src" data={hdRoads.layers.center_lines}>
-            <Layer
-              id="goba-hd-yellow-center"
-              type="line"
-              minzoom={16.5}
-              layout={{ 'line-cap': 'butt', 'line-join': 'round' }}
-              paint={{
-                'line-color': '#F4C44E',
-                'line-width': 1.6,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.lane_dividers && (
-          <GeoJSONSource id="goba-hd-lanes-src" data={hdRoads.layers.lane_dividers}>
-            <Layer
-              id="goba-hd-lane-dashes"
-              type="line"
-              minzoom={16.5}
-              layout={{ 'line-cap': 'butt' }}
-              paint={{
-                'line-color': isNight ? '#E2E8F0' : '#FFFFFF',
-                'line-opacity': [
-                  'match',
-                  ['get', 'accuracy'],
-                  'approximate_visual_only',
-                  isNight ? 0.48 : 0.68,
-                  isNight ? 0.72 : 0.9,
-                ],
-                'line-width': 1.4,
-                'line-dasharray': [5, 5],
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.crosswalks && (
-          <GeoJSONSource id="goba-hd-crosswalks-src" data={hdRoads.layers.crosswalks}>
-            <Layer
-              id="goba-hd-crosswalk-stripes"
-              type="line"
-              minzoom={16.8}
-              layout={{ 'line-cap': 'butt' }}
-              paint={{
-                'line-color': isNight ? 'rgba(241,245,249,0.72)' : 'rgba(255,255,255,0.92)',
-                'line-width': 2.2,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.stop_lines && (
-          <GeoJSONSource id="goba-hd-stoplines-src" data={hdRoads.layers.stop_lines}>
-            <Layer
-              id="goba-hd-stop-line"
-              type="line"
-              minzoom={16.8}
-              layout={{ 'line-cap': 'butt' }}
-              paint={{
-                'line-color': isNight ? 'rgba(248,250,252,0.82)' : 'rgba(255,255,255,0.95)',
-                'line-width': 2.4,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-
-        {/* P0 #3：3D 立體高架橋樑／交流道圖層（嚴格繪製於所有平面道路與標線之上，明確上下分離！） */}
-        {hdDetailActive && hdRoads?.layers?.bridge_shadows && (
-          <GeoJSONSource id="goba-hd-bridge-shadow-src" data={hdRoads.layers.bridge_shadows}>
-            <Layer
-              id="goba-hd-bridge-shadow"
-              type="fill"
-              minzoom={15.5}
-              paint={{
-                'fill-color': isNight ? 'rgba(2, 6, 23, 0.55)' : 'rgba(15, 23, 42, 0.22)',
-                'fill-opacity': 0.9,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bridge_piers && (
-          <GeoJSONSource id="goba-hd-bridge-piers-src" data={hdRoads.layers.bridge_piers}>
-            <Layer
-              id="goba-hd-bridge-piers-3d"
-              type="fill-extrusion"
-              minzoom={16}
-              paint={{
-                'fill-extrusion-color': isNight ? '#475569' : '#94A3B8',
-                'fill-extrusion-base': ['get', 'base_height'],
-                'fill-extrusion-height': ['get', 'height'],
-                'fill-extrusion-opacity': 0.95,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bridge_decks_3d && (
-          <GeoJSONSource id="goba-hd-bridge-decks-src" data={hdRoads.layers.bridge_decks_3d}>
-            <Layer
-              id="goba-hd-bridge-decks-3d"
-              type="fill-extrusion"
-              minzoom={15.8}
-              paint={{
-                'fill-extrusion-color': isNight ? '#334155' : '#A6B0BE',
-                'fill-extrusion-base': ['get', 'base_height'],
-                'fill-extrusion-height': ['get', 'height'],
-                'fill-extrusion-opacity': 0.98,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bridge_surfaces && (
-          <GeoJSONSource id="goba-hd-bridge-casing-src" data={hdRoads.layers.bridge_surfaces}>
-            <Layer
-              id="goba-hd-bridge-casing"
-              type="fill"
-              minzoom={15.5}
-              paint={{
-                'fill-color': isNight ? '#475569' : '#64748B',
-                'fill-opacity': 1,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bridge_asphalt && (
-          <GeoJSONSource id="goba-hd-bridge-asphalt-src" data={hdRoads.layers.bridge_asphalt}>
-            <Layer
-              id="goba-hd-bridge-fill"
-              type="fill"
-              minzoom={15.5}
-              paint={{
-                'fill-color': isNight ? '#3B4A62' : '#ADB6C4',
-                'fill-opacity': 1,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bridge_edge_lines && (
-          <GeoJSONSource id="goba-hd-bridge-edges-src" data={hdRoads.layers.bridge_edge_lines}>
-            <Layer
-              id="goba-hd-bridge-edges"
-              type="line"
-              minzoom={16}
-              layout={{ 'line-cap': 'round', 'line-join': 'round' }}
-              paint={{
-                'line-color': isNight ? 'rgba(226,232,240,0.65)' : 'rgba(255,255,255,0.88)',
-                'line-width': 1.5,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bridge_lane_dividers && (
-          <GeoJSONSource id="goba-hd-bridge-lanes-src" data={hdRoads.layers.bridge_lane_dividers}>
-            <Layer
-              id="goba-hd-bridge-lanes"
-              type="line"
-              minzoom={16.2}
-              layout={{ 'line-cap': 'butt' }}
-              paint={{
-                'line-color': isNight ? '#E2E8F0' : '#FFFFFF',
-                'line-opacity': 0.9,
-                'line-width': 1.4,
-                'line-dasharray': [5, 5],
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.arrows && (
-          <GeoJSONSource id="goba-hd-arrows-src" data={hdRoads.layers.arrows}>
-            <Layer
-              id="goba-hd-arrow-symbols"
-              type="symbol"
-              minzoom={17.2}
-              layout={{
-                'text-field': ['get', 'symbol'],
-                'text-size': 15,
-                'text-rotate': ['get', 'bearing'],
-                'text-rotation-alignment': 'map',
-                'text-allow-overlap': true,
-                'text-ignore-placement': true,
-              }}
-              paint={{
-                'text-color': isNight ? 'rgba(226,232,240,0.7)' : 'rgba(255,255,255,0.85)',
-              }}
-            />
-          </GeoJSONSource>
-        )}
-
-        {/* 預留合法即時路況圖層（僅在接入真實合法路況來源時渲染，無資料時絕不偽造綠色順暢線） */}
-        {liveTrafficGeoJSON && (
-          <GeoJSONSource id="goba-live-traffic-source" data={liveTrafficGeoJSON}>
-            <Layer
-              id="goba-live-traffic-line"
-              type="line"
-              layout={{ 'line-cap': 'round', 'line-join': 'round' }}
-              paint={{
-                'line-color': [
-                  'match',
-                  ['get', 'congestion'],
-                  'smooth',
-                  '#22C55E',
-                  'moderate',
-                  '#F59E0B',
-                  'heavy',
-                  '#EF4444',
-                  'severe',
-                  '#991B1B',
-                  'transparent',
-                ],
-                'line-width': 3.5,
-              }}
-            />
-          </GeoJSONSource>
-        )}
+        {/* ==================== 高精度道路面積、3D 高架橋、分隔島與車道標線（React.memo 隔離重繪） ==================== */}
+        <HdRoadLayers
+          hdDetailActive={hdDetailActive}
+          hdRoads={hdRoads}
+          isNight={isNight}
+          liveTrafficGeoJSON={liveTrafficGeoJSON}
+        />
 
         {/* 已行駛路線（灰化） */}
         {passedGeoJSON && (
@@ -2057,183 +1787,33 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </LiquidGlassSurface>
         )}
 
-        {/* 狀態 4：Navigation（頂部僅顯示高對比 Turn-by-Turn 導航看板 + 複雜路口放大指引） */}
+        {/* 狀態 4：Navigation（頂部 Turn-by-Turn 看板 + 複雜路口放大指引，已元件化隔離） */}
         {uiState === 'navigation' && isActiveNav && (
-          <View style={{ gap: 6 }}>
-            <LiquidGlassSurface variant="dark" borderRadius={26}>
-              <View style={styles.navHudMain}>
-                <LinearGradient colors={['#F472B6', '#DB2777']} style={styles.navHudArrowBox}>
-                  <ManeuverArrowIcon
-                    type={nav.progress?.nextManeuver?.type ?? nav.route?.maneuvers[0]?.type ?? 8}
-                    size={34}
-                    color="#FFFFFF"
-                  />
-                </LinearGradient>
-                <View style={{ flex: 1 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <Text style={styles.navHudDistance} maxFontSizeMultiplier={1.2}>
-                      {formatDistanceMetersZh(nav.progress?.distanceToNextTurnMeters ?? 0)}
-                    </Text>
-                    {nav.progress?.nextManeuver?.hasTrafficSignal && (
-                      <View style={styles.hudTrafficLightPill}>
-                        <View style={styles.hudMiniTrafficLight}>
-                          <View style={[styles.trafficSignalDotMini, { backgroundColor: '#EF4444' }]} />
-                          <View style={[styles.trafficSignalDotMini, { backgroundColor: '#F59E0B' }]} />
-                          <View style={[styles.trafficSignalDotMini, { backgroundColor: '#10B981' }]} />
-                        </View>
-                        <Text style={styles.hudTrafficLightPillText}>紅綠燈路口</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text
-                    style={styles.navHudInstruction}
-                    numberOfLines={2}
-                    maxFontSizeMultiplier={1.25}
-                  >
-                    {nav.progress?.nextManeuver?.instruction ||
-                      nav.route?.maneuvers[0]?.instruction ||
-                      '沿路線前進'}
-                  </Text>
-                </View>
-              </View>
-
-              {nav.phase === 'off_route_recalculating' ? (
-                <View style={styles.rerouteStrip}>
-                  <ActivityIndicator size="small" color="#FEF3C7" />
-                  <Text style={styles.rerouteStripText} maxFontSizeMultiplier={1.2}>
-                    已偏離路線，Valhalla 正在重新規劃...
-                  </Text>
-                </View>
-              ) : nav.progress?.thenManeuver ? (
-                <View style={styles.thenStrip}>
-                  <Text style={styles.thenLabel} maxFontSizeMultiplier={1.2}>
-                    接著
-                  </Text>
-                  <ManeuverArrowIcon
-                    type={nav.progress.thenManeuver.type}
-                    size={16}
-                    color="#F9A8D4"
-                  />
-                  <Text style={styles.thenText} numberOfLines={1} maxFontSizeMultiplier={1.2}>
-                    {nav.progress.thenManeuver.instruction}
-                  </Text>
-                </View>
-              ) : null}
-            </LiquidGlassSurface>
-
-            {/* P1 #6：接近國道交流道／匝道／高架分岔／多車道複雜路口時自動顯示放大指引卡片 */}
-            {nav.progress?.nextManeuver &&
-              isComplexJunctionManeuver(
-                nav.progress.nextManeuver,
-                nav.progress.distanceToNextTurnMeters ?? 9999
-              ) && (
-                <ComplexJunctionCard
-                  maneuver={nav.progress.nextManeuver}
-                  distanceMeters={nav.progress.distanceToNextTurnMeters ?? 0}
-                />
-              )}
-
-            {(nav.isSimulating ||
-              nav.bgLocationActive ||
-              nav.rerouteCount > 0 ||
-              nav.gpsSignalLost ||
-              nav.gpsWeakSignal ||
-              nav.rerouteOfflinePending ||
-              nav.route?.headingUnverified ||
-              nav.phase === 'paused' ||
-              Boolean(nav.commandState)) && (
-              <View style={styles.hudMetaRow}>
-                <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                  <View
-                    style={[
-                      styles.statusDot,
-                      {
-                        backgroundColor:
-                          nav.commandState === 'OFF_ROUTE' || nav.commandState === 'REROUTING'
-                            ? '#F59E0B'
-                            : nav.commandState === 'EXECUTING_MANEUVER'
-                            ? '#F472B6'
-                            : nav.commandState === 'ROUTE_RECOVERED'
-                            ? '#38BDF8'
-                            : '#34D399',
-                      },
-                    ]}
-                  />
-                  <Text style={styles.hudTagText}>{nav.commandState}</Text>
-                </LiquidGlassSurface>
-                {(nav.progress?.remainingTrafficSignalCount ??
-                  nav.route?.trafficSignalCount ??
-                  0) > 0 && (
-                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                    <View style={styles.hudMiniTrafficLight}>
-                      <View style={[styles.trafficSignalDotMini, { backgroundColor: '#EF4444' }]} />
-                      <View style={[styles.trafficSignalDotMini, { backgroundColor: '#F59E0B' }]} />
-                      <View style={[styles.trafficSignalDotMini, { backgroundColor: '#10B981' }]} />
-                    </View>
-                    <Text style={styles.hudTagText}>
-                      {typeof nav.progress?.distanceToNextTrafficSignalMeters === 'number'
-                        ? `下個紅綠燈 ${formatDistanceMetersZh(
-                            nav.progress.distanceToNextTrafficSignalMeters
-                          )} • 剩 ${nav.progress.remainingTrafficSignalCount} 個`
-                        : `沿途 ${nav.route?.trafficSignalCount ?? 0} 個紅綠燈`}
-                    </Text>
-                  </LiquidGlassSurface>
-                )}
-                {nav.route?.headingUnverified && (
-                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                    <Ionicons name="warning" size={12} color="#FBBF24" />
-                    <Text style={styles.hudTagText}>迴轉限制資料不足，請依現場標誌行駛</Text>
-                  </LiquidGlassSurface>
-                )}
-                {nav.phase === 'paused' && (
-                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                    <View style={[styles.statusDot, { backgroundColor: '#F59E0B' }]} />
-                    <Text style={styles.hudTagText}>導航已暫停</Text>
-                  </LiquidGlassSurface>
-                )}
-                {nav.gpsSignalLost && (
-                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                    <View style={[styles.statusDot, { backgroundColor: '#EF4444' }]} />
-                    <Text style={styles.hudTagText}>GPS 訊號中斷，等待恢復...</Text>
-                  </LiquidGlassSurface>
-                )}
-                {!nav.gpsSignalLost && nav.gpsWeakSignal && (
-                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                    <View style={[styles.statusDot, { backgroundColor: '#F59E0B' }]} />
-                    <Text style={styles.hudTagText}>
-                      GPS 精度較弱 (±{Math.round(nav.gps?.accuracyMeters ?? 50)}m)
-                    </Text>
-                  </LiquidGlassSurface>
-                )}
-                {nav.rerouteOfflinePending && (
-                  <TouchableOpacity
-                    onPress={() => {
-                      if (nav.gps) {
-                        nav.triggerOffRouteReroute({ lat: nav.gps.lat, lon: nav.gps.lon });
-                      }
-                    }}
-                  >
-                    <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                      <Ionicons name="refresh" size={12} color="#FBBF24" />
-                      <Text style={styles.hudTagText}>網路恢復後點此重算</Text>
-                    </LiquidGlassSurface>
-                  </TouchableOpacity>
-                )}
-                {nav.isSimulating && (
-                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                    <View style={[styles.statusDot, { backgroundColor: '#FBBF24' }]} />
-                    <Text style={styles.hudTagText}>模擬導航中</Text>
-                  </LiquidGlassSurface>
-                )}
-                {nav.bgLocationActive && (
-                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
-                    <View style={[styles.statusDot, { backgroundColor: '#34D399' }]} />
-                    <Text style={styles.hudTagText}>背景導航中</Text>
-                  </LiquidGlassSurface>
-                )}
-              </View>
-            )}
-          </View>
+          <NavHudOverlay
+            nextManeuver={nav.progress?.nextManeuver ?? null}
+            thenManeuver={nav.progress?.thenManeuver ?? null}
+            fallbackFirstManeuver={nav.route?.maneuvers[0] ?? null}
+            distanceToNextTurnMeters={nav.progress?.distanceToNextTurnMeters ?? 0}
+            phase={nav.phase}
+            commandState={nav.commandState}
+            remainingTrafficSignalCount={nav.progress?.remainingTrafficSignalCount ?? null}
+            routeTrafficSignalCount={nav.route?.trafficSignalCount ?? 0}
+            distanceToNextTrafficSignalMeters={
+              nav.progress?.distanceToNextTrafficSignalMeters ?? null
+            }
+            headingUnverified={Boolean(nav.route?.headingUnverified)}
+            gpsSignalLost={nav.gpsSignalLost}
+            gpsWeakSignal={nav.gpsWeakSignal}
+            gpsAccuracyMeters={nav.gps?.accuracyMeters ?? null}
+            rerouteOfflinePending={nav.rerouteOfflinePending}
+            isSimulating={nav.isSimulating}
+            bgLocationActive={nav.bgLocationActive}
+            onRetryOfflineReroute={() => {
+              if (nav.gps) {
+                nav.triggerOffRouteReroute({ lat: nav.gps.lat, lon: nav.gps.lon });
+              }
+            }}
+          />
         )}
 
         {(nav.errorMessage || nav.gpsPermission === 'denied') && uiState !== 'search' && (
