@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as KeepAwake from 'expo-keep-awake';
 import * as Location from 'expo-location';
 import {
@@ -26,9 +27,18 @@ import { fetchValhallaRoute } from './valhalla';
 import { getVehicleProfile } from './vehicleRestrictions';
 
 const KEEP_AWAKE_TAG = 'goba-maps-active-navigation';
+const ACTIVE_NAV_SESSION_KEY = 'goba_active_nav_session_v1';
 const OFF_ROUTE_THRESHOLD_METERS = 55;
 const OFF_ROUTE_CONSECUTIVE_HITS = 2;
 const REROUTE_COOLDOWN_MS = 10000;
+
+export interface SavedNavSession {
+  destination: SearchPlace;
+  vehicleType: VehicleClassId;
+  avoidTolls: boolean;
+  avoidHighways: boolean;
+  startedAt: number;
+}
 
 export function useNavigationState(initialRegionCenter: Coordinate) {
   const [phase, setPhase] = useState<NavigationPhase>('idle');
@@ -49,6 +59,22 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const [simGps, setSimGps] = useState<GpsSnapshot | null>(null);
   const [progress, setProgress] = useState<RouteProgressSnapshot | null>(null);
   const [rerouteCount, setRerouteCount] = useState(0);
+  const [recoverableSession, setRecoverableSession] = useState<SavedNavSession | null>(null);
+
+  // 檢查是否有上次因閃退／系統回收而中斷的未完成導航（2 小時內有效）
+  useEffect(() => {
+    AsyncStorage.getItem(ACTIVE_NAV_SESSION_KEY)
+      .then((raw) => {
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as SavedNavSession;
+        if (parsed?.destination && Date.now() - Number(parsed.startedAt || 0) < 2 * 60 * 60 * 1000) {
+          setRecoverableSession(parsed);
+        } else {
+          AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const voiceAdapter = useMemo(() => createExpoVoiceAdapter(true), []);
   const bgLocationAdapter = useMemo(
@@ -273,6 +299,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       setFollowMode('free');
       bgLocationAdapter.stop();
       setBgLocationActive(false);
+      AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
       voiceAdapter.speak('已抵達目的地，導航結束');
       return;
     }
@@ -315,8 +342,21 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     spokenKeysRef.current.clear();
     offRouteHitsRef.current = 0;
     setRerouteCount(0);
+    setRecoverableSession(null);
     setPhase('navigating');
     setFollowMode('course');
+
+    // 寫入導航中斷恢復快照（若背景被系統回收，重開 App 可一鍵無縫接續）
+    if (destination) {
+      const snapshot: SavedNavSession = {
+        destination,
+        vehicleType,
+        avoidTolls,
+        avoidHighways,
+        startedAt: Date.now(),
+      };
+      AsyncStorage.setItem(ACTIVE_NAV_SESSION_KEY, JSON.stringify(snapshot)).catch(() => {});
+    }
 
     // 嘗試啟用 iOS 背景定位（使用者若僅允許使用期間則自動維持前景運作）
     const bgStarted = await bgLocationAdapter.start();
@@ -402,6 +442,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     bgLocationAdapter.stop();
     setBgLocationActive(false);
     setProgress(null);
+    AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
     if (route) {
       setPhase('route_preview');
       setFollowMode('free');
@@ -426,7 +467,34 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     setErrorMessage(null);
     setPhase('idle');
     setFollowMode('follow');
+    AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
   }, [voiceAdapter, bgLocationAdapter]);
+
+  const dismissRecoveredSession = useCallback(() => {
+    setRecoverableSession(null);
+    AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
+  }, []);
+
+  const resumeRecoveredSession = useCallback(async () => {
+    if (!recoverableSession) return;
+    const saved = recoverableSession;
+    setRecoverableSession(null);
+    setVehicleType(saved.vehicleType);
+    setAvoidTolls(saved.avoidTolls);
+    setAvoidHighways(saved.avoidHighways);
+    const updated = await calculateRoute(saved.destination, {
+      vehicleTypeOverride: saved.vehicleType,
+      avoidTolls: saved.avoidTolls,
+      avoidHighways: saved.avoidHighways,
+      keepNavigating: true,
+    });
+    if (updated) {
+      setFollowMode('course');
+      const bgStarted = await bgLocationAdapter.start();
+      setBgLocationActive(bgStarted);
+      voiceAdapter.speak(`已恢復前往${saved.destination.name}的導航`);
+    }
+  }, [recoverableSession, calculateRoute, bgLocationAdapter, voiceAdapter]);
 
   const speedKmh = useMemo(() => {
     if (!activeGps || activeGps.speedMps === null || activeGps.speedMps < 0) return 0;
@@ -457,6 +525,9 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     bgLocationActive,
     isSimulating,
     rerouteCount,
+    recoverableSession,
+    resumeRecoveredSession,
+    dismissRecoveredSession,
     errorMessage,
     setErrorMessage,
     calculateRoute,

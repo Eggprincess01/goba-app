@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { BlurView } from 'expo-blur';
+import { LiquidGlassSurface } from './components/LiquidGlassSurface';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
@@ -1189,9 +1190,14 @@ export default function App() {
           </ScrollView>
         )}
 
-        {/* ==================== 浮空 Apple Liquid Glass 底部導覽列 ==================== */}
+        {/* ==================== 浮空 Apple 原生 Liquid Glass 底部導覽列 ==================== */}
         <View style={styles.liquidTabOuter}>
-          <BlurView intensity={80} tint="light" style={styles.liquidTabBlur}>
+          <LiquidGlassSurface
+            variant="sakura"
+            interactive
+            borderRadius={32}
+            contentStyle={styles.liquidTabBlur}
+          >
             {[
               { key: 'home', label: '首頁', icon: 'home', activeIcon: 'home' },
               { key: 'garage', label: '車庫', icon: 'car-outline', activeIcon: 'car' },
@@ -1218,7 +1224,7 @@ export default function App() {
                 </TouchableOpacity>
               );
             })}
-          </BlurView>
+          </LiquidGlassSurface>
         </View>
 
         {/* ==================== 地區與 GPS 定位 Modal ==================== */}
