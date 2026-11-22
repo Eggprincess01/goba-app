@@ -1,8 +1,6 @@
-name: Build Android APK (GOBA Maps)
+name: Build Android APK (GOBA Maps - Manual)
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:

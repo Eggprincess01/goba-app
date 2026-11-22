@@ -12,7 +12,11 @@
       "bundleIdentifier": "com.mmlovenn.goba",
       "infoPlist": {
         "CFBundleDisplayName": "鍋巴 GOBA",
-        "NSLocationWhenInUseUsageDescription": "鍋巴 GOBA 需要取用您的位置，以自動提供所在地區的天氣、空氣品質，並在地圖中顯示附近的加油站、停車場與即時路況。"
+        "NSLocationWhenInUseUsageDescription": "鍋巴 GOBA 需要取用您的位置，以提供即時導航、所在地區天氣與附近加油站／停車場資訊。",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "鍋巴 GOBA 在導航進行中需要背景位置權限，以確保切換畫面或鎖屏時仍能持續提供語音轉彎指引與偏航重算。",
+        "UIBackgroundModes": [
+          "location"
+        ]
       }
     },
     "android": {

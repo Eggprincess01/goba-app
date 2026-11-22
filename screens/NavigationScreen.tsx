@@ -25,6 +25,7 @@ import {
   UserLocation,
 } from '@maplibre/maplibre-react-native';
 import { MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
+import { formatDistanceMetersZh } from '../navigation/navEngine';
 import { Coordinate, SearchPlace } from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
@@ -58,16 +59,16 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [zoomLevel, setZoomLevel] = useState(14.5);
 
   const currentMapStyle = MAP_STYLE_OPTIONS[styleIdx] || MAP_STYLE_OPTIONS[0];
+  const isActiveNav = nav.phase === 'navigating' || nav.phase === 'off_route_recalculating';
 
-  // 將內部跟隨模式對應到 MapLibre v11 TrackUserLocation
   const mapLibreTrackMode: TrackUserLocation | undefined = useMemo(() => {
+    if (nav.isSimulating) return undefined;
     if (nav.followMode === 'follow') return 'default';
     if (nav.followMode === 'heading') return 'heading';
     if (nav.followMode === 'course') return 'course';
     return undefined;
-  }, [nav.followMode]);
+  }, [nav.followMode, nav.isSimulating]);
 
-  // 將 Valhalla 解碼座標轉為 GeoJSON Feature
   const routeGeoJSON = useMemo<GeoJSON.FeatureCollection | null>(() => {
     if (!nav.route || nav.route.coordinates.length < 2) return null;
     return {
@@ -85,33 +86,33 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     };
   }, [nav.route]);
 
-  // 路線規劃完成後自動縮放視角涵蓋整條路線
+  // 路線預覽自動縮放涵蓋整條路線
   useEffect(() => {
     if (nav.route && nav.phase === 'route_preview') {
       const [west, south, east, north] = nav.route.bbox;
       nav.setFollowMode('free');
       setTimeout(() => {
         cameraRef.current?.fitBounds([west, south, east, north], {
-          padding: { top: 170, right: 48, bottom: 280, left: 48 },
+          padding: { top: 170, right: 48, bottom: 290, left: 48 },
           duration: 750,
         });
       }, 120);
     }
-  }, [nav.route?.fetchedAt]);
+  }, [nav.route?.fetchedAt, nav.phase]);
 
-  // 進入定位跟隨預覽時切至導航視角
+  // 啟動導航或模擬行駛時自動切至 3D 導航視角並跟隨車頭方向
   useEffect(() => {
-    if (nav.phase === 'navigating' && nav.gps) {
+    if (isActiveNav && nav.gps) {
       setIs3D(true);
       cameraRef.current?.easeTo({
         center: [nav.gps.lon, nav.gps.lat],
-        zoom: 16.5,
-        pitch: 45,
+        zoom: 17,
+        pitch: 50,
         bearing: nav.gps.headingDeg && nav.gps.headingDeg >= 0 ? nav.gps.headingDeg : 0,
-        duration: 600,
+        duration: nav.isSimulating ? 580 : 600,
       });
     }
-  }, [nav.phase]);
+  }, [isActiveNav, nav.isSimulating, nav.gps?.lat, nav.gps?.lon]);
 
   const handleSearchSubmit = useCallback(async () => {
     const q = searchQuery.trim();
@@ -145,6 +146,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
   const handleLongPressMap = useCallback(
     async (event: any) => {
+      if (isActiveNav) return;
       const lngLat = event?.nativeEvent?.lngLat;
       if (!Array.isArray(lngLat) || lngLat.length < 2) return;
       const [lon, lat] = lngLat;
@@ -160,7 +162,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       setSearchQuery(droppedPlace.name);
       await nav.calculateRoute(droppedPlace);
     },
-    [nav]
+    [nav, isActiveNav]
   );
 
   const handleCycleFollowMode = useCallback(() => {
@@ -171,8 +173,8 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     if (nav.gps) {
       cameraRef.current?.easeTo({
         center: [nav.gps.lon, nav.gps.lat],
-        zoom: Math.max(zoomLevel, 15.5),
-        pitch: next === 'course' ? 45 : is3D ? 45 : 0,
+        zoom: Math.max(zoomLevel, 16),
+        pitch: next === 'course' ? 50 : is3D ? 45 : 0,
         duration: 450,
       });
     }
@@ -197,7 +199,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     ];
     cameraRef.current?.easeTo({
       center,
-      pitch: next3D ? 48 : 0,
+      pitch: next3D ? 50 : 0,
       duration: 400,
     });
   }, [is3D, nav.effectiveOrigin]);
@@ -241,18 +243,16 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       ? 'locate'
       : 'locate-outline';
 
-  const followLabel =
-    nav.followMode === 'course'
-      ? '行進旋轉'
-      : nav.followMode === 'heading'
-      ? '指北旋轉'
-      : nav.followMode === 'follow'
-      ? '定位跟隨'
-      : '自由瀏覽';
+  const remainingDistKm = nav.progress
+    ? nav.progress.remainingDistanceMeters / 1000
+    : nav.route?.distanceKm ?? 0;
+  const remainingSec = nav.progress
+    ? nav.progress.remainingDurationSec
+    : nav.route?.durationSec ?? 0;
 
   return (
     <View style={styles.root}>
-      {/* MapLibre Native 向量地圖本體 */}
+      {/* MapLibre Native 向量地圖 */}
       <Map
         ref={mapRef}
         style={styles.map}
@@ -262,7 +262,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         touchZoom
         dragPan
         compass
-        compassPosition={{ top: 180, left: 14 }}
+        compassPosition={{ top: isActiveNav ? 190 : 180, left: 14 }}
         attributionPosition={{ bottom: 8, left: 8 }}
         onLongPress={handleLongPressMap}
         onRegionDidChange={(e) => {
@@ -290,9 +290,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           }}
         />
 
-        {nav.gpsPermission === 'granted' && <UserLocation animated accuracy heading />}
+        {nav.gpsPermission === 'granted' && !nav.isSimulating && (
+          <UserLocation animated accuracy heading />
+        )}
 
-        {/* 汽車路線繪製（外框 + 主線） */}
+        {/* 汽車路線（外框 + 主線） */}
         {routeGeoJSON && (
           <GeoJSONSource id="goba-route-source" data={routeGeoJSON}>
             <Layer
@@ -300,9 +302,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               type="line"
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
-                'line-color': '#9D174D',
-                'line-width': 10,
-                'line-opacity': 0.85,
+                'line-color': '#831843',
+                'line-width': 11,
+                'line-opacity': 0.88,
               }}
             />
             <Layer
@@ -311,14 +313,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
                 'line-color': '#EC4899',
-                'line-width': 6,
+                'line-width': 6.5,
                 'line-opacity': 1,
               }}
             />
           </GeoJSONSource>
         )}
 
-        {/* 目的地標記 */}
+        {/* 模擬行駛車輛游標 */}
+        {nav.isSimulating && nav.gps && (
+          <Marker id="goba-sim-puck" lngLat={[nav.gps.lon, nav.gps.lat]} anchor="center">
+            <View style={styles.simCarPuck}>
+              <Ionicons name="navigate" size={18} color="#FFFFFF" />
+            </View>
+          </Marker>
+        )}
+
+        {/* 目的地旗幟標記 */}
         {nav.destination && (
           <Marker
             id="goba-destination-marker"
@@ -335,119 +346,189 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         )}
       </Map>
 
-      {/* 頂部搜尋與車種列 */}
+      {/* 頂部 HUD：導航中顯示 Turn-by-Turn 看板；否則顯示搜尋列 */}
       <SafeAreaView style={styles.topOverlay} pointerEvents="box-none">
-        <View style={styles.topBar}>
-          <TouchableOpacity style={styles.backBtn} onPress={onClose} activeOpacity={0.85}>
-            <Ionicons name="chevron-back" size={22} color="#831843" />
-          </TouchableOpacity>
-
-          <View style={styles.searchBox}>
-            <Ionicons name="search" size={18} color="#9D174D" />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="搜尋目的地（或長按地圖設標記）"
-              placeholderTextColor="#9CA3AF"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              returnKeyType="search"
-              onSubmitEditing={handleSearchSubmit}
-            />
-            {searching ? (
-              <ActivityIndicator size="small" color="#DB2777" />
-            ) : searchQuery.length > 0 ? (
-              <TouchableOpacity
-                onPress={() => {
-                  setSearchQuery('');
-                  setSearchResults([]);
-                  nav.clearRoute();
-                }}
-              >
-                <Ionicons name="close-circle" size={18} color="#9CA3AF" />
-              </TouchableOpacity>
-            ) : null}
-          </View>
-
-          <TouchableOpacity style={styles.searchActionBtn} onPress={handleSearchSubmit} activeOpacity={0.85}>
-            <Text style={styles.searchActionText}>搜尋</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* 車種列（第一階段僅開放汽車，機車/重機明確標示驗證中） */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.vehicleRow}
-        >
-          {TAIWAN_VEHICLE_PROFILES.map((v) => {
-            const active = nav.vehicleType === v.id;
-            return (
-              <TouchableOpacity
-                key={v.id}
-                style={[
-                  styles.vehicleChip,
-                  active && styles.vehicleChipActive,
-                  !v.isProductionVerified && styles.vehicleChipLocked,
-                ]}
-                activeOpacity={0.85}
-                onPress={() => {
-                  if (!v.isProductionVerified) {
-                    Alert.alert(
-                      `${v.label} — 第二階段開放`,
-                      `${v.verificationNote}\n\n為避免導航誤導上國道、快速道路或禁行機車路段，第一階段僅開放「汽車」模式。`
-                    );
-                    return;
-                  }
-                  nav.setVehicleType(v.id);
-                }}
-              >
+        {isActiveNav ? (
+          <View style={styles.navHudWrap}>
+            <View style={styles.navHudMain}>
+              <View style={styles.navHudArrowBox}>
                 <Ionicons
-                  name={v.isProductionVerified ? 'car-sport' : 'lock-closed'}
-                  size={13}
-                  color={active ? '#FFFFFF' : v.isProductionVerified ? '#831843' : '#6B7280'}
+                  name={
+                    getManeuverIconName(
+                      nav.progress?.nextManeuver?.type ?? nav.route?.maneuvers[0]?.type ?? 8
+                    ) as any
+                  }
+                  size={34}
+                  color="#FFFFFF"
                 />
-                <Text
-                  style={[
-                    styles.vehicleChipText,
-                    active && styles.vehicleChipTextActive,
-                    !v.isProductionVerified && styles.vehicleChipTextLocked,
-                  ]}
-                >
-                  {v.shortLabel}
-                  {!v.isProductionVerified ? ' (驗證中)' : ''}
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.navHudDistance}>
+                  {formatDistanceMetersZh(nav.progress?.distanceToNextTurnMeters ?? 0)}
                 </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
+                <Text style={styles.navHudInstruction} numberOfLines={2}>
+                  {nav.progress?.nextManeuver?.instruction ||
+                    nav.route?.maneuvers[0]?.instruction ||
+                    '沿路線前進'}
+                </Text>
+              </View>
+            </View>
 
-        {/* 搜尋結果下拉清單 */}
-        {searchResults.length > 0 && (
-          <View style={styles.searchDropdown}>
-            <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-              {searchResults.map((p) => (
-                <TouchableOpacity
-                  key={p.id}
-                  style={styles.searchItem}
-                  onPress={() => handleSelectPlace(p)}
-                >
-                  <Ionicons name="location" size={18} color="#DB2777" />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.searchItemTitle} numberOfLines={1}>
-                      {p.name}
-                    </Text>
-                    <Text style={styles.searchItemAddr} numberOfLines={1}>
-                      {p.address}
-                    </Text>
-                  </View>
-                  <Ionicons name="arrow-forward-circle-outline" size={20} color="#DB2777" />
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
+            {nav.phase === 'off_route_recalculating' ? (
+              <View style={styles.rerouteStrip}>
+                <ActivityIndicator size="small" color="#FEF3C7" />
+                <Text style={styles.rerouteStripText}>已偏離路線，Valhalla 正在重新規劃...</Text>
+              </View>
+            ) : nav.progress?.thenManeuver ? (
+              <View style={styles.thenStrip}>
+                <Text style={styles.thenLabel}>接著</Text>
+                <Ionicons
+                  name={getManeuverIconName(nav.progress.thenManeuver.type) as any}
+                  size={15}
+                  color="#FBCFE8"
+                />
+                <Text style={styles.thenText} numberOfLines={1}>
+                  {nav.progress.thenManeuver.instruction}
+                </Text>
+              </View>
+            ) : null}
+
+            {/* 導航狀態徽章（模擬 / 背景定位 / 重算次數） */}
+            <View style={styles.hudMetaRow}>
+              {nav.isSimulating && (
+                <View style={styles.hudChipAmber}>
+                  <Text style={styles.hudChipAmberText}>模擬行駛測試中</Text>
+                </View>
+              )}
+              {nav.bgLocationActive && (
+                <View style={styles.hudChipGreen}>
+                  <Text style={styles.hudChipGreenText}>背景定位已啟用</Text>
+                </View>
+              )}
+              {nav.rerouteCount > 0 && (
+                <View style={styles.hudChipDark}>
+                  <Text style={styles.hudChipDarkText}>已重算 {nav.rerouteCount} 次</Text>
+                </View>
+              )}
+            </View>
           </View>
+        ) : (
+          <>
+            <View style={styles.topBar}>
+              <TouchableOpacity style={styles.backBtn} onPress={onClose} activeOpacity={0.85}>
+                <Ionicons name="chevron-back" size={22} color="#831843" />
+              </TouchableOpacity>
+
+              <View style={styles.searchBox}>
+                <Ionicons name="search" size={18} color="#9D174D" />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="搜尋目的地（或長按地圖設標記）"
+                  placeholderTextColor="#9CA3AF"
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  returnKeyType="search"
+                  onSubmitEditing={handleSearchSubmit}
+                />
+                {searching ? (
+                  <ActivityIndicator size="small" color="#DB2777" />
+                ) : searchQuery.length > 0 ? (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSearchQuery('');
+                      setSearchResults([]);
+                      nav.clearRoute();
+                    }}
+                  >
+                    <Ionicons name="close-circle" size={18} color="#9CA3AF" />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
+              <TouchableOpacity
+                style={styles.searchActionBtn}
+                onPress={handleSearchSubmit}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.searchActionText}>搜尋</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* 車種選擇列（汽車開放；機車／重機維持驗證鎖定） */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.vehicleRow}
+            >
+              {TAIWAN_VEHICLE_PROFILES.map((v) => {
+                const active = nav.vehicleType === v.id;
+                return (
+                  <TouchableOpacity
+                    key={v.id}
+                    style={[
+                      styles.vehicleChip,
+                      active && styles.vehicleChipActive,
+                      !v.isProductionVerified && styles.vehicleChipLocked,
+                    ]}
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      if (!v.isProductionVerified) {
+                        Alert.alert(
+                          `${v.label} — 法規路網驗證中`,
+                          `${v.verificationNote}\n\n為避免導航誤導上國道、快速道路或禁行機車路段，目前正式導航僅開放「汽車」模式。`
+                        );
+                        return;
+                      }
+                      nav.setVehicleType(v.id);
+                    }}
+                  >
+                    <Ionicons
+                      name={v.isProductionVerified ? 'car-sport' : 'lock-closed'}
+                      size={13}
+                      color={active ? '#FFFFFF' : v.isProductionVerified ? '#831843' : '#6B7280'}
+                    />
+                    <Text
+                      style={[
+                        styles.vehicleChipText,
+                        active && styles.vehicleChipTextActive,
+                        !v.isProductionVerified && styles.vehicleChipTextLocked,
+                      ]}
+                    >
+                      {v.shortLabel}
+                      {!v.isProductionVerified ? ' (驗證中)' : ''}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            {searchResults.length > 0 && (
+              <View style={styles.searchDropdown}>
+                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
+                  {searchResults.map((p) => (
+                    <TouchableOpacity
+                      key={p.id}
+                      style={styles.searchItem}
+                      onPress={() => handleSelectPlace(p)}
+                    >
+                      <Ionicons name="location" size={18} color="#DB2777" />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.searchItemTitle} numberOfLines={1}>
+                          {p.name}
+                        </Text>
+                        <Text style={styles.searchItemAddr} numberOfLines={1}>
+                          {p.address}
+                        </Text>
+                      </View>
+                      <Ionicons name="arrow-forward-circle-outline" size={20} color="#DB2777" />
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
+          </>
         )}
 
-        {/* 錯誤或 GPS 權限提示 */}
         {(nav.errorMessage || nav.gpsPermission === 'denied') && (
           <View style={styles.bannerError}>
             <Ionicons name="alert-circle" size={16} color="#B91C1C" />
@@ -456,27 +537,22 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             </Text>
           </View>
         )}
-
-        {/* 定位測試資訊膠囊（方便 iOS/Android 實機定位驗證） */}
-        <View style={styles.telemetryPill}>
-          <Ionicons
-            name={nav.gps ? 'radio-button-on' : 'radio-button-off'}
-            size={12}
-            color={nav.gps ? '#10B981' : '#F59E0B'}
-          />
-          <Text style={styles.telemetryText}>
-            {nav.gps
-              ? `GPS ${nav.gps.lat.toFixed(4)}, ${nav.gps.lon.toFixed(4)} • ±${Math.round(
-                  nav.gps.accuracyMeters ?? 0
-                )}m • ${followLabel}`
-              : '正在取得 GPS 訊號...'}
-            {nav.offRouteDistanceMeters !== null ? ` • 距路線 ${nav.offRouteDistanceMeters}m` : ''}
-          </Text>
-        </View>
       </SafeAreaView>
 
-      {/* 右側地圖控制按鈕（跟隨/旋轉/3D/縮放/圖層） */}
+      {/* 右側地圖與語音控制列 */}
       <View style={styles.rightControls}>
+        <TouchableOpacity
+          style={[styles.ctrlBtn, !nav.voiceEnabled && styles.ctrlBtnMuted]}
+          onPress={nav.toggleVoice}
+          activeOpacity={0.85}
+        >
+          <Ionicons
+            name={nav.voiceEnabled ? 'volume-high' : 'volume-mute'}
+            size={20}
+            color={nav.voiceEnabled ? '#831843' : '#6B7280'}
+          />
+        </TouchableOpacity>
+
         <TouchableOpacity style={styles.ctrlBtn} onPress={handleCycleFollowMode} activeOpacity={0.85}>
           <Ionicons name={followIconName as any} size={20} color="#831843" />
         </TouchableOpacity>
@@ -510,137 +586,192 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         </TouchableOpacity>
       </View>
 
-      {/* 底部路線資訊卡片 */}
+      {/* 導航中左下角即時車速表 */}
+      {isActiveNav && (
+        <View style={styles.speedPill}>
+          <Text style={styles.speedValue}>{nav.speedKmh}</Text>
+          <Text style={styles.speedUnit}>km/h</Text>
+        </View>
+      )}
+
+      {/* 底部資訊卡片 */}
       <View style={styles.bottomSheet}>
         {nav.phase === 'routing' ? (
           <View style={styles.loadingRow}>
             <ActivityIndicator size="small" color="#DB2777" />
             <Text style={styles.loadingText}>Valhalla 正在計算汽車路線...</Text>
           </View>
+        ) : nav.phase === 'arrived' ? (
+          <View style={styles.arrivedWrap}>
+            <View style={styles.arrivedBadge}>
+              <Ionicons name="checkmark-circle" size={28} color="#10B981" />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.arrivedTitle}>已抵達目的地</Text>
+                <Text style={styles.arrivedSub}>{nav.destination?.name || '目的地'}</Text>
+              </View>
+            </View>
+            <TouchableOpacity style={styles.primaryBtn} onPress={nav.clearRoute}>
+              <Text style={styles.primaryBtnText}>完成導航</Text>
+            </TouchableOpacity>
+          </View>
         ) : nav.route ? (
           <>
             <View style={styles.routeHeader}>
               <View style={{ flex: 1 }}>
                 <View style={styles.etaRow}>
-                  <Text style={styles.etaDuration}>{formatDurationZh(nav.route.durationSec)}</Text>
-                  <Text style={styles.etaDistance}>• {nav.route.distanceKm.toFixed(1)} 公里</Text>
+                  <Text style={styles.etaDuration}>{formatDurationZh(remainingSec)}</Text>
+                  <Text style={styles.etaDistance}>• {remainingDistKm.toFixed(1)} 公里</Text>
                 </View>
                 <Text style={styles.etaSub}>
-                  預計 {formatEtaTime(nav.route.durationSec)} 抵達 • {nav.destination?.name || '目的地'}
+                  預計 {formatEtaTime(remainingSec)} 抵達 • {nav.destination?.name || '目的地'}
                 </Text>
               </View>
 
-              <TouchableOpacity style={styles.clearBtn} onPress={nav.clearRoute}>
-                <Ionicons name="close" size={18} color="#831843" />
-              </TouchableOpacity>
+              {!isActiveNav && (
+                <TouchableOpacity style={styles.clearBtn} onPress={nav.clearRoute}>
+                  <Ionicons name="close" size={18} color="#831843" />
+                </TouchableOpacity>
+              )}
             </View>
 
-            {/* 避開選項 + Phase 1 狀態標註 */}
-            <View style={styles.optionRow}>
-              <TouchableOpacity
-                style={[styles.optChip, nav.avoidTolls && styles.optChipActive]}
-                onPress={() => handleToggleAvoidOption('tolls')}
-              >
-                <Text style={[styles.optChipText, nav.avoidTolls && styles.optChipTextActive]}>
-                  避開收費站
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.optChip, nav.avoidHighways && styles.optChipActive]}
-                onPress={() => handleToggleAvoidOption('highways')}
-              >
-                <Text style={[styles.optChipText, nav.avoidHighways && styles.optChipTextActive]}>
-                  避開高速公路
-                </Text>
-              </TouchableOpacity>
-              <View style={styles.phaseBadge}>
-                <Text style={styles.phaseBadgeText}>Phase 1 測試版</Text>
+            {!isActiveNav && (
+              <View style={styles.optionRow}>
+                <TouchableOpacity
+                  style={[styles.optChip, nav.avoidTolls && styles.optChipActive]}
+                  onPress={() => handleToggleAvoidOption('tolls')}
+                >
+                  <Text style={[styles.optChipText, nav.avoidTolls && styles.optChipTextActive]}>
+                    避開收費站
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.optChip, nav.avoidHighways && styles.optChipActive]}
+                  onPress={() => handleToggleAvoidOption('highways')}
+                >
+                  <Text style={[styles.optChipText, nav.avoidHighways && styles.optChipTextActive]}>
+                    避開高速公路
+                  </Text>
+                </TouchableOpacity>
+                <View style={styles.phaseBadge}>
+                  <Text style={styles.phaseBadgeText}>iOS 語音導航</Text>
+                </View>
               </View>
-            </View>
+            )}
 
-            {/* 主要操作按鈕 */}
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={styles.secondaryBtn}
-                onPress={() => setShowManeuvers((v) => !v)}
-              >
-                <Ionicons
-                  name={showManeuvers ? 'chevron-down' : 'list'}
-                  size={16}
-                  color="#831843"
-                />
-                <Text style={styles.secondaryBtnText}>
-                  轉彎清單 ({nav.route.maneuvers.length})
-                </Text>
-              </TouchableOpacity>
+            {/* 導航操作按鈕 */}
+            {isActiveNav ? (
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={styles.secondaryBtn}
+                  onPress={() => setShowManeuvers((v) => !v)}
+                >
+                  <Ionicons
+                    name={showManeuvers ? 'chevron-down' : 'list'}
+                    size={16}
+                    color="#831843"
+                  />
+                  <Text style={styles.secondaryBtnText}>
+                    剩餘步驟 ({nav.route.maneuvers.length})
+                  </Text>
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[
-                  styles.primaryBtn,
-                  nav.phase === 'navigating' && { backgroundColor: '#DC2626' },
-                ]}
-                onPress={
-                  nav.phase === 'navigating'
-                    ? nav.stopNavigationPreview
-                    : nav.startNavigationPreview
-                }
-              >
-                <Ionicons
-                  name={nav.phase === 'navigating' ? 'stop-circle' : 'navigate'}
-                  size={16}
-                  color="#FFFFFF"
-                />
-                <Text style={styles.primaryBtnText}>
-                  {nav.phase === 'navigating' ? '結束跟隨預覽' : '定位跟隨預覽'}
-                </Text>
-              </TouchableOpacity>
-            </View>
+                <TouchableOpacity
+                  style={[styles.primaryBtn, { backgroundColor: '#DC2626' }]}
+                  onPress={nav.stopNavigation}
+                >
+                  <Ionicons name="stop-circle" size={16} color="#FFFFFF" />
+                  <Text style={styles.primaryBtnText}>結束導航</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={styles.iconActionBtn}
+                  onPress={() => setShowManeuvers((v) => !v)}
+                >
+                  <Ionicons name="list" size={18} color="#831843" />
+                </TouchableOpacity>
 
-            {/* 展開的轉彎清單 */}
+                <TouchableOpacity
+                  style={styles.secondaryBtn}
+                  onPress={nav.startSimulatedNavigation}
+                >
+                  <Ionicons name="play-circle" size={16} color="#831843" />
+                  <Text style={styles.secondaryBtnText}>模擬導航</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity style={styles.primaryBtn} onPress={nav.startNavigation}>
+                  <Ionicons name="navigate" size={16} color="#FFFFFF" />
+                  <Text style={styles.primaryBtnText}>開始語音導航</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
             {showManeuvers && (
               <ScrollView style={styles.maneuverList} nestedScrollEnabled>
-                {nav.route.maneuvers.map((m) => (
-                  <TouchableOpacity
-                    key={m.index}
-                    style={styles.maneuverRow}
-                    onPress={() => {
-                      if (m.coordinate) {
-                        nav.setFollowMode('free');
-                        cameraRef.current?.easeTo({
-                          center: m.coordinate,
-                          zoom: 16.5,
-                          duration: 500,
-                        });
-                      }
-                    }}
-                  >
-                    <View style={styles.maneuverIconCircle}>
-                      <Ionicons
-                        name={getManeuverIconName(m.type) as any}
-                        size={16}
-                        color="#DB2777"
-                      />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.maneuverTitle}>{m.instruction}</Text>
-                      <Text style={styles.maneuverMeta}>
-                        {m.distanceKm > 0 ? `${m.distanceKm.toFixed(2)} km` : '路口節點'}
-                        {m.durationSec > 0 ? ` • 約 ${Math.max(1, Math.round(m.durationSec / 60))} 分` : ''}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                ))}
+                {nav.route.maneuvers.map((m) => {
+                  const isCurrentStep =
+                    isActiveNav && nav.progress?.activeManeuverIndex === m.index;
+                  return (
+                    <TouchableOpacity
+                      key={m.index}
+                      style={[
+                        styles.maneuverRow,
+                        isCurrentStep && styles.maneuverRowActive,
+                      ]}
+                      onPress={() => {
+                        if (m.coordinate) {
+                          nav.setFollowMode('free');
+                          cameraRef.current?.easeTo({
+                            center: m.coordinate,
+                            zoom: 16.5,
+                            duration: 500,
+                          });
+                        }
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.maneuverIconCircle,
+                          isCurrentStep && { backgroundColor: '#DB2777' },
+                        ]}
+                      >
+                        <Ionicons
+                          name={getManeuverIconName(m.type) as any}
+                          size={16}
+                          color={isCurrentStep ? '#FFFFFF' : '#DB2777'}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={[
+                            styles.maneuverTitle,
+                            isCurrentStep && { color: '#831843' },
+                          ]}
+                        >
+                          {m.instruction}
+                        </Text>
+                        <Text style={styles.maneuverMeta}>
+                          {m.distanceKm > 0 ? `${m.distanceKm.toFixed(2)} km` : '路口節點'}
+                          {m.durationSec > 0
+                            ? ` • 約 ${Math.max(1, Math.round(m.durationSec / 60))} 分`
+                            : ''}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
               </ScrollView>
             )}
           </>
         ) : (
           <View style={styles.idleHint}>
             <View style={styles.idleTitleRow}>
-              <Ionicons name="map" size={18} color="#DB2777" />
-              <Text style={styles.idleTitle}>鍋巴地圖 GOBA Maps（第一階段測試版）</Text>
+              <Ionicons name="navigate-circle" size={19} color="#DB2777" />
+              <Text style={styles.idleTitle}>鍋巴地圖 GOBA Maps（Phase 2 即時語音導航）</Text>
             </View>
             <Text style={styles.idleDesc}>
-              輸入目的地搜尋或「長按地圖任意位置」即可透過 Valhalla 規劃汽車路線。目前支援 OpenStreetMap 向量圖磚、GPS 即時跟隨與轉彎預覽（語音與偏航重算將於第二階段啟用）。
+              搜尋目的地或長按地圖設標記，即可啟動汽車即時語音導航（支援繁中播報、偏航自動重算、螢幕恆亮、背景定位與室內模擬導航測試）。
             </Text>
           </View>
         )}
@@ -659,6 +790,91 @@ const styles = StyleSheet.create({
     right: 12,
     gap: 8,
   },
+  // Phase 2 Turn-by-Turn HUD
+  navHudWrap: {
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: '#4A0424',
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  navHudMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  navHudArrowBox: {
+    width: 54,
+    height: 54,
+    borderRadius: 16,
+    backgroundColor: '#DB2777',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navHudDistance: {
+    fontSize: 24,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 0.3,
+  },
+  navHudInstruction: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FCE7F3',
+    marginTop: 2,
+  },
+  thenStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+  },
+  thenLabel: { fontSize: 11, fontWeight: '800', color: '#F9A8D4' },
+  thenText: { flex: 1, fontSize: 12, fontWeight: '600', color: '#FFFFFF' },
+  rerouteStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#B45309',
+  },
+  rerouteStripText: { fontSize: 12, fontWeight: '700', color: '#FEF3C7' },
+  hudMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    backgroundColor: 'rgba(0,0,0,0.18)',
+  },
+  hudChipAmber: {
+    backgroundColor: '#FEF3C7',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  hudChipAmberText: { fontSize: 10, fontWeight: '800', color: '#92400E' },
+  hudChipGreen: {
+    backgroundColor: '#D1FAE5',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  hudChipGreenText: { fontSize: 10, fontWeight: '800', color: '#065F46' },
+  hudChipDark: {
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  hudChipDarkText: { fontSize: 10, fontWeight: '700', color: '#FFFFFF' },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -767,21 +983,10 @@ const styles = StyleSheet.create({
     borderColor: '#FCA5A5',
   },
   bannerErrorText: { flex: 1, fontSize: 12, color: '#991B1B', fontWeight: '600' },
-  telemetryPill: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(17,24,39,0.78)',
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  telemetryText: { fontSize: 11, color: '#F9FAFB', fontWeight: '600' },
   rightControls: {
     position: 'absolute',
     right: 12,
-    top: '36%',
+    top: '34%',
     gap: 8,
   },
   ctrlBtn: {
@@ -796,8 +1001,42 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 4,
   },
+  ctrlBtnMuted: { backgroundColor: 'rgba(243,244,246,0.95)' },
   ctrlBtnActive: { backgroundColor: '#DB2777' },
   ctrlBtnText: { fontSize: 12, fontWeight: '800', color: '#831843' },
+  speedPill: {
+    position: 'absolute',
+    left: 14,
+    bottom: Platform.OS === 'ios' ? 195 : 180,
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: 'rgba(17,24,39,0.88)',
+    borderWidth: 2,
+    borderColor: '#EC4899',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  speedValue: { fontSize: 18, fontWeight: '900', color: '#FFFFFF', lineHeight: 20 },
+  speedUnit: { fontSize: 9, fontWeight: '700', color: '#F9A8D4' },
+  simCarPuck: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#2563EB',
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+    elevation: 6,
+  },
   destMarkerWrap: { alignItems: 'center' },
   destMarkerBadge: {
     width: 34,
@@ -845,6 +1084,14 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
   loadingText: { fontSize: 14, fontWeight: '700', color: '#831843' },
+  arrivedWrap: { gap: 12 },
+  arrivedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  arrivedTitle: { fontSize: 18, fontWeight: '900', color: '#065F46' },
+  arrivedSub: { fontSize: 13, color: '#6B7280', marginTop: 2 },
   routeHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -886,27 +1133,35 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 10,
-    backgroundColor: '#FEF3C7',
+    backgroundColor: '#FCE7F3',
   },
-  phaseBadgeText: { fontSize: 10, fontWeight: '700', color: '#92400E' },
+  phaseBadgeText: { fontSize: 10, fontWeight: '700', color: '#9D174D' },
   actionRow: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginTop: 12,
+  },
+  iconActionBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: '#FCE7F3',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   secondaryBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
     height: 42,
     borderRadius: 14,
     backgroundColor: '#FCE7F3',
   },
   secondaryBtnText: { fontSize: 13, fontWeight: '700', color: '#831843' },
   primaryBtn: {
-    flex: 1.2,
+    flex: 1.35,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -917,7 +1172,7 @@ const styles = StyleSheet.create({
   },
   primaryBtnText: { fontSize: 13, fontWeight: '700', color: '#FFFFFF' },
   maneuverList: {
-    maxHeight: 210,
+    maxHeight: 200,
     marginTop: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#F3F4F6',
@@ -928,8 +1183,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderRadius: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#F9FAFB',
+  },
+  maneuverRowActive: {
+    backgroundColor: '#FDF2F8',
   },
   maneuverIconCircle: {
     width: 30,

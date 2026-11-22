@@ -117,10 +117,10 @@ export function MapTab({
           </View>
           <View style={{ flex: 1 }}>
             <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '800' }}>
-              開啟鍋巴地圖導航（Phase 1 測試版）
+              開啟鍋巴地圖導航（iOS 語音即時導航）
             </Text>
             <Text style={{ color: 'rgba(255,255,255,0.88)', fontSize: 11, marginTop: 1 }}>
-              MapLibre 向量地圖 • Valhalla 汽車路線規劃與轉彎預覽
+              MapLibre 向量地圖 • 繁中語音指引 • 偏航自動重算與模擬測試
             </Text>
           </View>
         </View>
