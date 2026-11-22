@@ -58,7 +58,15 @@ export async function searchDestinationPlaces(
     if (res.ok) {
       const json = await res.json();
       if (Array.isArray(json.places)) {
-        return json.places as SearchPlace[];
+        return json.places.map((p: any) => ({
+          id: String(p.id),
+          name: String(p.name),
+          address: String(p.address || '台灣'),
+          lat: Number(p.lat),
+          lon: Number(p.lon),
+          category: p.category ? String(p.category) : undefined,
+          distanceKm: typeof p.distance_km === 'number' ? p.distance_km : undefined,
+        }));
       }
     }
   } catch {
@@ -93,6 +101,31 @@ export async function searchDestinationPlaces(
     });
   }
   return places;
+}
+
+/**
+ * 反向地理編碼：點擊地圖任意點取得台灣地址與地標名稱
+ */
+export async function reverseGeocodeLocation(
+  lat: number,
+  lon: number
+): Promise<{ name: string; address: string }> {
+  try {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/api/maps/reverse?lat=${lat}&lon=${lon}`,
+      {},
+      6000
+    );
+    if (res.ok) {
+      const json = await res.json();
+      if (json?.name) {
+        return { name: String(json.name), address: String(json.address || '台灣') };
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { name: '地圖選取位置', address: `${lat.toFixed(5)}, ${lon.toFixed(5)}` };
 }
 
 /**

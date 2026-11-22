@@ -24,6 +24,95 @@ export function computeBearingDeg(from: Coordinate, to: Coordinate): number {
 }
 
 /**
+ * 最短弧線角度平滑插值（避免 359° -> 0° 旋轉跳動）
+ */
+export function lerpAngleDeg(fromDeg: number, toDeg: number, factor: number): number {
+  let diff = ((toDeg - fromDeg + 540) % 360) - 180;
+  return (fromDeg + diff * Math.max(0, Math.min(1, factor)) + 360) % 360;
+}
+
+/**
+ * 預先計算折線各頂點的累計距離（公尺），供高頻 20 FPS 平滑插值使用
+ */
+export function buildCumulativeDistances(coords: [number, number][]): number[] {
+  const cum: number[] = [0];
+  let total = 0;
+  for (let i = 1; i < coords.length; i++) {
+    total += haversineMeters(coords[i - 1][1], coords[i - 1][0], coords[i][1], coords[i][0]);
+    cum.push(total);
+  }
+  return cum;
+}
+
+/**
+ * 依指定行駛距離（公尺）於路線折線上精確線性插值，並前瞻 28 公尺計算平順車頭方向
+ */
+export function samplePolylineAtDistance(
+  coords: [number, number][],
+  cumDist: number[],
+  distMeters: number,
+  lookAheadMeters: number = 28
+): { lat: number; lon: number; headingDeg: number; shapeIndex: number; finished: boolean } {
+  const n = coords.length;
+  if (n < 2) {
+    const p = coords[0] || [121.5654, 25.033];
+    return { lat: p[1], lon: p[0], headingDeg: 0, shapeIndex: 0, finished: true };
+  }
+  const totalLen = cumDist[n - 1] || 0;
+  const clamped = Math.max(0, Math.min(totalLen, distMeters));
+
+  const getPointAt = (d: number): { lat: number; lon: number; idx: number } => {
+    if (d <= 0) return { lat: coords[0][1], lon: coords[0][0], idx: 0 };
+    if (d >= totalLen) return { lat: coords[n - 1][1], lon: coords[n - 1][0], idx: n - 2 };
+    let lo = 0;
+    let hi = n - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (cumDist[mid] <= d) lo = mid;
+      else hi = mid;
+    }
+    const segLen = Math.max(0.001, cumDist[lo + 1] - cumDist[lo]);
+    const t = Math.max(0, Math.min(1, (d - cumDist[lo]) / segLen));
+    const lon = coords[lo][0] + t * (coords[lo + 1][0] - coords[lo][0]);
+    const lat = coords[lo][1] + t * (coords[lo + 1][1] - coords[lo][1]);
+    return { lat, lon, idx: lo };
+  };
+
+  const cur = getPointAt(clamped);
+  const ahead = getPointAt(Math.min(totalLen, clamped + lookAheadMeters));
+  const headingDeg =
+    haversineMeters(cur.lat, cur.lon, ahead.lat, ahead.lon) > 1
+      ? computeBearingDeg({ lat: cur.lat, lon: cur.lon }, { lat: ahead.lat, lon: ahead.lon })
+      : computeBearingDeg(
+          { lat: coords[cur.idx][1], lon: coords[cur.idx][0] },
+          { lat: coords[cur.idx + 1][1], lon: coords[cur.idx + 1][0] }
+        );
+
+  return {
+    lat: cur.lat,
+    lon: cur.lon,
+    headingDeg,
+    shapeIndex: cur.idx,
+    finished: clamped >= totalLen - 2,
+  };
+}
+
+/**
+ * 將路線拆分為「已行駛（灰化）」與「前方剩餘（高亮）」兩段，呈現 Google Maps 導航視覺效果
+ */
+export function splitRouteCoords(
+  coords: [number, number][],
+  snappedCoord: [number, number],
+  nearestShapeIndex: number
+): { passed: [number, number][]; remaining: [number, number][] } {
+  if (coords.length < 2) return { passed: [], remaining: coords };
+  const idx = Math.max(0, Math.min(coords.length - 2, nearestShapeIndex));
+  const passed = [...coords.slice(0, idx + 1), snappedCoord];
+  const remaining = [snappedCoord, ...coords.slice(idx + 1)];
+  return { passed, remaining };
+}
+
+/**
  * 計算點 P 投影到線段 AB 上的最近點與距離（公尺，平面近距離近似）
  */
 function projectPointOnSegment(

@@ -10,6 +10,7 @@ export interface SearchPlace {
   lat: number;
   lon: number;
   category?: string;
+  distanceKm?: number;
 }
 
 export type VehicleClassId =

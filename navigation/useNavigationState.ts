@@ -15,10 +15,12 @@ import {
   createExpoVoiceAdapter,
 } from './adapters';
 import {
-  computeBearingDeg,
+  buildCumulativeDistances,
   computeNavigationProgress,
+  lerpAngleDeg,
   pickVoiceAnnouncement,
   RouteProgressSnapshot,
+  samplePolylineAtDistance,
 } from './navEngine';
 import { fetchValhallaRoute } from './valhalla';
 import { getVehicleProfile } from './vehicleRestrictions';
@@ -64,6 +66,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const offRouteHitsRef = useRef(0);
   const lastRerouteTsRef = useRef(0);
   const isReroutingRef = useRef(false);
+  const smoothHeadingRef = useRef(0);
 
   // 同步語音開關至引擎
   const toggleVoice = useCallback(() => {
@@ -329,7 +332,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     );
   }, [route, bgLocationAdapter, voiceAdapter]);
 
-  // 啟動模擬行駛測試（可在室內直接測試語音播報、轉彎切換、距離倒數與抵達）
+  // 啟動模擬行駛測試（20 FPS 連續線性插值 + 前瞻角度平滑轉向，近似 Google Maps 滑順車頭視角）
   const startSimulatedNavigation = useCallback(() => {
     if (!route || route.coordinates.length < 2) return;
     if (simTimerRef.current) {
@@ -341,25 +344,25 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     offRouteHitsRef.current = 0;
     setIsSimulating(true);
     setPhase('navigating');
-    setFollowMode('free');
+    setFollowMode('course');
 
     const coords = route.coordinates;
-    let idx = 0;
-    const stepSize = Math.max(1, Math.floor(coords.length / 70));
-
+    const cumDist = buildCumulativeDistances(coords);
     const profile = getVehicleProfile(route.vehicleType);
-    const simSpeed = profile.simSpeedMps;
+    // 模擬速度略微加速 1.8x 讓長途測試更流暢，同時維持平滑不跳動
+    const simSpeed = Math.max(profile.simSpeedMps * 1.8, 8);
+    const tickMs = 50; // 20 FPS
+    const metersPerTick = simSpeed * (tickMs / 1000);
+    let traveledMeters = 0;
 
-    const firstHeading = computeBearingDeg(
-      { lat: coords[0][1], lon: coords[0][0] },
-      { lat: coords[1][1], lon: coords[1][0] }
-    );
+    const initialSample = samplePolylineAtDistance(coords, cumDist, 0, 28);
+    smoothHeadingRef.current = initialSample.headingDeg;
     setSimGps({
-      lat: coords[0][1],
-      lon: coords[0][0],
+      lat: initialSample.lat,
+      lon: initialSample.lon,
       accuracyMeters: 5,
-      headingDeg: firstHeading,
-      speedMps: simSpeed,
+      headingDeg: initialSample.headingDeg,
+      speedMps: profile.simSpeedMps,
       timestamp: Date.now(),
     });
 
@@ -368,27 +371,24 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     );
 
     simTimerRef.current = setInterval(() => {
-      idx = Math.min(coords.length - 1, idx + stepSize);
-      const curr = coords[idx];
-      const next = coords[Math.min(coords.length - 1, idx + 1)];
-      const prev = coords[Math.max(0, idx - 1)];
-      const heading = computeBearingDeg(
-        { lat: prev[1], lon: prev[0] },
-        { lat: next[1], lon: next[0] }
-      );
+      traveledMeters += metersPerTick;
+      const sample = samplePolylineAtDistance(coords, cumDist, traveledMeters, 30);
+      smoothHeadingRef.current = lerpAngleDeg(smoothHeadingRef.current, sample.headingDeg, 0.22);
+
       setSimGps({
-        lat: curr[1],
-        lon: curr[0],
+        lat: sample.lat,
+        lon: sample.lon,
         accuracyMeters: 5,
-        headingDeg: heading,
-        speedMps: simSpeed,
+        headingDeg: smoothHeadingRef.current,
+        speedMps: profile.simSpeedMps,
         timestamp: Date.now(),
       });
-      if (idx >= coords.length - 1 && simTimerRef.current) {
+
+      if (sample.finished && simTimerRef.current) {
         clearInterval(simTimerRef.current);
         simTimerRef.current = null;
       }
-    }, 650);
+    }, tickMs);
   }, [route, voiceAdapter]);
 
   const stopNavigation = useCallback(() => {

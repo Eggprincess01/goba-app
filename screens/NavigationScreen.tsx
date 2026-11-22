@@ -25,16 +25,28 @@ import {
   UserLocation,
 } from '@maplibre/maplibre-react-native';
 import { MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
-import { formatDistanceMetersZh } from '../navigation/navEngine';
+import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
 import { Coordinate, SearchPlace } from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
   formatDurationZh,
   formatEtaTime,
   getManeuverIconName,
+  reverseGeocodeLocation,
   searchDestinationPlaces,
 } from '../navigation/valhalla';
 import { getVehicleProfile, TAIWAN_VEHICLE_PROFILES } from '../navigation/vehicleRestrictions';
+
+const QUICK_POI_CATEGORIES = [
+  { label: '加油站', query: '加油站', icon: 'flame' },
+  { label: '停車場', query: '停車場', icon: 'car' },
+  { label: '便利商店', query: '7-ELEVEN', icon: 'storefront' },
+  { label: '美食', query: '餐廳', icon: 'restaurant' },
+  { label: '捷運站', query: '捷運站', icon: 'train' },
+  { label: '醫院', query: '醫院', icon: 'medkit' },
+];
+
+const COCKPIT_CAMERA_PADDING = { top: 260, right: 0, bottom: 30, left: 0 };
 
 export interface NavigationScreenProps {
   initialCenter: Coordinate;
@@ -54,66 +66,181 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchPlace[]>([]);
+  const [nearbyPins, setNearbyPins] = useState<SearchPlace[]>([]);
+  const [activePoiCat, setActivePoiCat] = useState<string | null>(null);
   const [showManeuvers, setShowManeuvers] = useState(false);
   const [is3D, setIs3D] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(14.5);
+
+  const lastCameraPushRef = useRef(0);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currentMapStyle = MAP_STYLE_OPTIONS[styleIdx] || MAP_STYLE_OPTIONS[0];
   const isActiveNav = nav.phase === 'navigating' || nav.phase === 'off_route_recalculating';
   const activeProfile = getVehicleProfile(nav.vehicleType);
 
+  // 導航中由高頻平滑引擎直接控制 3D 車輛視角；非導航中交由 MapLibre 原生跟隨
   const mapLibreTrackMode: TrackUserLocation | undefined = useMemo(() => {
-    if (nav.isSimulating) return undefined;
+    if (isActiveNav || nav.isSimulating) return undefined;
     if (nav.followMode === 'follow') return 'default';
     if (nav.followMode === 'heading') return 'heading';
     if (nav.followMode === 'course') return 'course';
     return undefined;
-  }, [nav.followMode, nav.isSimulating]);
+  }, [nav.followMode, nav.isSimulating, isActiveNav]);
 
-  const routeGeoJSON = useMemo<GeoJSON.FeatureCollection | null>(() => {
-    if (!nav.route || nav.route.coordinates.length < 2) return null;
+  // 路線 GeoJSON：導航中拆分為「已行駛（灰化）」與「前方剩餘（高亮）」
+  const { passedGeoJSON, remainingGeoJSON } = useMemo(() => {
+    if (!nav.route || nav.route.coordinates.length < 2) {
+      return { passedGeoJSON: null, remainingGeoJSON: null };
+    }
+    if (isActiveNav && nav.progress) {
+      const { passed, remaining } = splitRouteCoords(
+        nav.route.coordinates,
+        nav.progress.snappedCoord,
+        nav.progress.nearestShapeIndex
+      );
+      return {
+        passedGeoJSON:
+          passed.length >= 2
+            ? ({
+                type: 'FeatureCollection',
+                features: [
+                  { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: passed } },
+                ],
+              } as GeoJSON.FeatureCollection)
+            : null,
+        remainingGeoJSON:
+          remaining.length >= 2
+            ? ({
+                type: 'FeatureCollection',
+                features: [
+                  {
+                    type: 'Feature',
+                    properties: {},
+                    geometry: { type: 'LineString', coordinates: remaining },
+                  },
+                ],
+              } as GeoJSON.FeatureCollection)
+            : null,
+      };
+    }
     return {
-      type: 'FeatureCollection',
-      features: [
-        {
-          type: 'Feature',
-          properties: { vehicleType: nav.route.vehicleType },
-          geometry: {
-            type: 'LineString',
-            coordinates: nav.route.coordinates,
+      passedGeoJSON: null,
+      remainingGeoJSON: {
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            properties: { vehicleType: nav.route.vehicleType },
+            geometry: {
+              type: 'LineString',
+              coordinates: nav.route.coordinates,
+            },
           },
-        },
-      ],
+        ],
+      } as GeoJSON.FeatureCollection,
     };
-  }, [nav.route]);
+  }, [nav.route, isActiveNav, nav.progress?.snappedCoord?.[0], nav.progress?.snappedCoord?.[1]]);
 
   // 路線預覽自動縮放涵蓋整條路線
   useEffect(() => {
     if (nav.route && nav.phase === 'route_preview') {
       const [west, south, east, north] = nav.route.bbox;
       nav.setFollowMode('free');
+      setIs3D(false);
       setTimeout(() => {
         cameraRef.current?.fitBounds([west, south, east, north], {
           padding: { top: 170, right: 48, bottom: 290, left: 48 },
-          duration: 750,
+          pitch: 0,
+          bearing: 0,
+          duration: 700,
         });
       }, 120);
     }
   }, [nav.route?.fetchedAt, nav.phase]);
 
-  // 啟動導航或模擬行駛時自動切至 3D 導航視角並跟隨車頭方向
-  useEffect(() => {
-    if (isActiveNav && nav.gps) {
-      setIs3D(true);
-      cameraRef.current?.easeTo({
-        center: [nav.gps.lon, nav.gps.lat],
-        zoom: 17,
-        pitch: 50,
-        bearing: nav.gps.headingDeg && nav.gps.headingDeg >= 0 ? nav.gps.headingDeg : 0,
-        duration: nav.isSimulating ? 580 : 600,
-      });
+  // Google Maps 風格 3D 車輛座艙視角（64° 高傾角 + 下方 1/3 焦點偏移 + 線性滑順跟隨）
+  const vehicleDisplayCoord: [number, number] | null = useMemo(() => {
+    if (!nav.gps) return null;
+    if (isActiveNav && nav.progress?.snappedCoord && !nav.isSimulating) {
+      return nav.progress.snappedCoord;
     }
-  }, [isActiveNav, nav.isSimulating, nav.gps?.lat, nav.gps?.lon]);
+    return [nav.gps.lon, nav.gps.lat];
+  }, [nav.gps?.lat, nav.gps?.lon, isActiveNav, nav.isSimulating, nav.progress?.snappedCoord]);
+
+  useEffect(() => {
+    if (!isActiveNav || nav.followMode !== 'course' || !vehicleDisplayCoord || !nav.gps) return;
+    const now = Date.now();
+    // 節流至 ~140ms 搭配 easing: 'linear'，消除傳統 ease-in-out 的一頓一頓感
+    if (now - lastCameraPushRef.current < 130) return;
+    lastCameraPushRef.current = now;
+    setIs3D(true);
+    cameraRef.current?.easeTo({
+      center: vehicleDisplayCoord,
+      zoom: 17.8,
+      pitch: 64,
+      bearing: nav.gps.headingDeg && nav.gps.headingDeg >= 0 ? nav.gps.headingDeg : 0,
+      padding: COCKPIT_CAMERA_PADDING,
+      duration: 190,
+      easing: 'linear',
+    });
+  }, [isActiveNav, nav.followMode, vehicleDisplayCoord?.[0], vehicleDisplayCoord?.[1], nav.gps?.headingDeg]);
+
+  // 輸入時自動即時聯想搜尋（350ms 防抖）
+  const handleQueryChange = useCallback(
+    (text: string) => {
+      setSearchQuery(text);
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+      const trimmed = text.trim();
+      if (trimmed.length < 2) {
+        if (trimmed.length === 0) setSearchResults([]);
+        return;
+      }
+      searchDebounceRef.current = setTimeout(async () => {
+        setSearching(true);
+        try {
+          const list = await searchDestinationPlaces(trimmed, nav.effectiveOrigin);
+          setSearchResults(list);
+        } catch {
+          // ignore transient typing errors
+        } finally {
+          setSearching(false);
+        }
+      }, 350);
+    },
+    [nav.effectiveOrigin]
+  );
+
+  const handleQuickPoiCategory = useCallback(
+    async (catLabel: string, query: string) => {
+      if (activePoiCat === catLabel) {
+        setActivePoiCat(null);
+        setNearbyPins([]);
+        return;
+      }
+      setActivePoiCat(catLabel);
+      setSearching(true);
+      nav.setErrorMessage(null);
+      try {
+        const list = await searchDestinationPlaces(query, nav.effectiveOrigin);
+        setNearbyPins(list);
+        if (list.length > 0) {
+          cameraRef.current?.easeTo({
+            center: [list[0].lon, list[0].lat],
+            zoom: 14.5,
+            duration: 500,
+          });
+        } else {
+          nav.setErrorMessage(`附近暫無「${catLabel}」搜尋結果`);
+        }
+      } catch (err: any) {
+        nav.setErrorMessage(err?.message || '附近景點搜尋失敗');
+      } finally {
+        setSearching(false);
+      }
+    },
+    [activePoiCat, nav]
+  );
 
   const handleSearchSubmit = useCallback(async () => {
     const q = searchQuery.trim();
@@ -151,20 +278,38 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       const lngLat = event?.nativeEvent?.lngLat;
       if (!Array.isArray(lngLat) || lngLat.length < 2) return;
       const [lon, lat] = lngLat;
+      const resolved = await reverseGeocodeLocation(lat, lon);
       const droppedPlace: SearchPlace = {
         id: `pin-${lat.toFixed(5)}-${lon.toFixed(5)}`,
-        name: '地圖自訂標記點',
-        address: `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+        name: resolved.name,
+        address: resolved.address,
         lat,
         lon,
         category: 'pin',
       };
       setSearchResults([]);
+      setNearbyPins([]);
+      setActivePoiCat(null);
       setSearchQuery(droppedPlace.name);
       await nav.calculateRoute(droppedPlace);
     },
     [nav, isActiveNav]
   );
+
+  const handleRecenterCockpit = useCallback(() => {
+    nav.setFollowMode('course');
+    setIs3D(true);
+    if (vehicleDisplayCoord && nav.gps) {
+      cameraRef.current?.easeTo({
+        center: vehicleDisplayCoord,
+        zoom: 17.8,
+        pitch: 64,
+        bearing: nav.gps.headingDeg && nav.gps.headingDeg >= 0 ? nav.gps.headingDeg : 0,
+        padding: COCKPIT_CAMERA_PADDING,
+        duration: 400,
+      });
+    }
+  }, [nav, vehicleDisplayCoord]);
 
   const handleCycleFollowMode = useCallback(() => {
     const order: Array<'follow' | 'heading' | 'course'> = ['follow', 'heading', 'course'];
@@ -291,21 +436,37 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           }}
         />
 
-        {nav.gpsPermission === 'granted' && !nav.isSimulating && (
+        {nav.gpsPermission === 'granted' && !isActiveNav && (
           <UserLocation animated accuracy heading />
         )}
 
-        {/* 路線繪製（依運具自動配色：外框 + 主線） */}
-        {routeGeoJSON && (
-          <GeoJSONSource id="goba-route-source" data={routeGeoJSON}>
+        {/* 已行駛路線（淡灰） */}
+        {passedGeoJSON && (
+          <GeoJSONSource id="goba-route-passed-source" data={passedGeoJSON}>
+            <Layer
+              id="goba-route-passed-line"
+              type="line"
+              layout={{ 'line-cap': 'round', 'line-join': 'round' }}
+              paint={{
+                'line-color': '#9CA3AF',
+                'line-width': 7,
+                'line-opacity': 0.75,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+
+        {/* 前方剩餘路線（依運具自動配色：外框 + 高亮主線） */}
+        {remainingGeoJSON && (
+          <GeoJSONSource id="goba-route-source" data={remainingGeoJSON}>
             <Layer
               id="goba-route-casing"
               type="line"
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
                 'line-color': activeProfile.routeCasingColor,
-                'line-width': 11,
-                'line-opacity': 0.88,
+                'line-width': isActiveNav ? 14 : 11,
+                'line-opacity': 0.9,
               }}
             />
             <Layer
@@ -314,21 +475,44 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
                 'line-color': activeProfile.routeColor,
-                'line-width': 6.5,
+                'line-width': isActiveNav ? 9 : 6.5,
                 'line-opacity': 1,
               }}
             />
           </GeoJSONSource>
         )}
 
-        {/* 模擬行駛車輛游標 */}
-        {nav.isSimulating && nav.gps && (
-          <Marker id="goba-sim-puck" lngLat={[nav.gps.lon, nav.gps.lat]} anchor="center">
-            <View style={styles.simCarPuck}>
-              <Ionicons name="navigate" size={18} color="#FFFFFF" />
+        {/* 導航中 3D 車輛指向游標（Google Maps 風格箭頭） */}
+        {isActiveNav && vehicleDisplayCoord && (
+          <Marker id="goba-vehicle-puck" lngLat={vehicleDisplayCoord} anchor="center">
+            <View style={styles.vehiclePuckHalo}>
+              <View style={[styles.vehiclePuckCore, { borderColor: activeProfile.routeColor }]}>
+                <Ionicons name="navigate" size={20} color={activeProfile.routeColor} style={{ transform: [{ rotate: '-45deg' }] }} />
+              </View>
             </View>
           </Marker>
         )}
+
+        {/* 附近快速搜尋 POI 標記（點擊即可規劃路線） */}
+        {!isActiveNav &&
+          nearbyPins.map((pin) => (
+            <Marker
+              key={pin.id}
+              id={`poi-${pin.id}`}
+              lngLat={[pin.lon, pin.lat]}
+              anchor="bottom"
+              onPress={() => handleSelectPlace(pin)}
+            >
+              <View style={styles.poiPinWrap}>
+                <View style={styles.poiPinBubble}>
+                  <Ionicons name="location" size={14} color="#FFFFFF" />
+                </View>
+                <Text style={styles.poiPinLabel} numberOfLines={1}>
+                  {pin.name}
+                </Text>
+              </View>
+            </Marker>
+          ))}
 
         {/* 目的地旗幟標記 */}
         {nav.destination && (
@@ -424,10 +608,10 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 <Ionicons name="search" size={18} color="#9D174D" />
                 <TextInput
                   style={styles.searchInput}
-                  placeholder="搜尋目的地（或長按地圖設標記）"
+                  placeholder="搜尋地點、商店或門牌（如林口三井）"
                   placeholderTextColor="#9CA3AF"
                   value={searchQuery}
-                  onChangeText={setSearchQuery}
+                  onChangeText={handleQueryChange}
                   returnKeyType="search"
                   onSubmitEditing={handleSearchSubmit}
                 />
@@ -491,14 +675,47 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               })}
             </ScrollView>
 
+            {/* 閒置時顯示快速附近景點探索列（加油站 / 停車場 / 便利商店 / 美食 / 捷運 / 醫院） */}
+            {!nav.route && searchResults.length === 0 && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.vehicleRow}
+              >
+                {QUICK_POI_CATEGORIES.map((cat) => {
+                  const selected = activePoiCat === cat.label;
+                  return (
+                    <TouchableOpacity
+                      key={cat.label}
+                      style={[styles.poiCatChip, selected && styles.poiCatChipActive]}
+                      onPress={() => handleQuickPoiCategory(cat.label, cat.query)}
+                    >
+                      <Ionicons
+                        name={cat.icon as any}
+                        size={13}
+                        color={selected ? '#FFFFFF' : '#4B5563'}
+                      />
+                      <Text style={[styles.poiCatText, selected && { color: '#FFFFFF' }]}>
+                        {cat.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
+
             {searchResults.length > 0 && (
               <View style={styles.searchDropdown}>
-                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
+                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 260 }}>
                   {searchResults.map((p) => (
                     <TouchableOpacity
                       key={p.id}
                       style={styles.searchItem}
-                      onPress={() => handleSelectPlace(p)}
+                      onPress={() => {
+                        setNearbyPins([]);
+                        setActivePoiCat(null);
+                        handleSelectPlace(p);
+                      }}
                     >
                       <Ionicons name="location" size={18} color="#DB2777" />
                       <View style={{ flex: 1 }}>
@@ -509,6 +726,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                           {p.address}
                         </Text>
                       </View>
+                      {typeof p.distanceKm === 'number' && (
+                        <Text style={styles.searchDistText}>{p.distanceKm.toFixed(1)} km</Text>
+                      )}
                       <Ionicons name="arrow-forward-circle-outline" size={20} color="#DB2777" />
                     </TouchableOpacity>
                   ))}
@@ -581,6 +801,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           <Text style={styles.speedValue}>{nav.speedKmh}</Text>
           <Text style={styles.speedUnit}>km/h</Text>
         </View>
+      )}
+
+      {/* 導航中若手動拖曳地圖，顯示「回到車頭視角」浮動按鈕 */}
+      {isActiveNav && nav.followMode !== 'course' && (
+        <TouchableOpacity
+          style={styles.recenterCockpitBtn}
+          onPress={handleRecenterCockpit}
+          activeOpacity={0.9}
+        >
+          <Ionicons name="navigate" size={16} color="#FFFFFF" />
+          <Text style={styles.recenterCockpitText}>回到車頭視角</Text>
+        </TouchableOpacity>
       )}
 
       {/* 底部資訊卡片 */}
@@ -1063,6 +1295,98 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 5,
     elevation: 6,
+  },
+  vehiclePuckHalo: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: 'rgba(236, 72, 153, 0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  vehiclePuckCore: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 3.5,
+    borderColor: '#EC4899',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  poiCatChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  poiCatChipActive: {
+    backgroundColor: '#1F2937',
+    borderColor: '#1F2937',
+  },
+  poiCatText: { fontSize: 11, fontWeight: '700', color: '#374151' },
+  poiPinWrap: { alignItems: 'center', maxWidth: 110 },
+  poiPinBubble: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#DB2777',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  poiPinLabel: {
+    marginTop: 2,
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#1F2937',
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  searchDistText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#9D174D',
+  },
+  recenterCockpitBtn: {
+    position: 'absolute',
+    alignSelf: 'center',
+    bottom: Platform.OS === 'ios' ? 200 : 185,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 22,
+    backgroundColor: '#111827',
+    borderWidth: 1.5,
+    borderColor: '#EC4899',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  recenterCockpitText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#FFFFFF',
   },
   destMarkerWrap: { alignItems: 'center' },
   destMarkerBadge: {
