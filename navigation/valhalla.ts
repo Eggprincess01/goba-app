@@ -81,6 +81,19 @@ export function mapRawPlaceToSearchPlace(p: any): SearchPlace {
 // 儲存目前進行中的搜尋 AbortController，確保新輸入時立即取消過期搜尋請求（Section 十）
 let activeSearchController: AbortController | null = null;
 
+// 客戶端記憶體快取與效能監測計數器（減少重複 API 請求，達成已快取地圖 <1s 秒開與 2D/3D 零重載切換）
+const hdRoadsClientCache = new Map<string, { ts: number; data: HdRoadsPayload }>();
+const trafficSignalsClientCache = new Map<string, { ts: number; data: TrafficSignalNode[] }>();
+const searchClientCache = new Map<string, { ts: number; data: UnifiedSearchResponse }>();
+const CLIENT_CACHE_TTL_MS = 5 * 60 * 1000;
+
+export const mapApiPerfCounters = {
+  apiRequests: 0,
+  cacheHits: 0,
+  lastHdRoadsLatencyMs: 0,
+  lastSearchLatencyMs: 0,
+};
+
 export interface UnifiedSearchResponse {
   places: SearchPlace[];
   searchBasis: string;
@@ -109,6 +122,16 @@ export async function searchUnifiedPlaces(
     return { places: [], searchBasis: '', appliedRadiusKm: null, latencyMs: 0, cached: false };
   }
 
+  const cacheKey = `${q}|${options?.category || ''}|${options?.sortBy || ''}|${
+    options?.gpsCenter ? `${options.gpsCenter.lat.toFixed(3)},${options.gpsCenter.lon.toFixed(3)}` : ''
+  }|${options?.radiusKm || ''}`;
+  const hit = searchClientCache.get(cacheKey);
+  if (hit && Date.now() - hit.ts < CLIENT_CACHE_TTL_MS) {
+    mapApiPerfCounters.cacheHits += 1;
+    mapApiPerfCounters.lastSearchLatencyMs = 1;
+    return { ...hit.data, cached: true, latencyMs: 1 };
+  }
+
   if (activeSearchController) {
     activeSearchController.abort();
   }
@@ -130,7 +153,9 @@ export async function searchUnifiedPlaces(
   if (options?.radiusKm) qs.set('radius_km', String(options.radiusKm));
   if (options?.limit) qs.set('limit', String(options.limit));
 
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const t0 = Date.now();
+  mapApiPerfCounters.apiRequests += 1;
+  const timer = setTimeout(() => controller.abort(), 9000);
   try {
     const res = await fetch(`${API_BASE}/api/maps/search?${qs.toString()}`, {
       signal: controller.signal,
@@ -140,13 +165,18 @@ export async function searchUnifiedPlaces(
     }
     const json = await res.json();
     const places = Array.isArray(json.places) ? json.places.map(mapRawPlaceToSearchPlace) : [];
-    return {
+    const elapsed = Date.now() - t0;
+    mapApiPerfCounters.lastSearchLatencyMs = elapsed;
+    const out: UnifiedSearchResponse = {
       places,
       searchBasis: String(json.search_basis || '目前位置'),
       appliedRadiusKm: typeof json.applied_radius_km === 'number' ? json.applied_radius_km : null,
-      latencyMs: Number(json.latency_ms || 0),
+      latencyMs: elapsed,
       cached: Boolean(json.cached),
     };
+    if (searchClientCache.size > 80) searchClientCache.clear();
+    searchClientCache.set(cacheKey, { ts: Date.now(), data: out });
+    return out;
   } finally {
     clearTimeout(timer);
     if (activeSearchController === controller) {
@@ -480,22 +510,34 @@ export async function fetchTrafficSignalsNear(
   center: Coordinate,
   radiusMeters = 850
 ): Promise<TrafficSignalNode[]> {
+  const key = `${(Math.round(center.lat / 0.008) * 0.008).toFixed(3)},${(
+    Math.round(center.lon / 0.008) * 0.008
+  ).toFixed(3)},${radiusMeters}`;
+  const hit = trafficSignalsClientCache.get(key);
+  if (hit && Date.now() - hit.ts < CLIENT_CACHE_TTL_MS) {
+    mapApiPerfCounters.cacheHits += 1;
+    return hit.data;
+  }
+  mapApiPerfCounters.apiRequests += 1;
   try {
     const res = await fetchWithTimeout(
       `${API_BASE}/api/maps/traffic-signals?lat=${center.lat.toFixed(4)}&lon=${center.lon.toFixed(
         4
       )}&radius_m=${radiusMeters}`,
       {},
-      7500
+      6500
     );
     if (!res.ok) return [];
     const json = await res.json();
     if (!Array.isArray(json?.signals)) return [];
-    return json.signals.map((s: any, idx: number) => ({
+    const out: TrafficSignalNode[] = json.signals.map((s: any, idx: number) => ({
       id: String(s.id || `sig-${idx}`),
       lat: Number(s.lat),
       lon: Number(s.lon),
     }));
+    if (trafficSignalsClientCache.size > 60) trafficSignalsClientCache.clear();
+    trafficSignalsClientCache.set(key, { ts: Date.now(), data: out });
+    return out;
   } catch {
     return [];
   }
@@ -503,19 +545,34 @@ export async function fetchTrafficSignalsNear(
 
 /**
  * 放大至路口等級（zoom >= 16.0）時取得真實 OSM 高精度道路面積、路口輪廓、中央分隔島、
- * 真實車道分隔線、雙黃線、斑馬線與停止線（GET /api/maps/hd-roads）
+ * 真實車道分隔線、雙黃線、斑馬線與停止線（GET /api/maps/hd-roads），具客戶端網格快取避免重複下載
  */
 export async function fetchHdRoadsNear(center: Coordinate): Promise<HdRoadsPayload | null> {
+  const key = `${(Math.round(center.lat / 0.003) * 0.003).toFixed(4)},${(
+    Math.round(center.lon / 0.003) * 0.003
+  ).toFixed(4)}`;
+  const hit = hdRoadsClientCache.get(key);
+  if (hit && Date.now() - hit.ts < CLIENT_CACHE_TTL_MS) {
+    mapApiPerfCounters.cacheHits += 1;
+    mapApiPerfCounters.lastHdRoadsLatencyMs = 1;
+    return hit.data;
+  }
+  const t0 = Date.now();
+  mapApiPerfCounters.apiRequests += 1;
   try {
     const res = await fetchWithTimeout(
       `${API_BASE}/api/maps/hd-roads?lat=${center.lat.toFixed(5)}&lon=${center.lon.toFixed(5)}`,
       {},
-      9500
+      8500
     );
     if (!res.ok) return null;
     const json = await res.json();
     if (json?.status === 'ok' && json?.layers) {
-      return json as HdRoadsPayload;
+      mapApiPerfCounters.lastHdRoadsLatencyMs = Date.now() - t0;
+      const payload = json as HdRoadsPayload;
+      if (hdRoadsClientCache.size > 40) hdRoadsClientCache.clear();
+      hdRoadsClientCache.set(key, { ts: Date.now(), data: payload });
+      return payload;
     }
   } catch {
     // ignore

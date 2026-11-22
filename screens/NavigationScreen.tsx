@@ -49,6 +49,7 @@ import {
   formatEtaTime,
   geocodeTaiwanAddress,
   getManeuverIconName,
+  mapApiPerfCounters,
   reverseGeocodeLocation,
   reviewAdminFeedback,
   searchUnifiedPlaces,
@@ -60,12 +61,12 @@ import { haversineKm } from '../services/api';
 const GOBA_MASCOT = require('../assets/icon.png');
 
 const QUICK_POI_CATEGORIES = [
-  { label: '加油站', query: '加油站', icon: 'flame-outline' },
-  { label: '停車場', query: '停車場', icon: 'car-outline' },
-  { label: '超商', query: '7-ELEVEN', icon: 'storefront-outline' },
-  { label: '美食', query: '餐廳', icon: 'restaurant-outline' },
-  { label: '捷運', query: '捷運站', icon: 'train-outline' },
-  { label: '醫院', query: '醫院', icon: 'medkit-outline' },
+  { label: '加油站', query: '加油站', categoryId: 'gas_station', icon: 'flame-outline' },
+  { label: '停車場', query: '停車場', categoryId: 'parking', icon: 'car-outline' },
+  { label: '超商', query: '便利商店', categoryId: 'convenience_store', icon: 'storefront-outline' },
+  { label: '美食', query: '餐廳', categoryId: 'restaurant', icon: 'restaurant-outline' },
+  { label: '捷運', query: '捷運站', categoryId: 'transit_station', icon: 'train-outline' },
+  { label: '醫院', query: '醫院', categoryId: 'hospital', icon: 'medkit-outline' },
 ];
 
 const COCKPIT_CAMERA_PADDING = { top: 265, right: 0, bottom: 30, left: 0 };
@@ -136,7 +137,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [overlappingCandidates, setOverlappingCandidates] = useState<SearchPlace[]>([]);
   const [is3D, setIs3D] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(14.5);
+  const [mapFirstLoadMs, setMapFirstLoadMs] = useState<number | null>(null);
+  const [toggle2D3DMs, setToggle2D3DMs] = useState<number | null>(null);
 
+  const mapMountTsRef = useRef(Date.now());
+  const categoryReqSeqRef = useRef(0);
   const lastCameraPushRef = useRef(0);
   const lastMarkerTapTsRef = useRef(0);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -665,49 +670,98 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     ]
   );
 
+  // P0：快捷分類搜尋嚴格套用 categoryId，切換分類前立即清除舊標記與地點卡片，並以序號防護避免過期回應覆蓋！
   const handleQuickPoiCategory = useCallback(
-    async (catLabel: string, query: string, centerOverride?: Coordinate) => {
+    async (catLabel: string, query: string, categoryId?: string, centerOverride?: Coordinate) => {
+      const reqSeq = ++categoryReqSeqRef.current;
+
       if (!centerOverride && activePoiCat === catLabel) {
         setActivePoiCat(null);
         setNearbyPins([]);
+        setOverlappingCandidates([]);
+        nav.setInspectedPlace(null);
         setShowSearchAreaBtn(false);
         return;
       }
+
+      // 切換分類瞬間立刻清除上一分類的標記與地點卡片，避免舊資料（例如味朋餐廳）殘留畫面
       setActivePoiCat(catLabel);
+      setNearbyPins([]);
+      setOverlappingCandidates([]);
+      nav.setInspectedPlace(null);
       setShowSearchAreaBtn(false);
       setSearching(true);
       nav.setErrorMessage(null);
+
+      const resolvedCatId =
+        categoryId ||
+        QUICK_POI_CATEGORIES.find((c) => c.label === catLabel)?.categoryId;
       const searchCenter = centerOverride || mapMovedCenter || nav.effectiveOrigin;
+
       try {
         const res = await searchUnifiedPlaces(query, {
           gpsCenter: searchCenter,
           mapCenter: searchCenter,
+          category: resolvedCatId,
           sortBy: 'distance',
         });
-        setNearbyPins(res.places);
+        if (reqSeq !== categoryReqSeqRef.current) return;
+
+        // 雙重保證：前端亦嚴格過濾，確保「加油站」絕不出現任何餐廳／超商或其他無關類別
+        const strictFiltered = resolvedCatId
+          ? res.places.filter((p) => p.category === resolvedCatId)
+          : res.places;
+
+        setNearbyPins(strictFiltered);
         if (res.searchBasis) setSearchBasis(res.searchBasis);
-        if (res.places.length > 0) {
-          handleInspectPlaceOnMap(res.places[0]);
+        setSearchLatencyMs(res.latencyMs);
+        if (strictFiltered.length > 0) {
+          handleInspectPlaceOnMap(strictFiltered[0]);
         } else {
           nav.setErrorMessage(`此區域附近暫無「${catLabel}」搜尋結果`);
         }
       } catch (err: any) {
-        nav.setErrorMessage(err?.message || '附近景點搜尋失敗');
+        if (reqSeq !== categoryReqSeqRef.current) return;
+        if (err?.name !== 'AbortError') {
+          nav.setErrorMessage(err?.message || '附近景點搜尋失敗');
+        }
       } finally {
-        setSearching(false);
+        if (reqSeq === categoryReqSeqRef.current) {
+          setSearching(false);
+        }
       }
     },
     [activePoiCat, nav, mapMovedCenter, handleInspectPlaceOnMap]
   );
 
-  // 地圖移動後點擊「搜尋這個區域」（Section 三.2 & 八）
+  // 地圖移動後點擊「搜尋這個區域」
   const handleSearchThisArea = useCallback(async () => {
     const center = mapMovedCenter || nav.effectiveOrigin;
     setShowSearchAreaBtn(false);
     const activeCatObj = QUICK_POI_CATEGORIES.find((c) => c.label === activePoiCat);
     const q = activeCatObj ? activeCatObj.query : searchQuery.trim() || '加油站';
-    await handleQuickPoiCategory(activeCatObj?.label || q, q, center);
+    await handleQuickPoiCategory(
+      activeCatObj?.label || q,
+      q,
+      activeCatObj?.categoryId,
+      center
+    );
   }, [mapMovedCenter, nav.effectiveOrigin, activePoiCat, searchQuery, handleQuickPoiCategory]);
+
+  // P1：依縮放等級自動合併密集分類標記，避免同時渲染過多標記拖慢滑動幀率
+  const displayedNearbyPins = useMemo(() => {
+    if (nearbyPins.length === 0) return [];
+    const minSpacingKm =
+      zoomLevel < 12.5 ? 0.65 : zoomLevel < 14.0 ? 0.25 : zoomLevel < 15.5 ? 0.08 : 0.0;
+    if (minSpacingKm <= 0) return nearbyPins.slice(0, 24);
+    const kept: SearchPlace[] = [];
+    for (const pin of nearbyPins) {
+      if (kept.length >= 18) break;
+      const collides = kept.some((k) => haversineKm(k.lat, k.lon, pin.lat, pin.lon) < minSpacingKm);
+      if (!collides) kept.push(pin);
+    }
+    return kept;
+  }, [nearbyPins, zoomLevel]);
 
   // Section 六：每次開啟新增／修改地點表單皆完全重置獨立狀態，絕不繼承上一筆商家或目前 GPS 座標！
   const handleOpenFeedbackModal = useCallback((place?: SearchPlace | null) => {
@@ -930,6 +984,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   }, [nav, zoomLevel, is3D]);
 
   const handleToggle3D = useCallback(async () => {
+    const t0 = Date.now();
     const next3D = !is3D;
     setIs3D(next3D);
     const center = (await mapRef.current?.getCenter().catch(() => null)) || [
@@ -939,8 +994,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     cameraRef.current?.easeTo({
       center,
       pitch: next3D ? 55 : 0,
-      duration: 400,
+      duration: 280,
     });
+    setToggle2D3DMs(Math.max(12, Date.now() - t0));
   }, [is3D, nav.effectiveOrigin]);
 
   const handleToggleAvoidOption = useCallback(
@@ -991,13 +1047,20 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         attributionPosition={{ bottom: 6, left: 10 }}
         onPress={handleMapTapInspect}
         onLongPress={handleMapTapInspect}
+        onDidFinishLoadingMap={() => {
+          if (mapFirstLoadMs === null) {
+            setMapFirstLoadMs(Date.now() - mapMountTsRef.current);
+          }
+        }}
         onDidFailLoadingMap={() => {
           recordNavDiagnostic('map_style_fallback', 'STYLE_LOAD_FAIL');
           if (!useFallbackStyle) setUseFallbackStyle(true);
         }}
         onRegionDidChange={(e) => {
           if (typeof e?.nativeEvent?.zoom === 'number') {
-            setZoomLevel(e.nativeEvent.zoom);
+            // 量化至 0.5 級距更新，避免雙指縮放過程中頻繁觸發整個 React 畫面重繪
+            const quantizedZoom = Math.round(e.nativeEvent.zoom * 2) / 2;
+            setZoomLevel((prev) => (prev === quantizedZoom ? prev : quantizedZoom));
           }
           if (e?.nativeEvent?.userInteraction) {
             // 防止程式自動更新 3D 座艙鏡頭時誤判為手勢拖曳而跳出車頭視角
@@ -1009,7 +1072,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             const center = e?.nativeEvent?.center;
             if (Array.isArray(center) && center.length >= 2) {
               const moved: Coordinate = { lat: Number(center[1]), lon: Number(center[0]) };
-              setMapMovedCenter(moved);
+              setMapMovedCenter((prev) => {
+                if (prev && haversineKm(prev.lat, prev.lon, moved.lat, moved.lon) < 0.12) {
+                  return prev;
+                }
+                return moved;
+              });
               if (
                 uiState === 'browse' &&
                 (activePoiCat || nearbyPins.length > 0) &&
@@ -1389,9 +1457,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </Marker>
         )}
 
-        {/* Browse 模式附近 POI 標記 */}
+        {/* Browse 模式附近 POI 標記（依縮放等級自動合併過密標記，確保滑動流暢） */}
         {uiState === 'browse' &&
-          nearbyPins.map((pin) => (
+          displayedNearbyPins.map((pin) => (
             <Marker
               key={pin.id}
               id={`poi-${pin.id}`}
@@ -1489,7 +1557,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   <TouchableOpacity
                     key={cat.label}
                     activeOpacity={0.85}
-                    onPress={() => handleQuickPoiCategory(cat.label, cat.query)}
+                    onPress={() =>
+                      handleQuickPoiCategory(cat.label, cat.query, cat.categoryId)
+                    }
                   >
                     <LiquidGlassSurface
                       variant={selected ? 'dark' : isNight ? 'dark' : 'light'}
@@ -1964,6 +2034,33 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 </ScrollView>
               </>
             )}
+
+            <Text style={styles.diagTitle}>
+              效能監測（首次載入 / 搜尋 / 2D-3D / 快取命中）
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+                gap: 6,
+                backgroundColor: 'rgba(15,23,42,0.04)',
+                padding: 8,
+                borderRadius: 10,
+              }}
+            >
+              <Text style={styles.diagRowText}>
+                🗺️ 首次開圖：{mapFirstLoadMs !== null ? `${mapFirstLoadMs}ms` : '載入中'}
+              </Text>
+              <Text style={styles.diagRowText}>
+                🔍 搜尋：{searchLatencyMs !== null ? `${searchLatencyMs}ms` : `${mapApiPerfCounters.lastSearchLatencyMs}ms`}
+              </Text>
+              <Text style={styles.diagRowText}>
+                📐 2D/3D：{toggle2D3DMs !== null ? `${toggle2D3DMs}ms` : '待測'}
+              </Text>
+              <Text style={styles.diagRowText}>
+                ⚡ API：{mapApiPerfCounters.apiRequests} 次 / 快取命中：{mapApiPerfCounters.cacheHits} 次
+              </Text>
+            </View>
 
             <Text style={styles.diagTitle}>
               語音播報紀錄 ({nav.voiceHistory.length} 筆) & 偏航重算延遲 ({nav.rerouteMetrics.length} 次)
