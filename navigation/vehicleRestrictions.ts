@@ -1,110 +1,133 @@
 import { VehicleClassId } from './types';
 
 /**
- * 台灣車種道路權限與限制資料模型
- * 第一階段僅開放「汽車」作為正式可規劃車種；
- * 機車與重機因涉及台灣國道、快速道路（台61/64/65/74 等）、禁行機車內側車道與待轉規則，
- * 必須在第二階段完成 OSM tag 驗證與自訂 Valhalla costing 後才開放。
+ * 台灣六大交通運具與道路權限資料模型
+ * 1. 汽車 (car)
+ * 2. 重機 (heavy_moto，目前不分黃紅牌)
+ * 3. 摩托車 (scooter，白牌普通重機/輕型機車)
+ * 4. 腳踏車 (bicycle)
+ * 5. 步行 (pedestrian)
+ * 6. 大眾交通 (transit)
  */
 export interface VehicleRestrictionProfile {
   id: VehicleClassId;
   label: string;
   shortLabel: string;
-  plateColor: string;
-  plateTextColor: string;
-  /** 是否已完成台灣路網驗證並開放於正式導航 */
+  iconName: string;
+  routeColor: string;
+  routeCasingColor: string;
+  /** 是否已完成台灣路網完整驗證（重機／摩托車會顯示測試中提醒） */
   isProductionVerified: boolean;
   /** 對應 Valhalla 引擎 costing 名稱 */
-  valhallaCosting: 'auto' | 'motorcycle' | 'motor_scooter';
-  /** 是否允許行駛國道（高速公路） */
+  valhallaCosting: 'auto' | 'motorcycle' | 'motor_scooter' | 'bicycle' | 'pedestrian';
   allowFreeway: boolean;
-  /** 是否允許行駛省道快速公路（紅盾牌） */
   allowExpressway: boolean;
-  /** 是否受禁行機車內側車道限制 */
   restrictedFromInnerFastLane: boolean;
-  /** 是否需依標誌執行兩段式左轉 */
   requireTwoStageLeftTurn: boolean;
-  /** 未開放原因說明（UI 顯示用） */
+  /** 模擬導航預設時速（m/s） */
+  simSpeedMps: number;
   verificationNote: string;
 }
 
 export const TAIWAN_VEHICLE_PROFILES: VehicleRestrictionProfile[] = [
   {
     id: 'car',
-    label: '汽車（小客車）',
+    label: '汽車',
     shortLabel: '汽車',
-    plateColor: '#FFFFFF',
-    plateTextColor: '#111827',
+    iconName: 'car-sport',
+    routeColor: '#EC4899',
+    routeCasingColor: '#831843',
     isProductionVerified: true,
     valhallaCosting: 'auto',
     allowFreeway: true,
     allowExpressway: true,
     restrictedFromInnerFastLane: false,
     requireTwoStageLeftTurn: false,
-    verificationNote: '第一階段已開放：支援國道、快速道路與市區道路規劃。',
+    simSpeedMps: 13.5,
+    verificationNote: '支援國道、快速道路與一般市區道路規劃。',
   },
   {
-    id: 'heavy_moto_red',
-    label: '大型重機（紅牌 550cc+）',
-    shortLabel: '紅牌重機',
-    plateColor: '#DC2626',
-    plateTextColor: '#FFFFFF',
-    isProductionVerified: false,
-    valhallaCosting: 'motorcycle',
-    allowFreeway: false, // 除國3甲外台灣法規尚未全面開放國道
-    allowExpressway: true,
-    restrictedFromInnerFastLane: false,
-    requireTwoStageLeftTurn: false,
-    verificationNote: '測試驗證中（Phase 2 開放）：需排除國道（國3甲除外）並驗證快速道路匝道權限。',
-  },
-  {
-    id: 'heavy_moto_yellow',
-    label: '大型重機（黃牌 250~550cc）',
-    shortLabel: '黃牌重機',
-    plateColor: '#FACC15',
-    plateTextColor: '#111827',
+    id: 'heavy_moto',
+    label: '重機',
+    shortLabel: '重機',
+    iconName: 'speedometer',
+    routeColor: '#EF4444',
+    routeCasingColor: '#7F1D1D',
     isProductionVerified: false,
     valhallaCosting: 'motorcycle',
     allowFreeway: false,
     allowExpressway: true,
     restrictedFromInnerFastLane: false,
     requireTwoStageLeftTurn: false,
-    verificationNote: '測試驗證中（Phase 2 開放）：需驗證省道快速公路與高架橋路權。',
+    simSpeedMps: 12.5,
+    verificationNote: '重機模式（測試中）：目前不分黃紅牌，已避開國道收費路段，行駛快速道路請依現場標誌為準。',
   },
   {
-    id: 'white_plate_moto',
-    label: '普通重型機車（白牌）',
-    shortLabel: '白牌機車',
-    plateColor: '#F3F4F6',
-    plateTextColor: '#1F2937',
+    id: 'scooter',
+    label: '摩托車',
+    shortLabel: '摩托車',
+    iconName: 'flash',
+    routeColor: '#F97316',
+    routeCasingColor: '#7C2D12',
     isProductionVerified: false,
     valhallaCosting: 'motor_scooter',
     allowFreeway: false,
     allowExpressway: false,
     restrictedFromInnerFastLane: true,
     requireTwoStageLeftTurn: true,
-    verificationNote: '測試驗證中（Phase 2 開放）：需嚴格排除國道、快速道路與禁行機車高架橋，避免誤導上橋。',
+    simSpeedMps: 10.0,
+    verificationNote: '摩托車模式（測試中）：已避開國道與主要快速道路，高架橋禁行機車與待轉請依現場標誌為準。',
   },
   {
-    id: 'scooter_green',
-    label: '輕型機車（綠牌）',
-    shortLabel: '綠牌機車',
-    plateColor: '#16A34A',
-    plateTextColor: '#FFFFFF',
-    isProductionVerified: false,
-    valhallaCosting: 'motor_scooter',
+    id: 'bicycle',
+    label: '腳踏車',
+    shortLabel: '腳踏車',
+    iconName: 'bicycle',
+    routeColor: '#10B981',
+    routeCasingColor: '#065F46',
+    isProductionVerified: true,
+    valhallaCosting: 'bicycle',
     allowFreeway: false,
     allowExpressway: false,
     restrictedFromInnerFastLane: true,
     requireTwoStageLeftTurn: true,
-    verificationNote: '測試驗證中（Phase 2 開放）：僅限一般平面慢車道與機慢車優先道。',
+    simSpeedMps: 4.8,
+    verificationNote: '優先規劃自行車道與低速平面道路。',
+  },
+  {
+    id: 'pedestrian',
+    label: '步行',
+    shortLabel: '步行',
+    iconName: 'walk',
+    routeColor: '#3B82F6',
+    routeCasingColor: '#1E3A8A',
+    isProductionVerified: true,
+    valhallaCosting: 'pedestrian',
+    allowFreeway: false,
+    allowExpressway: false,
+    restrictedFromInnerFastLane: false,
+    requireTwoStageLeftTurn: false,
+    simSpeedMps: 1.5,
+    verificationNote: '優先規劃人行道、斑馬線與徒步區。',
+  },
+  {
+    id: 'transit',
+    label: '大眾交通',
+    shortLabel: '大眾交通',
+    iconName: 'train',
+    routeColor: '#8B5CF6',
+    routeCasingColor: '#4C1D95',
+    isProductionVerified: false,
+    valhallaCosting: 'pedestrian',
+    allowFreeway: false,
+    allowExpressway: false,
+    restrictedFromInnerFastLane: false,
+    requireTwoStageLeftTurn: false,
+    simSpeedMps: 1.5,
+    verificationNote: '大眾交通時刻表（TDX 捷運／公車／台鐵 GTFS）建置中，目前提供步行距離參考與一鍵查詢即時班次。',
   },
 ];
 
 export function getVehicleProfile(id: VehicleClassId): VehicleRestrictionProfile {
   return TAIWAN_VEHICLE_PROFILES.find((v) => v.id === id) || TAIWAN_VEHICLE_PROFILES[0];
-}
-
-export function isVehicleProductionReady(id: VehicleClassId): boolean {
-  return getVehicleProfile(id).isProductionVerified;
 }

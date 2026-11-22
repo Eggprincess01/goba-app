@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Keyboard,
+  Linking,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -34,7 +34,7 @@ import {
   getManeuverIconName,
   searchDestinationPlaces,
 } from '../navigation/valhalla';
-import { TAIWAN_VEHICLE_PROFILES } from '../navigation/vehicleRestrictions';
+import { getVehicleProfile, TAIWAN_VEHICLE_PROFILES } from '../navigation/vehicleRestrictions';
 
 export interface NavigationScreenProps {
   initialCenter: Coordinate;
@@ -60,6 +60,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
   const currentMapStyle = MAP_STYLE_OPTIONS[styleIdx] || MAP_STYLE_OPTIONS[0];
   const isActiveNav = nav.phase === 'navigating' || nav.phase === 'off_route_recalculating';
+  const activeProfile = getVehicleProfile(nav.vehicleType);
 
   const mapLibreTrackMode: TrackUserLocation | undefined = useMemo(() => {
     if (nav.isSimulating) return undefined;
@@ -294,7 +295,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           <UserLocation animated accuracy heading />
         )}
 
-        {/* 汽車路線（外框 + 主線） */}
+        {/* 路線繪製（依運具自動配色：外框 + 主線） */}
         {routeGeoJSON && (
           <GeoJSONSource id="goba-route-source" data={routeGeoJSON}>
             <Layer
@@ -302,7 +303,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               type="line"
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
-                'line-color': '#831843',
+                'line-color': activeProfile.routeCasingColor,
                 'line-width': 11,
                 'line-opacity': 0.88,
               }}
@@ -312,7 +313,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               type="line"
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
-                'line-color': '#EC4899',
+                'line-color': activeProfile.routeColor,
                 'line-width': 6.5,
                 'line-opacity': 1,
               }}
@@ -454,7 +455,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               </TouchableOpacity>
             </View>
 
-            {/* 車種選擇列（汽車開放；機車／重機維持驗證鎖定） */}
+            {/* 六大交通模式選擇列：汽車 / 重機 / 摩托車 / 腳踏車 / 步行 / 大眾交通 */}
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -467,35 +468,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     key={v.id}
                     style={[
                       styles.vehicleChip,
-                      active && styles.vehicleChipActive,
-                      !v.isProductionVerified && styles.vehicleChipLocked,
+                      active && { backgroundColor: v.routeColor, borderColor: v.routeColor },
                     ]}
                     activeOpacity={0.85}
-                    onPress={() => {
-                      if (!v.isProductionVerified) {
-                        Alert.alert(
-                          `${v.label} — 法規路網驗證中`,
-                          `${v.verificationNote}\n\n為避免導航誤導上國道、快速道路或禁行機車路段，目前正式導航僅開放「汽車」模式。`
-                        );
-                        return;
-                      }
-                      nav.setVehicleType(v.id);
-                    }}
+                    onPress={() => nav.setVehicleType(v.id)}
                   >
                     <Ionicons
-                      name={v.isProductionVerified ? 'car-sport' : 'lock-closed'}
-                      size={13}
-                      color={active ? '#FFFFFF' : v.isProductionVerified ? '#831843' : '#6B7280'}
+                      name={v.iconName as any}
+                      size={14}
+                      color={active ? '#FFFFFF' : '#831843'}
                     />
                     <Text
                       style={[
                         styles.vehicleChipText,
                         active && styles.vehicleChipTextActive,
-                        !v.isProductionVerified && styles.vehicleChipTextLocked,
                       ]}
                     >
                       {v.shortLabel}
-                      {!v.isProductionVerified ? ' (驗證中)' : ''}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -598,8 +587,10 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       <View style={styles.bottomSheet}>
         {nav.phase === 'routing' ? (
           <View style={styles.loadingRow}>
-            <ActivityIndicator size="small" color="#DB2777" />
-            <Text style={styles.loadingText}>Valhalla 正在計算汽車路線...</Text>
+            <ActivityIndicator size="small" color={activeProfile.routeColor} />
+            <Text style={styles.loadingText}>
+              Valhalla 正在計算{activeProfile.label}路線...
+            </Text>
           </View>
         ) : nav.phase === 'arrived' ? (
           <View style={styles.arrivedWrap}>
@@ -634,32 +625,68 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               )}
             </View>
 
+            {!isActiveNav && nav.route.warning && (
+              <View style={styles.warningStrip}>
+                <Ionicons name="information-circle" size={15} color="#92400E" />
+                <Text style={styles.warningStripText}>{nav.route.warning}</Text>
+              </View>
+            )}
+
             {!isActiveNav && (
               <View style={styles.optionRow}>
-                <TouchableOpacity
-                  style={[styles.optChip, nav.avoidTolls && styles.optChipActive]}
-                  onPress={() => handleToggleAvoidOption('tolls')}
-                >
-                  <Text style={[styles.optChipText, nav.avoidTolls && styles.optChipTextActive]}>
-                    避開收費站
+                {nav.vehicleType === 'car' && (
+                  <TouchableOpacity
+                    style={[styles.optChip, nav.avoidTolls && styles.optChipActive]}
+                    onPress={() => handleToggleAvoidOption('tolls')}
+                  >
+                    <Text style={[styles.optChipText, nav.avoidTolls && styles.optChipTextActive]}>
+                      避開收費站
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {(nav.vehicleType === 'car' || nav.vehicleType === 'heavy_moto') && (
+                  <TouchableOpacity
+                    style={[styles.optChip, nav.avoidHighways && styles.optChipActive]}
+                    onPress={() => handleToggleAvoidOption('highways')}
+                  >
+                    <Text style={[styles.optChipText, nav.avoidHighways && styles.optChipTextActive]}>
+                      {nav.vehicleType === 'heavy_moto' ? '避開快速道路' : '避開高速公路'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <View style={[styles.phaseBadge, { backgroundColor: `${activeProfile.routeColor}18` }]}>
+                  <Text style={[styles.phaseBadgeText, { color: activeProfile.routeCasingColor }]}>
+                    {activeProfile.label}模式
                   </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.optChip, nav.avoidHighways && styles.optChipActive]}
-                  onPress={() => handleToggleAvoidOption('highways')}
-                >
-                  <Text style={[styles.optChipText, nav.avoidHighways && styles.optChipTextActive]}>
-                    避開高速公路
-                  </Text>
-                </TouchableOpacity>
-                <View style={styles.phaseBadge}>
-                  <Text style={styles.phaseBadgeText}>iOS 語音導航</Text>
                 </View>
               </View>
             )}
 
             {/* 導航操作按鈕 */}
-            {isActiveNav ? (
+            {nav.route.transitPending ? (
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={styles.secondaryBtn}
+                  onPress={() => setShowManeuvers((v) => !v)}
+                >
+                  <Ionicons name="walk" size={16} color="#831843" />
+                  <Text style={styles.secondaryBtnText}>步行參考路線</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.primaryBtn, { backgroundColor: '#7C3AED' }]}
+                  onPress={() => {
+                    if (nav.destination) {
+                      const url = `maps://?daddr=${nav.destination.lat},${nav.destination.lon}&dirflg=r`;
+                      Linking.openURL(url).catch(() => {});
+                    }
+                  }}
+                >
+                  <Ionicons name="train" size={16} color="#FFFFFF" />
+                  <Text style={styles.primaryBtnText}>查捷運／公車班次</Text>
+                </TouchableOpacity>
+              </View>
+            ) : isActiveNav ? (
               <View style={styles.actionRow}>
                 <TouchableOpacity
                   style={styles.secondaryBtn}
@@ -1128,6 +1155,25 @@ const styles = StyleSheet.create({
   optChipActive: { backgroundColor: '#DB2777', borderColor: '#DB2777' },
   optChipText: { fontSize: 11, fontWeight: '700', color: '#9D174D' },
   optChipTextActive: { color: '#FFFFFF' },
+  warningStrip: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  warningStripText: {
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '600',
+    color: '#92400E',
+  },
   phaseBadge: {
     marginLeft: 'auto',
     paddingHorizontal: 8,

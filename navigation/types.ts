@@ -14,10 +14,11 @@ export interface SearchPlace {
 
 export type VehicleClassId =
   | 'car'
-  | 'heavy_moto_red'
-  | 'heavy_moto_yellow'
-  | 'white_plate_moto'
-  | 'scooter_green';
+  | 'heavy_moto'
+  | 'scooter'
+  | 'bicycle'
+  | 'pedestrian'
+  | 'transit';
 
 export interface RouteManeuver {
   index: number;
@@ -34,6 +35,8 @@ export interface RouteManeuver {
 export interface NavigationRoute {
   engine: 'valhalla';
   vehicleType: VehicleClassId;
+  transitPending?: boolean;
+  warning?: string | null;
   distanceKm: number;
   durationSec: number;
   bbox: [number, number, number, number]; // [west, south, east, north]

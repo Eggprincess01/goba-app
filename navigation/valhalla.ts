@@ -1,6 +1,5 @@
 import { API_BASE, fetchWithTimeout } from '../services/api';
 import { Coordinate, NavigationRoute, RouteManeuver, SearchPlace, VehicleClassId } from './types';
-import { isVehicleProductionReady } from './vehicleRestrictions';
 
 /**
  * 解碼 Valhalla 6 位精度 Polyline，回傳 GeoJSON / MapLibre 標準 [lon, lat][]
@@ -97,7 +96,7 @@ export async function searchDestinationPlaces(
 }
 
 /**
- * 透過 GOBA 後端（Valhalla 路線引擎）規劃汽車路線
+ * 透過 GOBA 後端（Valhalla 路線引擎）規劃多運具路線
  */
 export async function fetchValhallaRoute(params: {
   origin: Coordinate;
@@ -106,10 +105,6 @@ export async function fetchValhallaRoute(params: {
   avoidTolls?: boolean;
   avoidHighways?: boolean;
 }): Promise<NavigationRoute> {
-  if (!isVehicleProductionReady(params.vehicleType)) {
-    throw new Error('第一階段僅開放「汽車」路線規劃，機車與重機模式將於第二階段完成法規驗證後開放。');
-  }
-
   const res = await fetchWithTimeout(
     `${API_BASE}/api/maps/route`,
     {
@@ -148,6 +143,8 @@ export async function fetchValhallaRoute(params: {
   return {
     engine: 'valhalla',
     vehicleType: params.vehicleType,
+    transitPending: Boolean(json.transit_pending),
+    warning: json.warning ? String(json.warning) : null,
     distanceKm: Number(json.distance_km || 0),
     durationSec: Number(json.duration_sec || 0),
     bbox: Array.isArray(json.bbox) && json.bbox.length === 4

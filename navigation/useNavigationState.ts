@@ -21,6 +21,7 @@ import {
   RouteProgressSnapshot,
 } from './navEngine';
 import { fetchValhallaRoute } from './valhalla';
+import { getVehicleProfile } from './vehicleRestrictions';
 
 const KEEP_AWAKE_TAG = 'goba-maps-active-navigation';
 const OFF_ROUTE_THRESHOLD_METERS = 55;
@@ -160,7 +161,13 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const calculateRoute = useCallback(
     async (
       target: SearchPlace,
-      opts?: { avoidTolls?: boolean; avoidHighways?: boolean; originOverride?: Coordinate; keepNavigating?: boolean }
+      opts?: {
+        avoidTolls?: boolean;
+        avoidHighways?: boolean;
+        vehicleTypeOverride?: VehicleClassId;
+        originOverride?: Coordinate;
+        keepNavigating?: boolean;
+      }
     ) => {
       setDestination(target);
       setErrorMessage(null);
@@ -171,7 +178,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         const res = await fetchValhallaRoute({
           origin: opts?.originOverride ?? effectiveOrigin,
           destination: { lat: target.lat, lon: target.lon },
-          vehicleType,
+          vehicleType: opts?.vehicleTypeOverride ?? vehicleType,
           avoidTolls: opts?.avoidTolls ?? avoidTolls,
           avoidHighways: opts?.avoidHighways ?? avoidHighways,
         });
@@ -194,6 +201,16 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       }
     },
     [effectiveOrigin, vehicleType, avoidTolls, avoidHighways]
+  );
+
+  const selectVehicleType = useCallback(
+    async (nextType: VehicleClassId) => {
+      setVehicleType(nextType);
+      if (destination && phase !== 'navigating' && phase !== 'off_route_recalculating') {
+        await calculateRoute(destination, { vehicleTypeOverride: nextType });
+      }
+    },
+    [destination, phase, calculateRoute]
   );
 
   // 偏航自動重算
@@ -330,6 +347,9 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     let idx = 0;
     const stepSize = Math.max(1, Math.floor(coords.length / 70));
 
+    const profile = getVehicleProfile(route.vehicleType);
+    const simSpeed = profile.simSpeedMps;
+
     const firstHeading = computeBearingDeg(
       { lat: coords[0][1], lon: coords[0][0] },
       { lat: coords[1][1], lon: coords[1][0] }
@@ -339,12 +359,12 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       lon: coords[0][0],
       accuracyMeters: 5,
       headingDeg: firstHeading,
-      speedMps: 12.5, // ~45 km/h
+      speedMps: simSpeed,
       timestamp: Date.now(),
     });
 
     voiceAdapter.speak(
-      `開始模擬導航，全程 ${route.distanceKm.toFixed(1)} 公里。${route.maneuvers[0]?.instruction || ''}`
+      `開始${profile.label}模擬導航，全程 ${route.distanceKm.toFixed(1)} 公里。${route.maneuvers[0]?.instruction || ''}`
     );
 
     simTimerRef.current = setInterval(() => {
@@ -361,7 +381,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         lon: curr[0],
         accuracyMeters: 5,
         headingDeg: heading,
-        speedMps: 12.5,
+        speedMps: simSpeed,
         timestamp: Date.now(),
       });
       if (idx >= coords.length - 1 && simTimerRef.current) {
@@ -417,7 +437,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     phase,
     setPhase,
     vehicleType,
-    setVehicleType,
+    setVehicleType: selectVehicleType,
     avoidTolls,
     setAvoidTolls,
     avoidHighways,
