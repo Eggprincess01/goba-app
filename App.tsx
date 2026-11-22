@@ -26,7 +26,7 @@ import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import * as WebBrowser from 'expo-web-browser';
 import * as Location from 'expo-location';
-import MapView from 'react-native-maps';
+import type { CameraRef } from '@maplibre/maplibre-react-native';
 
 import { styles } from './styles/theme';
 import {
@@ -136,8 +136,8 @@ export default function App() {
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const localUpdatedAtRef = useRef<number>(0);
 
-  // 內建真實地圖 + 高公局 1968 即時路況
-  const mapRef = useRef<MapView | null>(null);
+  // 內建 GOBA Maps (MapLibre) + 高公局 1968 即時路況
+  const mapCameraRef = useRef<CameraRef | null>(null);
   const poiReqIdRef = useRef(0);
   const [mapCategory, setMapCategory] = useState<MapCategory>('gas');
   const [gasBrandFilter, setGasBrandFilter] = useState('全部');
@@ -507,10 +507,11 @@ export default function App() {
     loadLiveData(nextRegion);
     pushGarageToCloud(sessionToken, vehicles, refuelLogs, maintLogs, prefs, nextRegion, ts);
     if (activeTab === 'map') {
-      mapRef.current?.animateToRegion(
-        { latitude: nextRegion.lat, longitude: nextRegion.lon, latitudeDelta: 0.035, longitudeDelta: 0.035 },
-        450
-      );
+      mapCameraRef.current?.easeTo({
+        center: [nextRegion.lon, nextRegion.lat],
+        zoom: 13.5,
+        duration: 450,
+      });
     }
   };
 
@@ -933,20 +934,13 @@ export default function App() {
     runExamRadar(examLicenseType);
   };
 
-  const openPoiNavigation = (poi: MapPOI) => {
-    const url =
-      Platform.OS === 'ios'
-        ? `maps://?daddr=${poi.lat},${poi.lon}&q=${encodeURIComponent(poi.name)}`
-        : `https://www.google.com/maps/dir/?api=1&destination=${poi.lat},${poi.lon}`;
-    Linking.openURL(url).catch(() => {});
-  };
-
   const focusPoiOnMap = (poi: MapPOI) => {
     setSelectedPoi(poi);
-    mapRef.current?.animateToRegion(
-      { latitude: poi.lat, longitude: poi.lon, latitudeDelta: 0.012, longitudeDelta: 0.012 },
-      400
-    );
+    mapCameraRef.current?.easeTo({
+      center: [poi.lon, poi.lat],
+      zoom: 15.5,
+      duration: 400,
+    });
   };
 
   const displayName = prefs.customNickname.trim() || user?.name || '鍋巴車友';
@@ -1044,7 +1038,7 @@ export default function App() {
         {/* ==================== 5 大模組分頁 ==================== */}
         {activeTab === 'map' ? (
           <MapTab
-            mapRef={mapRef}
+            cameraRef={mapCameraRef}
             region={region}
             mapCategory={mapCategory}
             onChangeCategory={setMapCategory}
@@ -1056,7 +1050,6 @@ export default function App() {
             selectedPoi={selectedPoi}
             onSelectPoi={setSelectedPoi}
             onFocusPoi={focusPoiOnMap}
-            onNavigatePoi={openPoiNavigation}
             onRetryPois={() => loadMapPois(region.lat, region.lon, mapCategory)}
             trafficData={trafficData}
             trafficLoading={trafficLoading}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -10,14 +10,22 @@ import {
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
-import MapView, { Marker, Region } from 'react-native-maps';
+import {
+  Camera,
+  type CameraRef,
+  Map,
+  Marker,
+  UserLocation,
+} from '@maplibre/maplibre-react-native';
 import { styles } from '../styles/theme';
 import { GAS_BRAND_FILTERS, MapCategory } from '../types';
 import { LiveTrafficData, MapPOI, RegionInfo } from '../services/api';
+import { getEffectiveMapStyleUrl } from '../navigation/mapStyle';
+import { SearchPlace } from '../navigation/types';
 import { NavigationScreen } from '../screens/NavigationScreen';
 
 interface MapTabProps {
-  mapRef: React.RefObject<MapView | null>;
+  cameraRef: React.RefObject<CameraRef | null>;
   region: RegionInfo;
   mapCategory: MapCategory;
   onChangeCategory: (cat: MapCategory) => void;
@@ -29,7 +37,6 @@ interface MapTabProps {
   selectedPoi: MapPOI | null;
   onSelectPoi: (poi: MapPOI) => void;
   onFocusPoi: (poi: MapPOI) => void;
-  onNavigatePoi: (poi: MapPOI) => void;
   onRetryPois: () => void;
   trafficData: LiveTrafficData | null;
   trafficLoading: boolean;
@@ -41,7 +48,7 @@ interface MapTabProps {
 }
 
 export function MapTab({
-  mapRef,
+  cameraRef,
   region,
   mapCategory,
   onChangeCategory,
@@ -53,7 +60,6 @@ export function MapTab({
   selectedPoi,
   onSelectPoi,
   onFocusPoi,
-  onNavigatePoi,
   onRetryPois,
   trafficData,
   trafficLoading,
@@ -64,12 +70,41 @@ export function MapTab({
   onOpenRegionModal,
 }: MapTabProps) {
   const [navModalVisible, setNavModalVisible] = useState(false);
+  const [navTargetPlace, setNavTargetPlace] = useState<SearchPlace | null>(null);
+  const [useFallbackStyle, setUseFallbackStyle] = useState(false);
 
-  const mapInitialRegion: Region = {
-    latitude: region.lat,
-    longitude: region.lon,
-    latitudeDelta: 0.035,
-    longitudeDelta: 0.035,
+  const mapStyleUrl = useMemo(
+    () => getEffectiveMapStyleUrl(0, false, useFallbackStyle),
+    [useFallbackStyle]
+  );
+
+  const openGobaNavigation = (poi?: MapPOI) => {
+    if (poi) {
+      setNavTargetPlace({
+        id: poi.id,
+        name: poi.name,
+        address: poi.address || poi.brand || '',
+        lat: poi.lat,
+        lon: poi.lon,
+        category:
+          poi.category === 'gas'
+            ? '加油站'
+            : poi.category === 'parking'
+            ? '停車場'
+            : poi.category === 'dmv'
+            ? '監理站'
+            : '地點',
+        distanceKm: poi.distanceKm,
+      });
+    } else {
+      setNavTargetPlace(null);
+    }
+    setNavModalVisible(true);
+  };
+
+  const closeGobaNavigation = () => {
+    setNavModalVisible(false);
+    setNavTargetPlace(null);
   };
 
   const visiblePois = (
@@ -82,10 +117,10 @@ export function MapTab({
 
   return (
     <View style={styles.mapTabContainer}>
-      {/* GOBA Maps 第一階段入口卡片（獨立 NavigationScreen，不阻塞既有加油站/停車場/路況） */}
+      {/* GOBA Maps 全螢幕導航入口卡片 */}
       <TouchableOpacity
         activeOpacity={0.9}
-        onPress={() => setNavModalVisible(true)}
+        onPress={() => openGobaNavigation()}
         style={{
           marginHorizontal: 16,
           marginBottom: 8,
@@ -120,7 +155,7 @@ export function MapTab({
               開啟鍋巴地圖導航（iOS 語音即時導航）
             </Text>
             <Text style={{ color: 'rgba(255,255,255,0.88)', fontSize: 11, marginTop: 1 }}>
-              MapLibre 向量地圖 • 繁中語音指引 • 偏航自動重算與模擬測試
+              GOBA Maps 自建向量地圖 • 繁中語音指引 • 偏航自動重算
             </Text>
           </View>
         </View>
@@ -131,11 +166,12 @@ export function MapTab({
         visible={navModalVisible}
         animationType="slide"
         presentationStyle="fullScreen"
-        onRequestClose={() => setNavModalVisible(false)}
+        onRequestClose={closeGobaNavigation}
       >
         <NavigationScreen
           initialCenter={{ lat: region.lat, lon: region.lon }}
-          onClose={() => setNavModalVisible(false)}
+          initialDestination={navTargetPlace}
+          onClose={closeGobaNavigation}
         />
       </Modal>
 
@@ -211,47 +247,164 @@ export function MapTab({
       )}
 
       <View style={[styles.mapFrame, mapCategory === 'traffic' && { height: 195 }]}>
-        <MapView
-          ref={mapRef}
+        <Map
           style={StyleSheet.absoluteFill}
-          initialRegion={mapInitialRegion}
-          showsUserLocation
-          showsMyLocationButton={false}
-          showsTraffic={mapCategory === 'traffic'}
+          mapStyle={mapStyleUrl}
+          logo={false}
+          attribution={false}
+          compass={false}
+          onDidFailLoadingMap={() => setUseFallbackStyle(true)}
         >
+          <Camera
+            ref={cameraRef}
+            initialViewState={{
+              center: [region.lon, region.lat],
+              zoom: 13.5,
+            }}
+          />
+          <UserLocation />
+
           {mapCategory !== 'traffic' &&
-            visiblePois.map((poi) => (
-              <Marker
-                key={poi.id}
-                coordinate={{ latitude: poi.lat, longitude: poi.lon }}
-                title={poi.name}
-                description={
-                  poi.category === 'parking'
-                    ? `${poi.brand}${poi.rate ? ` • ${poi.rate}` : ''} • ${poi.distanceKm} km`
-                    : `${poi.brand} • 距離 ${poi.distanceKm} km`
-                }
-                pinColor={poi.brandColor}
-                onPress={() => onSelectPoi(poi)}
-              />
-            ))}
+            visiblePois.slice(0, 35).map((poi) => {
+              const isSel = selectedPoi?.id === poi.id;
+              const pinBg = isSel ? '#DB2777' : poi.brandColor || '#EC4899';
+              return (
+                <Marker
+                  key={poi.id}
+                  id={`maptab-poi-${poi.id}`}
+                  lngLat={[poi.lon, poi.lat]}
+                  anchor="bottom"
+                  onPress={() => onSelectPoi(poi)}
+                >
+                  <View style={{ alignItems: 'center' }}>
+                    {isSel && (
+                      <View
+                        style={{
+                          backgroundColor: '#FFFFFF',
+                          paddingHorizontal: 8,
+                          paddingVertical: 3,
+                          borderRadius: 10,
+                          marginBottom: 3,
+                          borderWidth: 1,
+                          borderColor: '#FBCFE8',
+                          shadowColor: '#000',
+                          shadowOpacity: 0.14,
+                          shadowRadius: 4,
+                          elevation: 3,
+                          maxWidth: 150,
+                        }}
+                      >
+                        <Text
+                          style={{ fontSize: 11, fontWeight: '700', color: '#831843' }}
+                          numberOfLines={1}
+                        >
+                          {poi.name}
+                        </Text>
+                      </View>
+                    )}
+                    <View
+                      style={{
+                        width: isSel ? 30 : 24,
+                        height: isSel ? 30 : 24,
+                        borderRadius: isSel ? 15 : 12,
+                        backgroundColor: pinBg,
+                        borderWidth: 2,
+                        borderColor: '#FFFFFF',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        shadowColor: '#000',
+                        shadowOpacity: 0.22,
+                        shadowRadius: 4,
+                        elevation: 4,
+                      }}
+                    >
+                      <Ionicons
+                        name={
+                          poi.category === 'gas'
+                            ? 'flame'
+                            : poi.category === 'parking'
+                            ? 'car'
+                            : 'business'
+                        }
+                        size={isSel ? 15 : 12}
+                        color="#FFFFFF"
+                      />
+                    </View>
+                  </View>
+                </Marker>
+              );
+            })}
+
           {mapCategory === 'traffic' &&
             (trafficData?.incidents || [])
               .filter((inc) => inc.lat && inc.lon)
+              .slice(0, 25)
               .map((inc) => (
                 <Marker
                   key={inc.id}
-                  coordinate={{ latitude: inc.lat!, longitude: inc.lon! }}
-                  title={inc.title}
-                  description={`${inc.type}：${inc.detail}`}
-                  pinColor="#DC2626"
-                />
+                  id={`maptab-inc-${inc.id}`}
+                  lngLat={[inc.lon!, inc.lat!]}
+                  anchor="center"
+                >
+                  <View
+                    style={{
+                      width: 24,
+                      height: 24,
+                      borderRadius: 12,
+                      backgroundColor: '#DC2626',
+                      borderWidth: 2,
+                      borderColor: '#FFFFFF',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Ionicons name="warning" size={12} color="#FFFFFF" />
+                  </View>
+                </Marker>
               ))}
-        </MapView>
+        </Map>
 
         <TouchableOpacity style={styles.mapRegionFloatBtn} onPress={onOpenRegionModal}>
           <Ionicons name="location" size={13} color="#DB2777" />
           <Text style={styles.mapRegionFloatText}>{region.name}</Text>
         </TouchableOpacity>
+
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onPress={() => openGobaNavigation()}
+          style={{
+            position: 'absolute',
+            top: 10,
+            right: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            backgroundColor: 'rgba(255,255,255,0.92)',
+            paddingHorizontal: 10,
+            paddingVertical: 5,
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: '#FBCFE8',
+          }}
+        >
+          <Ionicons name="expand-outline" size={13} color="#DB2777" />
+          <Text style={{ fontSize: 11, fontWeight: '700', color: '#831843' }}>全螢幕</Text>
+        </TouchableOpacity>
+
+        <View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            bottom: 8,
+            left: 10,
+            backgroundColor: 'rgba(255,255,255,0.86)',
+            paddingHorizontal: 8,
+            paddingVertical: 3,
+            borderRadius: 8,
+          }}
+        >
+          <Text style={{ fontSize: 10, fontWeight: '800', color: '#DB2777' }}>GOBA Maps</Text>
+        </View>
       </View>
 
       <View style={styles.mapListWrap}>
@@ -382,7 +535,7 @@ export function MapTab({
                           </Text>
                         ) : null}
                       </View>
-                      <TouchableOpacity style={styles.poiNavBtn} onPress={() => onNavigatePoi(poi)}>
+                      <TouchableOpacity style={styles.poiNavBtn} onPress={() => openGobaNavigation(poi)}>
                         <Ionicons name="navigate" size={14} color="#FFF" />
                         <Text style={styles.poiNavBtnText}>導航</Text>
                       </TouchableOpacity>

@@ -82,11 +82,13 @@ type MapUiState = 'browse' | 'search' | 'route_preview' | 'navigation';
 
 export interface NavigationScreenProps {
   initialCenter: Coordinate;
+  initialDestination?: SearchPlace | null;
   onClose: () => void;
 }
 
 export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   initialCenter,
+  initialDestination = null,
   onClose,
 }) => {
   const mapRef = useRef<MapRef>(null);
@@ -94,6 +96,16 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const searchInputRef = useRef<any>(null);
 
   const nav = useNavigationState(initialCenter);
+
+  // 若從交通地圖分頁直接點擊某站點的「導航」，自動帶入該站點並進入路線預覽
+  const initialDestAppliedRef = useRef(false);
+  useEffect(() => {
+    if (initialDestination && !initialDestAppliedRef.current) {
+      initialDestAppliedRef.current = true;
+      nav.setInspectedPlace(initialDestination);
+      nav.calculateRoute(initialDestination);
+    }
+  }, [initialDestination]);
 
   const [styleIdx, setStyleIdx] = useState(0);
   const [useFallbackStyle, setUseFallbackStyle] = useState(false);
