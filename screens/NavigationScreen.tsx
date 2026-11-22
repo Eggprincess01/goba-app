@@ -30,6 +30,12 @@ import {
   UserLocation,
 } from '@maplibre/maplibre-react-native';
 import { LiquidGlassSurface } from '../components/LiquidGlassSurface';
+import {
+  ComplexJunctionCard,
+  isComplexJunctionManeuver,
+  ManeuverArrowIcon,
+} from '../components/ManeuverArrowIcon';
+import { OpeningHoursPicker } from '../components/OpeningHoursPicker';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
 import {
   type ReplayScenarioResult,
@@ -37,7 +43,14 @@ import {
 } from '../navigation/gpsReplayTester';
 import { getEffectiveMapStyleUrl, MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
 import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
-import { Coordinate, HdRoadsPayload, SearchPlace, TrafficSignalNode } from '../navigation/types';
+import {
+  Coordinate,
+  HdRoadsPayload,
+  SearchPlace,
+  TrafficSignalNode,
+  TransitBusStop,
+  YouBikeStation,
+} from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
   type AddressGeocodeCandidate,
@@ -45,6 +58,8 @@ import {
   fetchHdRoadsNear,
   fetchPlaceDetailById,
   fetchTrafficSignalsNear,
+  fetchTransitStopsNear,
+  fetchYouBikeNear,
   formatDurationZh,
   formatEtaTime,
   geocodeTaiwanAddress,
@@ -65,6 +80,8 @@ const QUICK_POI_CATEGORIES = [
   { label: '停車場', query: '停車場', categoryId: 'parking', icon: 'car-outline' },
   { label: '超商', query: '便利商店', categoryId: 'convenience_store', icon: 'storefront-outline' },
   { label: '美食', query: '餐廳', categoryId: 'restaurant', icon: 'restaurant-outline' },
+  { label: '充電站', query: '充電站', categoryId: 'charging_station', icon: 'flash-outline' },
+  { label: 'YouBike', query: 'YouBike', categoryId: 'youbike', icon: 'bicycle-outline' },
   { label: '捷運', query: '捷運站', categoryId: 'transit_station', icon: 'train-outline' },
   { label: '醫院', query: '醫院', categoryId: 'hospital', icon: 'medkit-outline' },
 ];
@@ -147,10 +164,28 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [feedbackManualPin, setFeedbackManualPin] = useState(false);
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [overlappingCandidates, setOverlappingCandidates] = useState<SearchPlace[]>([]);
-  const [is3D, setIs3D] = useState(false);
+  // P3 #4：地圖預設啟用 3D 建築與立體高架道路（低縮放層級自動簡化以維持效能，不再需要右側 2D/3D 切換鈕）
+  const [is3D, setIs3D] = useState(true);
   const [zoomLevel, setZoomLevel] = useState(14.5);
   const [mapFirstLoadMs, setMapFirstLoadMs] = useState<number | null>(null);
   const [toggle2D3DMs, setToggle2D3DMs] = useState<number | null>(null);
+
+  // P1 #1：分類搜尋底部多筆結果清單與篩選狀態（絕不自動選取第一筆或跳轉路線預覽）
+  const [categoryListOpen, setCategoryListOpen] = useState(false);
+  const [categoryFilterOpenNow, setCategoryFilterOpenNow] = useState(false);
+  const [categorySortBy, setCategorySortBy] = useState<'distance' | 'relevance'>('distance');
+  const [categoryBrandFilter, setCategoryBrandFilter] = useState<string>('全部');
+
+  // P1 #8：自訂導航起點搜尋模式
+  const [editingOriginMode, setEditingOriginMode] = useState(false);
+
+  // P2 #10 & #11：可互動公車站牌與 YouBike 2.0 / 2.0E 即時站點狀態
+  const [youBikeStations, setYouBikeStations] = useState<YouBikeStation[]>([]);
+  const [youBikeLiveAvailable, setYouBikeLiveAvailable] = useState(true);
+  const [youBikeStatusMsg, setYouBikeStatusMsg] = useState<string | null>(null);
+  const [selectedYouBike, setSelectedYouBike] = useState<YouBikeStation | null>(null);
+  const [transitStops, setTransitStops] = useState<TransitBusStop[]>([]);
+  const [selectedTransitStop, setSelectedTransitStop] = useState<TransitBusStop | null>(null);
 
   const mapMountTsRef = useRef(Date.now());
   const categoryReqSeqRef = useRef(0);
@@ -330,6 +365,24 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       clearTimeout(timer);
     };
   }, [hdDetailActive, hdGridLat, hdGridLon]);
+
+  // P2 #10：縮放至街區等級（zoom >= 15.2）且非正式導航時，載入可互動公車站牌（具獨立 ID、方向與停靠路線）
+  const transitGridLat = Math.round(signalQueryCenter.lat / 0.005) * 0.005;
+  const transitGridLon = Math.round(signalQueryCenter.lon / 0.005) * 0.005;
+  const showInteractiveTransitStops = uiState === 'browse' && zoomLevel >= 15.2;
+  useEffect(() => {
+    if (!showInteractiveTransitStops) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      fetchTransitStopsNear({ lat: transitGridLat, lon: transitGridLon }, 650).then((stops) => {
+        if (active) setTransitStops(stops);
+      });
+    }, 320);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [showInteractiveTransitStops, transitGridLat, transitGridLon]);
 
   // 任務三：依畫面狀態與縮放等級進行紅綠燈視覺防碰撞聚類（絕不修改 nav.route.trafficSignals 導航核心資料！）
   const displayedTrafficSignals = useMemo(() => {
@@ -522,6 +575,15 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     async (place: SearchPlace) => {
       Keyboard.dismiss();
       nav.setErrorMessage(null);
+      if (editingOriginMode) {
+        setEditingOriginMode(false);
+        setIsSearchOpen(false);
+        setSearchResults([]);
+        setSearchQuery('');
+        await nav.setCustomOrigin(place);
+        return;
+      }
+
       if (bindingAnchorSlot) {
         await nav.handleSetCommuteAnchor(bindingAnchorSlot, place);
         setBindingAnchorSlot(null);
@@ -690,17 +752,26 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       if (!centerOverride && activePoiCat === catLabel) {
         setActivePoiCat(null);
         setNearbyPins([]);
+        setYouBikeStations([]);
+        setCategoryListOpen(false);
+        setSelectedYouBike(null);
+        setSelectedTransitStop(null);
         setOverlappingCandidates([]);
         nav.setInspectedPlace(null);
         setShowSearchAreaBtn(false);
         return;
       }
 
-      // 切換分類瞬間立刻清除上一分類的標記與地點卡片，避免舊資料（例如味朋餐廳）殘留畫面
+      // 切換分類瞬間立刻清除上一分類的標記與地點卡片，避免舊資料殘留畫面
       setActivePoiCat(catLabel);
       setNearbyPins([]);
+      setSelectedYouBike(null);
+      setSelectedTransitStop(null);
       setOverlappingCandidates([]);
       nav.setInspectedPlace(null);
+      setCategoryFilterOpenNow(false);
+      setCategoryBrandFilter('全部');
+      setCategorySortBy('distance');
       setShowSearchAreaBtn(false);
       setSearching(true);
       nav.setErrorMessage(null);
@@ -710,6 +781,34 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         QUICK_POI_CATEGORIES.find((c) => c.label === catLabel)?.categoryId;
       const searchCenter = centerOverride || mapMovedCenter || nav.effectiveOrigin;
 
+      // P2 #11：YouBike 即時站點專屬分類查詢（使用官方即時資料，絕不使用假數字）
+      if (resolvedCatId === 'youbike') {
+        try {
+          const yb = await fetchYouBikeNear(searchCenter, 1600);
+          if (reqSeq !== categoryReqSeqRef.current) return;
+          setYouBikeStations(yb.stations);
+          setYouBikeLiveAvailable(yb.liveAvailable);
+          setYouBikeStatusMsg(yb.statusMessage || null);
+          setCategoryListOpen(true);
+          setSheetCollapsed(false);
+          if (!yb.liveAvailable) {
+            nav.setErrorMessage(yb.statusMessage || '即時資訊暫時無法取得');
+          } else if (yb.stations.length === 0) {
+            nav.setErrorMessage('此區域附近暫無 YouBike 站點');
+          } else {
+            cameraRef.current?.easeTo({
+              center: [searchCenter.lon, searchCenter.lat],
+              zoom: 14.5,
+              duration: 450,
+            });
+          }
+        } finally {
+          if (reqSeq === categoryReqSeqRef.current) setSearching(false);
+        }
+        return;
+      }
+
+      setYouBikeStations([]);
       try {
         const res = await searchUnifiedPlaces(query, {
           gpsCenter: searchCenter,
@@ -728,8 +827,16 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         if (res.searchBasis) setSearchBasis(res.searchBasis);
         setSearchLatencyMs(res.latencyMs);
         if (strictFiltered.length > 0) {
-          handleInspectPlaceOnMap(strictFiltered[0]);
+          // P1 #1：絕不自動選取第一個地點！改為展開底部可滑動搜尋結果清單，同時在地圖上顯示所有符合條件的站點
+          setCategoryListOpen(true);
+          setSheetCollapsed(false);
+          cameraRef.current?.easeTo({
+            center: [searchCenter.lon, searchCenter.lat],
+            zoom: 14.2,
+            duration: 450,
+          });
         } else {
+          setCategoryListOpen(false);
           nav.setErrorMessage(`此區域附近暫無「${catLabel}」搜尋結果`);
         }
       } catch (err: any) {
@@ -930,6 +1037,41 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   }, []);
 
   const handleStartNavigationPress = useCallback(() => {
+    // P1 #8：起點不在使用者目前位置時，開始導航前必須確認實際 GPS 位置與起點是否一致
+    if (nav.isCustomOrigin && nav.customOrigin) {
+      const distKm = haversineKm(
+        nav.effectiveOrigin.lat,
+        nav.effectiveOrigin.lon,
+        nav.customOrigin.lat,
+        nav.customOrigin.lon
+      );
+      if (distKm > 0.15) {
+        Alert.alert(
+          '目前為自訂起點路線預覽',
+          `您設定的起點「${nav.customOrigin.name}」距離目前 GPS 位置約 ${distKm.toFixed(1)} 公里。\n\n要改從目前 GPS 位置重新規劃並開始即時導航，還是從自訂起點進行模擬預覽？`,
+          [
+            { text: '留在路線預覽', style: 'cancel' },
+            {
+              text: '改從目前位置導航',
+              onPress: async () => {
+                await nav.setCustomOrigin(null);
+                setSheetCollapsed(false);
+                nav.startNavigation();
+              },
+            },
+            {
+              text: '模擬預覽此路線',
+              onPress: () => {
+                setSheetCollapsed(false);
+                nav.startSimulatedNavigation();
+              },
+            },
+          ]
+        );
+        return;
+      }
+    }
+
     if (!activeProfile.isProductionVerified) {
       Alert.alert(
         `${activeProfile.label}模式（路網驗證中）`,
@@ -1165,32 +1307,6 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             />
           </GeoJSONSource>
         )}
-        {hdDetailActive && hdRoads?.layers?.bridge_surfaces && (
-          <GeoJSONSource id="goba-hd-bridge-casing-src" data={hdRoads.layers.bridge_surfaces}>
-            <Layer
-              id="goba-hd-bridge-casing"
-              type="fill"
-              minzoom={16}
-              paint={{
-                'fill-color': isNight ? '#475569' : '#7A8696',
-                'fill-opacity': 1,
-              }}
-            />
-          </GeoJSONSource>
-        )}
-        {hdDetailActive && hdRoads?.layers?.bridge_asphalt && (
-          <GeoJSONSource id="goba-hd-bridge-asphalt-src" data={hdRoads.layers.bridge_asphalt}>
-            <Layer
-              id="goba-hd-bridge-fill"
-              type="fill"
-              minzoom={16}
-              paint={{
-                'fill-color': isNight ? '#3B4A62' : '#B2BAC5',
-                'fill-opacity': 1,
-              }}
-            />
-          </GeoJSONSource>
-        )}
         {hdDetailActive && hdRoads?.layers?.medians && (
           <GeoJSONSource id="goba-hd-medians-src" data={hdRoads.layers.medians}>
             <Layer
@@ -1292,6 +1408,107 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               paint={{
                 'line-color': isNight ? 'rgba(248,250,252,0.82)' : 'rgba(255,255,255,0.95)',
                 'line-width': 2.4,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+
+        {/* P0 #3：3D 立體高架橋樑／交流道圖層（嚴格繪製於所有平面道路與標線之上，明確上下分離！） */}
+        {hdDetailActive && hdRoads?.layers?.bridge_shadows && (
+          <GeoJSONSource id="goba-hd-bridge-shadow-src" data={hdRoads.layers.bridge_shadows}>
+            <Layer
+              id="goba-hd-bridge-shadow"
+              type="fill"
+              minzoom={15.5}
+              paint={{
+                'fill-color': isNight ? 'rgba(2, 6, 23, 0.55)' : 'rgba(15, 23, 42, 0.22)',
+                'fill-opacity': 0.9,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_piers && (
+          <GeoJSONSource id="goba-hd-bridge-piers-src" data={hdRoads.layers.bridge_piers}>
+            <Layer
+              id="goba-hd-bridge-piers-3d"
+              type="fill-extrusion"
+              minzoom={16}
+              paint={{
+                'fill-extrusion-color': isNight ? '#475569' : '#94A3B8',
+                'fill-extrusion-base': ['get', 'base_height'],
+                'fill-extrusion-height': ['get', 'height'],
+                'fill-extrusion-opacity': 0.95,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_decks_3d && (
+          <GeoJSONSource id="goba-hd-bridge-decks-src" data={hdRoads.layers.bridge_decks_3d}>
+            <Layer
+              id="goba-hd-bridge-decks-3d"
+              type="fill-extrusion"
+              minzoom={15.8}
+              paint={{
+                'fill-extrusion-color': isNight ? '#334155' : '#A6B0BE',
+                'fill-extrusion-base': ['get', 'base_height'],
+                'fill-extrusion-height': ['get', 'height'],
+                'fill-extrusion-opacity': 0.98,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_surfaces && (
+          <GeoJSONSource id="goba-hd-bridge-casing-src" data={hdRoads.layers.bridge_surfaces}>
+            <Layer
+              id="goba-hd-bridge-casing"
+              type="fill"
+              minzoom={15.5}
+              paint={{
+                'fill-color': isNight ? '#475569' : '#64748B',
+                'fill-opacity': 1,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_asphalt && (
+          <GeoJSONSource id="goba-hd-bridge-asphalt-src" data={hdRoads.layers.bridge_asphalt}>
+            <Layer
+              id="goba-hd-bridge-fill"
+              type="fill"
+              minzoom={15.5}
+              paint={{
+                'fill-color': isNight ? '#3B4A62' : '#ADB6C4',
+                'fill-opacity': 1,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_edge_lines && (
+          <GeoJSONSource id="goba-hd-bridge-edges-src" data={hdRoads.layers.bridge_edge_lines}>
+            <Layer
+              id="goba-hd-bridge-edges"
+              type="line"
+              minzoom={16}
+              layout={{ 'line-cap': 'round', 'line-join': 'round' }}
+              paint={{
+                'line-color': isNight ? 'rgba(226,232,240,0.65)' : 'rgba(255,255,255,0.88)',
+                'line-width': 1.5,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+        {hdDetailActive && hdRoads?.layers?.bridge_lane_dividers && (
+          <GeoJSONSource id="goba-hd-bridge-lanes-src" data={hdRoads.layers.bridge_lane_dividers}>
+            <Layer
+              id="goba-hd-bridge-lanes"
+              type="line"
+              minzoom={16.2}
+              layout={{ 'line-cap': 'butt' }}
+              paint={{
+                'line-color': isNight ? '#E2E8F0' : '#FFFFFF',
+                'line-opacity': 0.9,
+                'line-width': 1.4,
+                'line-dasharray': [5, 5],
               }}
             />
           </GeoJSONSource>
@@ -1424,18 +1641,115 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </Marker>
         ))}
 
+        {/* P2 #10：可互動公車站牌標記（點擊查看站牌方向、停靠路線與設為目的地） */}
+        {showInteractiveTransitStops &&
+          transitStops.slice(0, 18).map((stop) => {
+            const isSel = selectedTransitStop?.id === stop.id;
+            return (
+              <Marker
+                key={stop.id}
+                id={`transit-stop-${stop.id}`}
+                lngLat={[stop.lon, stop.lat]}
+                anchor="center"
+                onPress={() => {
+                  lastMarkerTapTsRef.current = Date.now();
+                  setSelectedTransitStop(stop);
+                  setSelectedYouBike(null);
+                  setCategoryListOpen(false);
+                  nav.setInspectedPlace(null);
+                  setSheetCollapsed(false);
+                  cameraRef.current?.easeTo({
+                    center: [stop.lon, stop.lat],
+                    zoom: Math.max(zoomLevel, 16.5),
+                    duration: 380,
+                  });
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 3,
+                    backgroundColor: isSel ? '#1D4ED8' : '#2563EB',
+                    paddingHorizontal: isSel ? 7 : 5,
+                    paddingVertical: isSel ? 4 : 3,
+                    borderRadius: 10,
+                    borderWidth: 1.5,
+                    borderColor: '#FFFFFF',
+                    shadowColor: '#000',
+                    shadowOpacity: 0.2,
+                    shadowRadius: 3,
+                  }}
+                >
+                  <Ionicons name="bus" size={isSel ? 13 : 11} color="#FFFFFF" />
+                  {isSel && (
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: '#FFFFFF' }} numberOfLines={1}>
+                      {stop.name}
+                    </Text>
+                  )}
+                </View>
+              </Marker>
+            );
+          })}
+
+        {/* P2 #11：YouBike 2.0 / 2.0E 即時站點標記（顯示即時可借車輛數，絕不使用假數字） */}
+        {uiState === 'browse' &&
+          youBikeStations.slice(0, 22).map((st) => {
+            const isSel = selectedYouBike?.id === st.id;
+            const hasBikes = typeof st.availableBikes === 'number' && st.availableBikes > 0;
+            return (
+              <Marker
+                key={st.id}
+                id={`youbike-pin-${st.id}`}
+                lngLat={[st.lon, st.lat]}
+                anchor="bottom"
+                onPress={() => {
+                  lastMarkerTapTsRef.current = Date.now();
+                  setSelectedYouBike(st);
+                  setSelectedTransitStop(null);
+                  setCategoryListOpen(false);
+                  nav.setInspectedPlace(null);
+                  setSheetCollapsed(false);
+                  cameraRef.current?.easeTo({
+                    center: [st.lon, st.lat],
+                    zoom: Math.max(zoomLevel, 16.2),
+                    duration: 380,
+                  });
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 3,
+                    backgroundColor: isSel ? '#EA580C' : hasBikes ? '#F59E0B' : '#94A3B8',
+                    paddingHorizontal: isSel ? 8 : 6,
+                    paddingVertical: isSel ? 5 : 3,
+                    borderRadius: 12,
+                    borderWidth: 2,
+                    borderColor: '#FFFFFF',
+                    shadowColor: '#000',
+                    shadowOpacity: 0.22,
+                    shadowRadius: 4,
+                  }}
+                >
+                  <Ionicons name="bicycle" size={13} color="#FFFFFF" />
+                  <Text style={{ fontSize: 11, fontWeight: '900', color: '#FFFFFF' }}>
+                    {typeof st.availableBikes === 'number' ? st.availableBikes : '--'}
+                  </Text>
+                </View>
+              </Marker>
+            );
+          })}
+
         {/* 導航中下一個轉彎路口高亮點（Priority 1.6） */}
         {nextTurnCoord && (
           <Marker id="goba-next-turn-node" lngLat={nextTurnCoord} anchor="center">
             <View style={styles.nextTurnNodeOuter}>
               <View style={styles.nextTurnNodeInner}>
-                <Ionicons
-                  name={
-                    getManeuverIconName(
-                      nav.progress?.nextManeuver?.type ?? nav.route?.maneuvers[1]?.type ?? 8
-                    ) as any
-                  }
-                  size={13}
+                <ManeuverArrowIcon
+                  type={nav.progress?.nextManeuver?.type ?? nav.route?.maneuvers[1]?.type ?? 8}
+                  size={15}
                   color="#831843"
                 />
               </View>
@@ -1628,9 +1942,10 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         )}
 
         {/* 狀態 3：Route Preview（頂部顯示起訖點摘要膠囊） */}
+        {/* 狀態 3：Route Preview（P1 #8：支援自訂導航起點、目的地修改與交換起訖點按鈕） */}
         {uiState === 'route_preview' && (
-          <LiquidGlassSurface variant={isNight ? 'dark' : 'light'} interactive borderRadius={24}>
-            <View style={styles.previewTopBar}>
+          <LiquidGlassSurface variant={isNight ? 'dark' : 'light'} interactive borderRadius={22}>
+            <View style={[styles.previewTopBar, { paddingVertical: 8 }]}>
               <TouchableOpacity
                 style={styles.capsuleBackBtn}
                 onPress={() => {
@@ -1645,44 +1960,105 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   color={isNight ? '#F8FAFC' : '#1F2937'}
                 />
               </TouchableOpacity>
-              <View style={{ flex: 1 }}>
-                <Text
-                  style={[styles.previewOriginLabel, isNight && { color: '#94A3B8' }]}
-                  maxFontSizeMultiplier={1.2}
+              <View style={{ flex: 1, gap: 5 }}>
+                {/* 可點擊修改起點（預設目前位置） */}
+                <TouchableOpacity
+                  activeOpacity={0.75}
+                  onPress={() => {
+                    setEditingOriginMode(true);
+                    handleOpenSearch();
+                  }}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 6,
+                    backgroundColor: isNight ? 'rgba(255,255,255,0.08)' : 'rgba(219,39,119,0.06)',
+                    paddingHorizontal: 10,
+                    paddingVertical: 5,
+                    borderRadius: 10,
+                  }}
                 >
-                  目前位置 → 目的地
-                </Text>
-                <Text
-                  style={[styles.previewDestTitle, isNight && { color: '#FFFFFF' }]}
-                  numberOfLines={1}
-                  maxFontSizeMultiplier={1.25}
+                  <View
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 4,
+                      backgroundColor: nav.isCustomOrigin ? '#0EA5E9' : '#10B981',
+                    }}
+                  />
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: '700',
+                      color: isNight ? '#E2E8F0' : '#374151',
+                      flex: 1,
+                    }}
+                    numberOfLines={1}
+                  >
+                    {nav.customOrigin ? nav.customOrigin.name : '目前位置（點擊修改起點）'}
+                  </Text>
+                  {nav.isCustomOrigin && (
+                    <TouchableOpacity
+                      onPress={() => nav.setCustomOrigin(null)}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <Ionicons name="locate" size={14} color="#0EA5E9" />
+                    </TouchableOpacity>
+                  )}
+                </TouchableOpacity>
+
+                {/* 可點擊修改目的地 */}
+                <TouchableOpacity
+                  activeOpacity={0.75}
+                  onPress={() => {
+                    setEditingOriginMode(false);
+                    handleOpenSearch();
+                  }}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 6,
+                    backgroundColor: isNight ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.04)',
+                    paddingHorizontal: 10,
+                    paddingVertical: 5,
+                    borderRadius: 10,
+                  }}
                 >
-                  {nav.destination?.name || '選取地點'}
-                </Text>
+                  <Ionicons name="location" size={12} color="#DB2777" />
+                  <Text
+                    style={[
+                      styles.previewDestTitle,
+                      { fontSize: 13, flex: 1 },
+                      isNight && { color: '#FFFFFF' },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {nav.destination?.name || '選取目的地'}
+                  </Text>
+                </TouchableOpacity>
               </View>
+
+              {/* 交換起點與終點按鈕 */}
               <TouchableOpacity
-                style={styles.capsuleBackBtn}
-                onPress={() => handleOpenSearch()}
+                style={[styles.capsuleBackBtn, { marginLeft: 4 }]}
+                onPress={() => nav.swapOriginAndDestination()}
+                accessibilityLabel="交換起點與終點"
               >
-                <Ionicons name="search" size={18} color="#EC4899" />
+                <Ionicons name="swap-vertical" size={20} color="#EC4899" />
               </TouchableOpacity>
             </View>
           </LiquidGlassSurface>
         )}
 
-        {/* 狀態 4：Navigation（頂部僅顯示高對比 Turn-by-Turn 導航看板） */}
+        {/* 狀態 4：Navigation（頂部僅顯示高對比 Turn-by-Turn 導航看板 + 複雜路口放大指引） */}
         {uiState === 'navigation' && isActiveNav && (
           <View style={{ gap: 6 }}>
             <LiquidGlassSurface variant="dark" borderRadius={26}>
               <View style={styles.navHudMain}>
                 <LinearGradient colors={['#F472B6', '#DB2777']} style={styles.navHudArrowBox}>
-                  <Ionicons
-                    name={
-                      getManeuverIconName(
-                        nav.progress?.nextManeuver?.type ?? nav.route?.maneuvers[0]?.type ?? 8
-                      ) as any
-                    }
-                    size={32}
+                  <ManeuverArrowIcon
+                    type={nav.progress?.nextManeuver?.type ?? nav.route?.maneuvers[0]?.type ?? 8}
+                    size={34}
                     color="#FFFFFF"
                   />
                 </LinearGradient>
@@ -1726,9 +2102,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   <Text style={styles.thenLabel} maxFontSizeMultiplier={1.2}>
                     接著
                   </Text>
-                  <Ionicons
-                    name={getManeuverIconName(nav.progress.thenManeuver.type) as any}
-                    size={14}
+                  <ManeuverArrowIcon
+                    type={nav.progress.thenManeuver.type}
+                    size={16}
                     color="#F9A8D4"
                   />
                   <Text style={styles.thenText} numberOfLines={1} maxFontSizeMultiplier={1.2}>
@@ -1737,6 +2113,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 </View>
               ) : null}
             </LiquidGlassSurface>
+
+            {/* P1 #6：接近國道交流道／匝道／高架分岔／多車道複雜路口時自動顯示放大指引卡片 */}
+            {nav.progress?.nextManeuver &&
+              isComplexJunctionManeuver(
+                nav.progress.nextManeuver,
+                nav.progress.distanceToNextTurnMeters ?? 9999
+              ) && (
+                <ComplexJunctionCard
+                  maneuver={nav.progress.nextManeuver}
+                  distanceMeters={nav.progress.distanceToNextTurnMeters ?? 0}
+                />
+              )}
 
             {(nav.isSimulating ||
               nav.bgLocationActive ||
@@ -1922,18 +2310,6 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   size={19}
                   color={isNight ? '#F472B6' : '#1F2937'}
                 />
-              </TouchableOpacity>
-              <View style={styles.dockDivider} />
-              <TouchableOpacity style={styles.dockBtn} onPress={handleToggle3D} activeOpacity={0.7}>
-                <Text
-                  style={[
-                    styles.dock3DText,
-                    isNight && { color: '#F8FAFC' },
-                    is3D && { color: '#EC4899' },
-                  ]}
-                >
-                  {is3D ? '3D' : '2D'}
-                </Text>
               </TouchableOpacity>
               <View style={styles.dockDivider} />
               <TouchableOpacity
@@ -2611,11 +2987,272 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               />
             </TouchableOpacity>
 
-            {/* ---------- 狀態 A：Browse（點擊地圖地點詳細資訊卡 or 快捷通勤抽屜） ---------- */}
+            {/* ---------- 狀態 A：Browse（公車站牌 / YouBike / 地點詳情 / 分類多筆結果清單 / 快捷通勤） ---------- */}
             {uiState === 'browse' && (
               <>
-                {nav.inspectedPlace ? (
+                {selectedTransitStop ? (
                   <View style={{ gap: 10 }}>
+                    <View style={styles.routeHeader}>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <View style={[styles.placeCatBadge, { backgroundColor: '#DBEAFE' }]}>
+                            <Text style={[styles.placeCatBadgeText, { color: '#1D4ED8' }]}>
+                              🚌 {selectedTransitStop.directionLabel}
+                            </Text>
+                          </View>
+                          {typeof selectedTransitStop.distanceKm === 'number' && (
+                            <Text style={styles.placeDistLabel}>
+                              距離 {selectedTransitStop.distanceKm.toFixed(2)} km
+                            </Text>
+                          )}
+                        </View>
+                        <Text
+                          style={[styles.placeDetailTitle, isNight && { color: '#FFFFFF' }]}
+                          numberOfLines={1}
+                        >
+                          {selectedTransitStop.name}
+                        </Text>
+                        <Text style={styles.metaMicroText}>
+                          站牌編號：{selectedTransitStop.id}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.closeSheetBtn}
+                        onPress={() => setSelectedTransitStop(null)}
+                      >
+                        <Ionicons name="close" size={18} color="#6B7280" />
+                      </TouchableOpacity>
+                    </View>
+
+                    {!sheetCollapsed && (
+                      <>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: isNight ? '#E2E8F0' : '#374151' }}>
+                          停靠公車路線（{selectedTransitStop.routes.length}）
+                        </Text>
+                        {selectedTransitStop.routes.length === 0 ? (
+                          <Text style={styles.metaMicroText}>
+                            此站牌尚無停靠路線明細（即時到站資訊暫時無法取得）
+                          </Text>
+                        ) : (
+                          <ScrollView style={{ maxHeight: 160 }} contentContainerStyle={{ gap: 6 }}>
+                            {selectedTransitStop.routes.map((rt, rIdx) => (
+                              <View
+                                key={`${rt.routeName}-${rIdx}`}
+                                style={{
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  backgroundColor: isNight ? 'rgba(255,255,255,0.06)' : '#F8FAFC',
+                                  paddingHorizontal: 10,
+                                  paddingVertical: 8,
+                                  borderRadius: 10,
+                                  borderWidth: 1,
+                                  borderColor: isNight ? 'rgba(255,255,255,0.1)' : '#E2E8F0',
+                                }}
+                              >
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+                                  <View
+                                    style={{
+                                      backgroundColor: '#2563EB',
+                                      paddingHorizontal: 8,
+                                      paddingVertical: 3,
+                                      borderRadius: 6,
+                                    }}
+                                  >
+                                    <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>
+                                      {rt.routeName}
+                                    </Text>
+                                  </View>
+                                  <Text
+                                    style={{ fontSize: 12, color: isNight ? '#CBD5E1' : '#334155', flex: 1 }}
+                                    numberOfLines={1}
+                                  >
+                                    {rt.direction || '公車路線'}
+                                  </Text>
+                                </View>
+                                <Text style={{ fontSize: 11, color: '#64748B' }}>{rt.etaText}</Text>
+                              </View>
+                            ))}
+                          </ScrollView>
+                        )}
+                        <TouchableOpacity
+                          activeOpacity={0.9}
+                          style={{ marginTop: 4 }}
+                          onPress={() => {
+                            const st = selectedTransitStop;
+                            setSelectedTransitStop(null);
+                            nav.calculateRoute({
+                              id: st.id,
+                              placeId: st.id,
+                              name: `${st.name} (${st.directionLabel})`,
+                              address: `公車站牌 • ${st.directionLabel}`,
+                              lat: st.lat,
+                              lon: st.lon,
+                              category: 'transit_station',
+                            });
+                          }}
+                        >
+                          <LinearGradient
+                            colors={['#F472B6', '#DB2777']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={styles.primaryGradBtn}
+                          >
+                            <Ionicons name="navigate" size={16} color="#FFFFFF" />
+                            <Text style={styles.primaryBtnText}>設為目的地並規劃路線</Text>
+                          </LinearGradient>
+                        </TouchableOpacity>
+                      </>
+                    )}
+                  </View>
+                ) : selectedYouBike ? (
+                  <View style={{ gap: 10 }}>
+                    <View style={styles.routeHeader}>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <View style={[styles.placeCatBadge, { backgroundColor: '#FEF3C7' }]}>
+                            <Text style={[styles.placeCatBadgeText, { color: '#B45309' }]}>
+                              🚲 YouBike 2.0 / 2.0E
+                            </Text>
+                          </View>
+                          {typeof selectedYouBike.distanceKm === 'number' && (
+                            <Text style={styles.placeDistLabel}>
+                              距離 {selectedYouBike.distanceKm.toFixed(2)} km
+                            </Text>
+                          )}
+                        </View>
+                        <Text
+                          style={[styles.placeDetailTitle, isNight && { color: '#FFFFFF' }]}
+                          numberOfLines={1}
+                        >
+                          {selectedYouBike.name}
+                        </Text>
+                        <Text style={styles.metaMicroText} numberOfLines={2}>
+                          {selectedYouBike.address || selectedYouBike.area}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.closeSheetBtn}
+                        onPress={() => setSelectedYouBike(null)}
+                      >
+                        <Ionicons name="close" size={18} color="#6B7280" />
+                      </TouchableOpacity>
+                    </View>
+
+                    {!sheetCollapsed && (
+                      <>
+                        {!youBikeLiveAvailable ? (
+                          <View
+                            style={{
+                              backgroundColor: '#FEF2F2',
+                              padding: 10,
+                              borderRadius: 10,
+                            }}
+                          >
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: '#DC2626' }}>
+                              ⚠️ {youBikeStatusMsg || '即時資訊暫時無法取得'}
+                            </Text>
+                          </View>
+                        ) : (
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            <View
+                              style={{
+                                flex: 1,
+                                backgroundColor: '#FFFBEB',
+                                borderRadius: 12,
+                                padding: 10,
+                                alignItems: 'center',
+                                borderWidth: 1,
+                                borderColor: '#FDE68A',
+                              }}
+                            >
+                              <Text style={{ fontSize: 11, color: '#92400E', fontWeight: '700' }}>
+                                可借車輛
+                              </Text>
+                              <Text style={{ fontSize: 22, fontWeight: '900', color: '#D97706' }}>
+                                {selectedYouBike.availableBikes ?? '--'}
+                              </Text>
+                              {(selectedYouBike.available20 !== null ||
+                                selectedYouBike.available20E !== null) && (
+                                <Text style={{ fontSize: 10, color: '#78350F', marginTop: 2 }}>
+                                  2.0: {selectedYouBike.available20 ?? '--'} • 2.0E:{' '}
+                                  {selectedYouBike.available20E ?? '--'}
+                                </Text>
+                              )}
+                            </View>
+                            <View
+                              style={{
+                                flex: 1,
+                                backgroundColor: '#ECFDF5',
+                                borderRadius: 12,
+                                padding: 10,
+                                alignItems: 'center',
+                                borderWidth: 1,
+                                borderColor: '#A7F3D0',
+                              }}
+                            >
+                              <Text style={{ fontSize: 11, color: '#065F46', fontWeight: '700' }}>
+                                可還空位
+                              </Text>
+                              <Text style={{ fontSize: 22, fontWeight: '900', color: '#059669' }}>
+                                {selectedYouBike.availableReturnDocks ?? '--'}
+                              </Text>
+                              {selectedYouBike.totalDocks !== null && (
+                                <Text style={{ fontSize: 10, color: '#047857', marginTop: 2 }}>
+                                  總車柱：{selectedYouBike.totalDocks}
+                                </Text>
+                              )}
+                            </View>
+                          </View>
+                        )}
+                        <Text style={styles.metaMicroText}>
+                          資料來源：{selectedYouBike.source} • 更新時間：{selectedYouBike.updatedAt || '--'}
+                        </Text>
+                        <TouchableOpacity
+                          activeOpacity={0.9}
+                          onPress={() => {
+                            const st = selectedYouBike;
+                            setSelectedYouBike(null);
+                            nav.calculateRoute({
+                              id: st.id,
+                              placeId: st.id,
+                              name: st.name,
+                              address: st.address,
+                              lat: st.lat,
+                              lon: st.lon,
+                              category: 'youbike',
+                            });
+                          }}
+                        >
+                          <LinearGradient
+                            colors={['#F472B6', '#DB2777']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={styles.primaryGradBtn}
+                          >
+                            <Ionicons name="navigate" size={16} color="#FFFFFF" />
+                            <Text style={styles.primaryBtnText}>導航前往此 YouBike 站點</Text>
+                          </LinearGradient>
+                        </TouchableOpacity>
+                      </>
+                    )}
+                  </View>
+                ) : nav.inspectedPlace ? (
+                  <View style={{ gap: 10 }}>
+                    {activePoiCat && (nearbyPins.length > 0 || youBikeStations.length > 0) && (
+                      <TouchableOpacity
+                        onPress={() => {
+                          nav.setInspectedPlace(null);
+                          setCategoryListOpen(true);
+                        }}
+                        style={{ flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start' }}
+                      >
+                        <Ionicons name="chevron-back" size={14} color="#DB2777" />
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: '#DB2777' }}>
+                          返回「{activePoiCat}」搜尋結果清單
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                     <View style={styles.routeHeader}>
                       <View style={{ flex: 1 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -2811,6 +3448,249 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                           </LinearGradient>
                         </TouchableOpacity>
                       </>
+                    )}
+                  </View>
+                ) : categoryListOpen && activePoiCat ? (
+                  <View style={{ gap: 8 }}>
+                    {/* P1 #1：Apple Maps / Google Maps 風格分類多筆結果清單（絕不自動選取第一筆或進入路線規劃） */}
+                    <View style={styles.routeHeader}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.placeDetailTitle, isNight && { color: '#FFFFFF' }]}>
+                          {activePoiCat}（
+                          {activePoiCat === 'YouBike'
+                            ? youBikeStations.length
+                            : nearbyPins.filter((p) => {
+                                if (categoryFilterOpenNow && p.businessStatus === 'closed_permanently') return false;
+                                if (categoryBrandFilter !== '全部' && p.brand !== categoryBrandFilter) return false;
+                                return true;
+                              }).length}{' '}
+                          筆結果）
+                        </Text>
+                        <Text style={styles.metaMicroText}>
+                          點擊任一地點查看詳情，或點右側按鈕規劃路線
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.closeSheetBtn}
+                        onPress={() => {
+                          setCategoryListOpen(false);
+                          setActivePoiCat(null);
+                          setNearbyPins([]);
+                          setYouBikeStations([]);
+                        }}
+                      >
+                        <Ionicons name="close" size={18} color="#6B7280" />
+                      </TouchableOpacity>
+                    </View>
+
+                    {!sheetCollapsed && activePoiCat !== 'YouBike' && (
+                      <>
+                        {/* 篩選列：營業中、距離最近、品牌篩選 */}
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 6 }}
+                        >
+                          <TouchableOpacity
+                            style={[
+                              styles.optChip,
+                              categoryFilterOpenNow && { backgroundColor: '#DB2777' },
+                            ]}
+                            onPress={() => setCategoryFilterOpenNow((v) => !v)}
+                          >
+                            <Text
+                              style={[
+                                styles.optChipText,
+                                categoryFilterOpenNow && { color: '#FFFFFF' },
+                              ]}
+                            >
+                              營業中
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[
+                              styles.optChip,
+                              categorySortBy === 'distance' && { backgroundColor: '#1F2937' },
+                            ]}
+                            onPress={() =>
+                              setCategorySortBy((s) => (s === 'distance' ? 'relevance' : 'distance'))
+                            }
+                          >
+                            <Text
+                              style={[
+                                styles.optChipText,
+                                categorySortBy === 'distance' && { color: '#FFFFFF' },
+                              ]}
+                            >
+                              {categorySortBy === 'distance' ? '距離最近 ✓' : '依相關度'}
+                            </Text>
+                          </TouchableOpacity>
+                          {['全部', ...Array.from(new Set(nearbyPins.map((p) => p.brand).filter(Boolean) as string[])).slice(0, 6)].map(
+                            (br) => {
+                              const act = categoryBrandFilter === br;
+                              return (
+                                <TouchableOpacity
+                                  key={br}
+                                  style={[styles.optChip, act && { backgroundColor: '#FCE7F3' }]}
+                                  onPress={() => setCategoryBrandFilter(br)}
+                                >
+                                  <Text style={[styles.optChipText, act && { color: '#9D174D' }]}>
+                                    {br === '全部' ? '所有品牌' : br}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            }
+                          )}
+                        </ScrollView>
+
+                        <ScrollView style={{ maxHeight: 250 }} contentContainerStyle={{ gap: 8 }}>
+                          {nearbyPins
+                            .filter((p) => {
+                              if (categoryFilterOpenNow && p.businessStatus === 'closed_permanently') return false;
+                              if (categoryBrandFilter !== '全部' && p.brand !== categoryBrandFilter) return false;
+                              return true;
+                            })
+                            .sort((a, b) =>
+                              categorySortBy === 'distance'
+                                ? (a.distanceKm ?? 99) - (b.distanceKm ?? 99)
+                                : 0
+                            )
+                            .map((item) => {
+                              const estMin = Math.max(
+                                1,
+                                Math.round(((item.estimatedDriveDistanceKm ?? item.distanceKm ?? 0.5) / 30) * 60)
+                              );
+                              return (
+                                <TouchableOpacity
+                                  key={item.id}
+                                  activeOpacity={0.8}
+                                  onPress={() => {
+                                    setCategoryListOpen(false);
+                                    handleInspectPlaceOnMap(item);
+                                  }}
+                                  style={{
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    backgroundColor: isNight ? 'rgba(255,255,255,0.06)' : '#FFFFFF',
+                                    borderRadius: 14,
+                                    padding: 10,
+                                    borderWidth: 1,
+                                    borderColor: isNight ? 'rgba(255,255,255,0.1)' : '#F3F4F6',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <View style={{ flex: 1 }}>
+                                    <Text
+                                      style={{
+                                        fontSize: 14,
+                                        fontWeight: '800',
+                                        color: isNight ? '#FFFFFF' : '#111827',
+                                      }}
+                                      numberOfLines={1}
+                                    >
+                                      {item.name}
+                                    </Text>
+                                    <Text
+                                      style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}
+                                      numberOfLines={1}
+                                    >
+                                      {typeof item.distanceKm === 'number'
+                                        ? item.distanceKm < 1
+                                          ? `${Math.round(item.distanceKm * 1000)} 公尺`
+                                          : `${item.distanceKm.toFixed(1)} 公里`
+                                        : ''}
+                                      {item.address ? ` • ${item.address}` : ''}
+                                    </Text>
+                                    <Text style={{ fontSize: 11, color: '#059669', marginTop: 2, fontWeight: '600' }}>
+                                      {item.openingHours ? item.openingHours : item.businessStatus === 'closed_permanently' ? '已結束營業' : '營業狀態依現場為準'}
+                                    </Text>
+                                  </View>
+                                  <TouchableOpacity
+                                    onPress={() => {
+                                      setCategoryListOpen(false);
+                                      nav.calculateRoute(item);
+                                    }}
+                                    style={{
+                                      backgroundColor: '#FCE7F3',
+                                      paddingHorizontal: 10,
+                                      paddingVertical: 8,
+                                      borderRadius: 12,
+                                      alignItems: 'center',
+                                    }}
+                                  >
+                                    <Ionicons name="navigate" size={14} color="#DB2777" />
+                                    <Text style={{ fontSize: 11, fontWeight: '800', color: '#9D174D', marginTop: 2 }}>
+                                      約 {estMin} 分
+                                    </Text>
+                                  </TouchableOpacity>
+                                </TouchableOpacity>
+                              );
+                            })}
+                        </ScrollView>
+                      </>
+                    )}
+
+                    {!sheetCollapsed && activePoiCat === 'YouBike' && (
+                      <ScrollView style={{ maxHeight: 260 }} contentContainerStyle={{ gap: 8 }}>
+                        {!youBikeLiveAvailable ? (
+                          <Text style={{ fontSize: 12, color: '#DC2626', fontWeight: '700' }}>
+                            ⚠️ {youBikeStatusMsg || '即時資訊暫時無法取得'}
+                          </Text>
+                        ) : (
+                          youBikeStations.map((st) => (
+                            <TouchableOpacity
+                              key={st.id}
+                              activeOpacity={0.8}
+                              onPress={() => {
+                                setCategoryListOpen(false);
+                                setSelectedYouBike(st);
+                                cameraRef.current?.easeTo({
+                                  center: [st.lon, st.lat],
+                                  zoom: 16.5,
+                                  duration: 380,
+                                });
+                              }}
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                backgroundColor: isNight ? 'rgba(255,255,255,0.06)' : '#FFFFFF',
+                                borderRadius: 14,
+                                padding: 10,
+                                borderWidth: 1,
+                                borderColor: '#FDE68A',
+                                gap: 10,
+                              }}
+                            >
+                              <View style={{ flex: 1 }}>
+                                <Text
+                                  style={{ fontSize: 13, fontWeight: '800', color: isNight ? '#FFFFFF' : '#111827' }}
+                                  numberOfLines={1}
+                                >
+                                  {st.name}
+                                </Text>
+                                <Text style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }} numberOfLines={1}>
+                                  {typeof st.distanceKm === 'number' ? `${st.distanceKm.toFixed(2)} km • ` : ''}
+                                  {st.address}
+                                </Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', gap: 6 }}>
+                                <View style={{ backgroundColor: '#FEF3C7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, alignItems: 'center' }}>
+                                  <Text style={{ fontSize: 10, color: '#92400E' }}>可借</Text>
+                                  <Text style={{ fontSize: 14, fontWeight: '900', color: '#D97706' }}>
+                                    {st.availableBikes ?? '--'}
+                                  </Text>
+                                </View>
+                                <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, alignItems: 'center' }}>
+                                  <Text style={{ fontSize: 10, color: '#065F46' }}>可還</Text>
+                                  <Text style={{ fontSize: 14, fontWeight: '900', color: '#059669' }}>
+                                    {st.availableReturnDocks ?? '--'}
+                                  </Text>
+                                </View>
+                              </View>
+                            </TouchableOpacity>
+                          ))
+                        )}
+                      </ScrollView>
                     )}
                   </View>
                 ) : (
@@ -3167,9 +4047,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                                 }}
                               >
                                 <View style={styles.maneuverIconCircle}>
-                                  <Ionicons
-                                    name={getManeuverIconName(m.type) as any}
-                                    size={15}
+                                  <ManeuverArrowIcon
+                                    type={m.type}
+                                    size={18}
                                     color="#831843"
                                   />
                                 </View>
@@ -3336,9 +4216,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                                   isCurrentStep && { backgroundColor: activeProfile.routeColor },
                                 ]}
                               >
-                                <Ionicons
-                                  name={getManeuverIconName(m.type) as any}
-                                  size={15}
+                                <ManeuverArrowIcon
+                                  type={m.type}
+                                  size={18}
                                   color={isCurrentStep ? '#FFFFFF' : '#831843'}
                                 />
                               </View>
@@ -3560,13 +4440,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 value={feedbackPhone}
                 onChangeText={setFeedbackPhone}
               />
-              <TextInput
-                style={[styles.feedbackInput, { flex: 1 }]}
-                placeholder="營業時間（選填）"
-                placeholderTextColor="#9CA3AF"
-                value={feedbackHours}
-                onChangeText={setFeedbackHours}
-              />
+            </View>
+            <View style={{ marginTop: 2 }}>
+              <Text style={{ fontSize: 12, fontWeight: '800', color: '#374151', marginBottom: 4 }}>
+                營業時間設定（三種模式 + 每週預覽）
+              </Text>
+              <OpeningHoursPicker value={feedbackHours} onChange={setFeedbackHours} />
             </View>
             <TextInput
               style={styles.feedbackInput}

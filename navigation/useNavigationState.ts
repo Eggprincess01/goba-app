@@ -66,6 +66,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const [followMode, setFollowMode] = useState<CameraFollowMode>('follow');
   const [gpsPermission, setGpsPermission] = useState<'unknown' | 'granted' | 'denied'>('unknown');
   const [gps, setGps] = useState<GpsSnapshot | null>(null);
+  const [customOrigin, setCustomOriginState] = useState<SearchPlace | null>(null);
   const [destination, setDestination] = useState<SearchPlace | null>(null);
   const [route, setRoute] = useState<NavigationRoute | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -332,6 +333,18 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     return initialRegionCenter;
   }, [activeGps, initialRegionCenter]);
 
+  const routeOrigin: Coordinate = useMemo(() => {
+    if (customOrigin) {
+      return {
+        lat: customOrigin.navLat ?? customOrigin.lat,
+        lon: customOrigin.navLon ?? customOrigin.lon,
+      };
+    }
+    return effectiveOrigin;
+  }, [customOrigin, effectiveOrigin]);
+
+  const isCustomOrigin = Boolean(customOrigin);
+
   const gpsWeakSignal = useMemo(() => {
     if (isSimulating || !activeGps || activeGps.accuracyMeters === null) return false;
     return activeGps.accuracyMeters > 45;
@@ -363,12 +376,16 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       }
       const t0 = Date.now();
       try {
+        const usedOrigin = opts?.originOverride ?? routeOrigin;
+        const usedHeading =
+          opts?.originHeadingDeg !== undefined
+            ? opts.originHeadingDeg
+            : customOrigin && !opts?.originOverride
+            ? null
+            : activeGps?.rawHeadingDeg ?? activeGps?.headingDeg ?? null;
         const res = await fetchValhallaRoute({
-          origin: opts?.originOverride ?? effectiveOrigin,
-          originHeadingDeg:
-            opts?.originHeadingDeg !== undefined
-              ? opts.originHeadingDeg
-              : activeGps?.rawHeadingDeg ?? activeGps?.headingDeg ?? null,
+          origin: usedOrigin,
+          originHeadingDeg: usedHeading,
           destination: {
             lat: target.navLat ?? target.lat,
             lon: target.navLon ?? target.lon,
@@ -951,6 +968,44 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     }
   }, [recoverableSession, calculateRoute, bgLocationAdapter, voiceAdapter]);
 
+  const setCustomOrigin = useCallback(
+    async (place: SearchPlace | null) => {
+      setCustomOriginState(place);
+      if (destination) {
+        const nextOrigin: Coordinate = place
+          ? { lat: place.navLat ?? place.lat, lon: place.navLon ?? place.lon }
+          : effectiveOrigin;
+        await calculateRoute(destination, {
+          originOverride: nextOrigin,
+          originHeadingDeg: place ? null : activeGps?.rawHeadingDeg ?? activeGps?.headingDeg ?? null,
+        });
+      }
+    },
+    [destination, effectiveOrigin, activeGps, calculateRoute]
+  );
+
+  const swapOriginAndDestination = useCallback(async () => {
+    if (!destination) return;
+    const prevOriginAsPlace: SearchPlace = customOrigin ?? {
+      id: `gps-origin-${effectiveOrigin.lat.toFixed(5)}-${effectiveOrigin.lon.toFixed(5)}`,
+      name: '目前位置',
+      address: `${effectiveOrigin.lat.toFixed(5)}, ${effectiveOrigin.lon.toFixed(5)}`,
+      lat: effectiveOrigin.lat,
+      lon: effectiveOrigin.lon,
+      category: '目前位置',
+    };
+    const nextOriginPlace = destination;
+    const nextDestPlace = prevOriginAsPlace;
+    setCustomOriginState(nextOriginPlace);
+    await calculateRoute(nextDestPlace, {
+      originOverride: {
+        lat: nextOriginPlace.navLat ?? nextOriginPlace.lat,
+        lon: nextOriginPlace.navLon ?? nextOriginPlace.lon,
+      },
+      originHeadingDeg: null,
+    });
+  }, [destination, customOrigin, effectiveOrigin, calculateRoute]);
+
   const speedKmh = useMemo(() => {
     if (!activeGps || activeGps.speedMps === null || activeGps.speedMps < 0) return 0;
     return Math.round(activeGps.speedMps * 3.6);
@@ -972,6 +1027,11 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     gpsWeakSignal,
     gpsSignalLost,
     effectiveOrigin,
+    routeOrigin,
+    customOrigin,
+    isCustomOrigin,
+    setCustomOrigin,
+    swapOriginAndDestination,
     destination,
     setDestination,
     route,

@@ -72,12 +72,19 @@ export interface HdRoadsPayload {
     crosswalk_stripes: number;
     stop_lines: number;
     arrows: number;
+    bridge_decks_3d?: number;
+    bridge_piers?: number;
   };
   layers: {
     road_surfaces?: GeoJSON.FeatureCollection;
     road_asphalt?: GeoJSON.FeatureCollection;
+    bridge_shadows?: GeoJSON.FeatureCollection;
+    bridge_piers?: GeoJSON.FeatureCollection;
+    bridge_decks_3d?: GeoJSON.FeatureCollection;
     bridge_surfaces?: GeoJSON.FeatureCollection;
     bridge_asphalt?: GeoJSON.FeatureCollection;
+    bridge_edge_lines?: GeoJSON.FeatureCollection;
+    bridge_lane_dividers?: GeoJSON.FeatureCollection;
     medians?: GeoJSON.FeatureCollection;
     bus_lanes?: GeoJSON.FeatureCollection;
     edge_lines?: GeoJSON.FeatureCollection;
@@ -87,6 +94,44 @@ export interface HdRoadsPayload {
     stop_lines?: GeoJSON.FeatureCollection;
     arrows?: GeoJSON.FeatureCollection;
   };
+}
+
+export interface YouBikeStation {
+  id: string;
+  sno: string;
+  name: string;
+  shortName: string;
+  area: string;
+  address: string;
+  lat: number;
+  lon: number;
+  availableBikes: number | null;
+  available20: number | null;
+  available20E: number | null;
+  availableReturnDocks: number | null;
+  totalDocks: number | null;
+  active: boolean;
+  updatedAt: string;
+  source: string;
+  distanceKm?: number;
+}
+
+export interface TransitBusRouteInfo {
+  routeName: string;
+  direction: string;
+  etaText: string;
+}
+
+export interface TransitBusStop {
+  id: string;
+  osmId?: number;
+  name: string;
+  directionLabel: string;
+  lat: number;
+  lon: number;
+  ref?: string;
+  routes: TransitBusRouteInfo[];
+  distanceKm?: number;
 }
 
 export interface RouteManeuver {
@@ -102,6 +147,18 @@ export interface RouteManeuver {
   coordinate: [number, number] | null; // [lon, lat]
   verifiedLegalUTurn?: boolean;
   hasTrafficSignal?: boolean;
+  laneCount?: number | null;
+  exitNumber?: string | null;
+  signToward?: string | null;
+}
+
+export interface RouteTimingBreakdown {
+  valhallaMs: number;
+  signalsMs: number;
+  serverTotalMs: number;
+  networkMs: number;
+  totalMs: number;
+  cached: boolean;
 }
 
 export interface NavigationRoute {
@@ -118,6 +175,7 @@ export interface NavigationRoute {
   maneuvers: RouteManeuver[];
   trafficSignals?: TrafficSignalNode[];
   trafficSignalCount?: number;
+  timingMs?: RouteTimingBreakdown;
   fetchedAt: number;
   requestVersion?: number;
 }

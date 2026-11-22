@@ -6,7 +6,9 @@ import {
   RouteManeuver,
   SearchPlace,
   TrafficSignalNode,
+  TransitBusStop,
   VehicleClassId,
+  YouBikeStation,
 } from './types';
 
 /**
@@ -85,13 +87,26 @@ let activeSearchController: AbortController | null = null;
 const hdRoadsClientCache = new Map<string, { ts: number; data: HdRoadsPayload }>();
 const trafficSignalsClientCache = new Map<string, { ts: number; data: TrafficSignalNode[] }>();
 const searchClientCache = new Map<string, { ts: number; data: UnifiedSearchResponse }>();
+const routeClientCache = new Map<string, { ts: number; data: NavigationRoute }>();
+const youBikeClientCache = new Map<string, { ts: number; data: YouBikeResponse }>();
+const transitStopsClientCache = new Map<string, { ts: number; data: TransitBusStop[] }>();
 const CLIENT_CACHE_TTL_MS = 5 * 60 * 1000;
+const YOUBIKE_CACHE_TTL_MS = 45 * 1000;
+
+export interface YouBikeResponse {
+  liveAvailable: boolean;
+  statusMessage?: string;
+  stations: YouBikeStation[];
+}
 
 export const mapApiPerfCounters = {
   apiRequests: 0,
   cacheHits: 0,
   lastHdRoadsLatencyMs: 0,
   lastSearchLatencyMs: 0,
+  lastRouteTotalMs: 0,
+  lastRouteValhallaMs: 0,
+  lastRouteNetworkMs: 0,
 };
 
 export interface UnifiedSearchResponse {
@@ -417,6 +432,34 @@ export async function fetchValhallaRoute(params: {
     originPayload.heading = Math.round(params.originHeadingDeg) % 360;
   }
 
+  const tReqStart = Date.now();
+  const routeCacheKey =
+    originPayload.heading == null
+      ? `${params.origin.lat.toFixed(4)},${params.origin.lon.toFixed(4)}|${params.destination.lat.toFixed(4)},${params.destination.lon.toFixed(4)}|${params.vehicleType}|${params.avoidTolls ? 1 : 0}|${params.avoidHighways ? 1 : 0}`
+      : null;
+
+  if (routeCacheKey) {
+    const cachedRoute = routeClientCache.get(routeCacheKey);
+    if (cachedRoute && Date.now() - cachedRoute.ts < 120000) {
+      mapApiPerfCounters.cacheHits += 1;
+      mapApiPerfCounters.lastRouteTotalMs = 1;
+      mapApiPerfCounters.lastRouteValhallaMs = 0;
+      mapApiPerfCounters.lastRouteNetworkMs = 0;
+      return {
+        ...cachedRoute.data,
+        timingMs: {
+          valhallaMs: 0,
+          signalsMs: 0,
+          serverTotalMs: 0,
+          networkMs: 0,
+          totalMs: 1,
+          cached: true,
+        },
+      };
+    }
+  }
+
+  mapApiPerfCounters.apiRequests += 1;
   const res = await fetchWithTimeout(
     `${API_BASE}/api/maps/route`,
     {
@@ -435,9 +478,19 @@ export async function fetchValhallaRoute(params: {
   );
 
   const json = await res.json().catch(() => null);
+  const totalClientMs = Date.now() - tReqStart;
   if (!res.ok || !json) {
     throw new Error(json?.detail || '路線規劃失敗，請檢查網路或重新選擇目的地');
   }
+
+  const srvTiming = json.timing_ms || {};
+  const valhallaMs = Number(srvTiming.valhalla_ms || 0);
+  const signalsMs = Number(srvTiming.signals_ms || 0);
+  const serverTotalMs = Number(srvTiming.total_ms || 0);
+  const networkMs = Math.max(0, totalClientMs - serverTotalMs);
+  mapApiPerfCounters.lastRouteTotalMs = totalClientMs;
+  mapApiPerfCounters.lastRouteValhallaMs = valhallaMs;
+  mapApiPerfCounters.lastRouteNetworkMs = networkMs;
 
   const maneuvers: RouteManeuver[] = Array.isArray(json.maneuvers)
     ? json.maneuvers.map((m: any, idx: number) => ({
@@ -461,6 +514,9 @@ export async function fetchValhallaRoute(params: {
           m.verified_legal_uturn || Number(m.type) === 12 || Number(m.type) === 13
         ),
         hasTrafficSignal: Boolean(m.has_traffic_signal),
+        laneCount: typeof m.lane_count === 'number' ? Number(m.lane_count) : null,
+        exitNumber: m.exit_number ? String(m.exit_number) : null,
+        signToward: m.sign_toward ? String(m.sign_toward) : null,
       }))
     : [];
 
@@ -474,7 +530,7 @@ export async function fetchValhallaRoute(params: {
       }))
     : [];
 
-  return {
+  const builtRoute: NavigationRoute = {
     engine: 'valhalla',
     vehicleType: params.vehicleType,
     transitPending: Boolean(json.transit_pending),
@@ -499,8 +555,22 @@ export async function fetchValhallaRoute(params: {
       typeof json.traffic_signal_count === 'number'
         ? Number(json.traffic_signal_count)
         : trafficSignals.length,
+    timingMs: {
+      valhallaMs,
+      signalsMs,
+      serverTotalMs,
+      networkMs,
+      totalMs: totalClientMs,
+      cached: Boolean(srvTiming.cached),
+    },
     fetchedAt: Date.now(),
   };
+
+  if (routeCacheKey) {
+    if (routeClientCache.size > 40) routeClientCache.clear();
+    routeClientCache.set(routeCacheKey, { ts: Date.now(), data: builtRoute });
+  }
+  return builtRoute;
 }
 
 /**
@@ -593,16 +663,197 @@ export function formatEtaTime(secondsFromNow: number): string {
   return `${String(arrival.getHours()).padStart(2, '0')}:${String(arrival.getMinutes()).padStart(2, '0')}`;
 }
 
+/**
+ * 查詢即時 YouBike 2.0 / 2.0E 站點資訊（GET /api/maps/youbike，絕不使用假數字）
+ */
+export async function fetchYouBikeNear(
+  center: Coordinate,
+  radiusMeters = 1500
+): Promise<YouBikeResponse> {
+  const key = `${(Math.round(center.lat / 0.004) * 0.004).toFixed(3)},${(
+    Math.round(center.lon / 0.004) * 0.004
+  ).toFixed(3)},${radiusMeters}`;
+  const hit = youBikeClientCache.get(key);
+  if (hit && Date.now() - hit.ts < YOUBIKE_CACHE_TTL_MS) {
+    mapApiPerfCounters.cacheHits += 1;
+    return hit.data;
+  }
+  mapApiPerfCounters.apiRequests += 1;
+  try {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/api/maps/youbike?lat=${center.lat.toFixed(5)}&lon=${center.lon.toFixed(
+        5
+      )}&radius_m=${radiusMeters}`,
+      {},
+      7500
+    );
+    if (!res.ok) {
+      return { liveAvailable: false, statusMessage: '即時資訊暫時無法取得', stations: [] };
+    }
+    const json = await res.json();
+    const stations: YouBikeStation[] = Array.isArray(json.stations)
+      ? json.stations.map((s: any) => ({
+          id: String(s.id || `youbike_${s.sno}`),
+          sno: String(s.sno || ''),
+          name: String(s.name || 'YouBike 站點'),
+          shortName: String(s.short_name || s.name || 'YouBike'),
+          area: String(s.area || ''),
+          address: String(s.address || ''),
+          lat: Number(s.lat),
+          lon: Number(s.lon),
+          availableBikes: typeof s.available_bikes === 'number' ? s.available_bikes : null,
+          available20: typeof s.available_2_0 === 'number' ? s.available_2_0 : null,
+          available20E: typeof s.available_2_0e === 'number' ? s.available_2_0e : null,
+          availableReturnDocks:
+            typeof s.available_return_docks === 'number' ? s.available_return_docks : null,
+          totalDocks: typeof s.total_docks === 'number' ? s.total_docks : null,
+          active: s.active !== false,
+          updatedAt: String(s.updated_at || ''),
+          source: String(s.source || '官方開放資料'),
+          distanceKm: typeof s.distance_km === 'number' ? s.distance_km : undefined,
+        }))
+      : [];
+    const out: YouBikeResponse = {
+      liveAvailable: Boolean(json.live_available),
+      statusMessage: json.status_message ? String(json.status_message) : undefined,
+      stations,
+    };
+    if (youBikeClientCache.size > 30) youBikeClientCache.clear();
+    youBikeClientCache.set(key, { ts: Date.now(), data: out });
+    return out;
+  } catch {
+    return { liveAvailable: false, statusMessage: '即時資訊暫時無法取得', stations: [] };
+  }
+}
+
+/**
+ * 查詢可互動公車站牌（GET /api/maps/transit-stops，含獨立 place_id、方向區分與停靠路線）
+ */
+export async function fetchTransitStopsNear(
+  center: Coordinate,
+  radiusMeters = 650
+): Promise<TransitBusStop[]> {
+  const key = `${(Math.round(center.lat / 0.005) * 0.005).toFixed(3)},${(
+    Math.round(center.lon / 0.005) * 0.005
+  ).toFixed(3)},${radiusMeters}`;
+  const hit = transitStopsClientCache.get(key);
+  if (hit && Date.now() - hit.ts < CLIENT_CACHE_TTL_MS * 2) {
+    mapApiPerfCounters.cacheHits += 1;
+    return hit.data;
+  }
+  mapApiPerfCounters.apiRequests += 1;
+  try {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/api/maps/transit-stops?lat=${center.lat.toFixed(5)}&lon=${center.lon.toFixed(
+        5
+      )}&radius_m=${radiusMeters}`,
+      {},
+      7500
+    );
+    if (!res.ok) return [];
+    const json = await res.json();
+    const out: TransitBusStop[] = Array.isArray(json.stops)
+      ? json.stops.map((s: any) => ({
+          id: String(s.id),
+          osmId: typeof s.osm_id === 'number' ? s.osm_id : undefined,
+          name: String(s.name || '公車站'),
+          directionLabel: String(s.direction_label || '公車站牌'),
+          lat: Number(s.lat),
+          lon: Number(s.lon),
+          ref: s.ref ? String(s.ref) : undefined,
+          routes: Array.isArray(s.routes)
+            ? s.routes.map((r: any) => ({
+                routeName: String(r.route_name || ''),
+                direction: String(r.direction || ''),
+                etaText: String(r.eta_text || '即時到站資訊暫時無法取得'),
+              }))
+            : [],
+          distanceKm: typeof s.distance_km === 'number' ? s.distance_km : undefined,
+        }))
+      : [];
+    if (transitStopsClientCache.size > 40) transitStopsClientCache.clear();
+    transitStopsClientCache.set(key, { ts: Date.now(), data: out });
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export type ManeuverArrowKind =
+  | 'start'
+  | 'arrive'
+  | 'straight'
+  | 'left_90'
+  | 'right_90'
+  | 'sharp_left'
+  | 'sharp_right'
+  | 'keep_left'
+  | 'keep_right'
+  | 'ramp_left'
+  | 'ramp_right'
+  | 'exit_left'
+  | 'exit_right'
+  | 'uturn_left'
+  | 'uturn_right'
+  | 'roundabout';
+
+/**
+ * P0 #5：嚴格依據 Valhalla maneuver.type 決定語意箭頭類型，
+ * 絕不將「靠左／靠右／匣道分流」與 90 度左右轉混為一談！
+ */
+export function getManeuverArrowKind(type: number): ManeuverArrowKind {
+  switch (type) {
+    case 1:
+    case 2:
+    case 3:
+      return 'start';
+    case 4:
+    case 5:
+    case 6:
+      return 'arrive';
+    case 9: // kSlightRight
+    case 23: // kStayRight
+      return 'keep_right';
+    case 10: // kRight
+      return 'right_90';
+    case 11: // kSharpRight
+      return 'sharp_right';
+    case 12: // kUturnRight
+      return 'uturn_right';
+    case 13: // kUturnLeft
+      return 'uturn_left';
+    case 14: // kSharpLeft
+      return 'sharp_left';
+    case 15: // kLeft
+      return 'left_90';
+    case 16: // kSlightLeft
+    case 24: // kStayLeft
+      return 'keep_left';
+    case 18: // kRampRight
+      return 'ramp_right';
+    case 19: // kRampLeft
+      return 'ramp_left';
+    case 20: // kExitRight
+      return 'exit_right';
+    case 21: // kExitLeft
+      return 'exit_left';
+    case 26:
+    case 27:
+      return 'roundabout';
+    default:
+      return 'straight';
+  }
+}
+
 export function getManeuverIconName(type: number): string {
-  if (type === 1 || type === 2 || type === 3) return 'navigate';
-  if (type === 4 || type === 5 || type === 6) return 'flag';
-  if (type === 9 || type === 10 || type === 11 || type === 18 || type === 20 || type === 23) {
-    return 'return-up-forward';
-  }
-  if (type === 14 || type === 15 || type === 16 || type === 19 || type === 21 || type === 24) {
-    return 'return-up-back';
-  }
-  if (type === 12 || type === 13) return 'refresh';
-  if (type === 26 || type === 27) return 'sync-circle';
+  const kind = getManeuverArrowKind(type);
+  if (kind === 'start') return 'navigate';
+  if (kind === 'arrive') return 'flag';
+  if (kind === 'right_90' || kind === 'sharp_right') return 'return-up-forward';
+  if (kind === 'left_90' || kind === 'sharp_left') return 'return-up-back';
+  if (kind === 'keep_right' || kind === 'ramp_right' || kind === 'exit_right') return 'trending-up';
+  if (kind === 'keep_left' || kind === 'ramp_left' || kind === 'exit_left') return 'git-branch';
+  if (kind === 'uturn_left' || kind === 'uturn_right') return 'refresh';
+  if (kind === 'roundabout') return 'sync-circle';
   return 'arrow-up';
 }
