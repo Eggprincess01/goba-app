@@ -5,9 +5,11 @@ import {
   Image,
   Keyboard,
   Linking,
+  Modal,
   Platform,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -34,11 +36,14 @@ import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngin
 import { Coordinate, SearchPlace } from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
+  fetchAdminFeedbackQueue,
   formatDurationZh,
   formatEtaTime,
   getManeuverIconName,
   reverseGeocodeLocation,
-  searchDestinationPlaces,
+  reviewAdminFeedback,
+  searchUnifiedPlaces,
+  submitPlaceErrorFeedback,
 } from '../navigation/valhalla';
 import { DISPLAY_VEHICLE_PROFILES, getVehicleProfile } from '../navigation/vehicleRestrictions';
 import { haversineKm } from '../services/api';
@@ -87,11 +92,26 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchPlace[]>([]);
+  const [searchBasis, setSearchBasis] = useState<string>('目前 GPS 位置');
+  const [searchLatencyMs, setSearchLatencyMs] = useState<number | null>(null);
   const [nearbyPins, setNearbyPins] = useState<SearchPlace[]>([]);
   const [activePoiCat, setActivePoiCat] = useState<string | null>(null);
+  const [mapMovedCenter, setMapMovedCenter] = useState<Coordinate | null>(null);
+  const [showSearchAreaBtn, setShowSearchAreaBtn] = useState(false);
   const [sheetCollapsed, setSheetCollapsed] = useState(false);
   const [showManeuvers, setShowManeuvers] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [adminQueue, setAdminQueue] = useState<any[]>([]);
+  const [feedbackModalVisible, setFeedbackModalVisible] = useState(false);
+  const [feedbackIssueType, setFeedbackIssueType] = useState<
+    'address_wrong' | 'relocated' | 'closed' | 'name_wrong' | 'duplicate' | 'missing_place' | 'other'
+  >('relocated');
+  const [feedbackName, setFeedbackName] = useState('');
+  const [feedbackAddress, setFeedbackAddress] = useState('');
+  const [feedbackPhone, setFeedbackPhone] = useState('');
+  const [feedbackHours, setFeedbackHours] = useState('');
+  const [feedbackNote, setFeedbackNote] = useState('');
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [is3D, setIs3D] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(14.5);
 
@@ -278,16 +298,21 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       searchDebounceRef.current = setTimeout(async () => {
         setSearching(true);
         try {
-          const list = await searchDestinationPlaces(trimmed, nav.effectiveOrigin);
-          setSearchResults(list);
+          const res = await searchUnifiedPlaces(trimmed, {
+            gpsCenter: nav.gps ? { lat: nav.gps.lat, lon: nav.gps.lon } : null,
+            mapCenter: mapMovedCenter || nav.effectiveOrigin,
+          });
+          setSearchResults(res.places);
+          if (res.searchBasis) setSearchBasis(res.searchBasis);
+          setSearchLatencyMs(res.latencyMs);
         } catch {
-          // ignore transient typing errors
+          // ignore transient typing errors or aborted requests
         } finally {
           setSearching(false);
         }
-      }, 320);
+      }, 280);
     },
-    [nav.effectiveOrigin]
+    [nav.gps, nav.effectiveOrigin, mapMovedCenter]
   );
 
   const handleSearchSubmit = useCallback(async () => {
@@ -297,17 +322,24 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     setSearching(true);
     nav.setErrorMessage(null);
     try {
-      const list = await searchDestinationPlaces(q, nav.effectiveOrigin);
-      setSearchResults(list);
-      if (list.length === 0) {
-        nav.setErrorMessage(`找不到「${q}」，請嘗試輸入完整路名或地標`);
+      const res = await searchUnifiedPlaces(q, {
+        gpsCenter: nav.gps ? { lat: nav.gps.lat, lon: nav.gps.lon } : null,
+        mapCenter: mapMovedCenter || nav.effectiveOrigin,
+      });
+      setSearchResults(res.places);
+      if (res.searchBasis) setSearchBasis(res.searchBasis);
+      setSearchLatencyMs(res.latencyMs);
+      if (res.places.length === 0) {
+        nav.setErrorMessage(`找不到「${q}」，請嘗試輸入完整路名、品牌或點此回報缺少地點`);
       }
     } catch (err: any) {
-      nav.setErrorMessage(err?.message || '搜尋失敗，請稍後再試');
+      if (err?.name !== 'AbortError') {
+        nav.setErrorMessage(err?.message || '搜尋失敗，請稍後再試');
+      }
     } finally {
       setSearching(false);
     }
-  }, [searchQuery, nav]);
+  }, [searchQuery, nav, mapMovedCenter]);
 
   // 從搜尋頁或住家/公司選取地點：若處於設定住家/公司則綁定，否則直接進入 Route Preview
   const handleSelectPlaceFromSearch = useCallback(
@@ -393,22 +425,30 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   );
 
   const handleQuickPoiCategory = useCallback(
-    async (catLabel: string, query: string) => {
-      if (activePoiCat === catLabel) {
+    async (catLabel: string, query: string, centerOverride?: Coordinate) => {
+      if (!centerOverride && activePoiCat === catLabel) {
         setActivePoiCat(null);
         setNearbyPins([]);
+        setShowSearchAreaBtn(false);
         return;
       }
       setActivePoiCat(catLabel);
+      setShowSearchAreaBtn(false);
       setSearching(true);
       nav.setErrorMessage(null);
+      const searchCenter = centerOverride || mapMovedCenter || nav.effectiveOrigin;
       try {
-        const list = await searchDestinationPlaces(query, nav.effectiveOrigin);
-        setNearbyPins(list);
-        if (list.length > 0) {
-          handleInspectPlaceOnMap(list[0]);
+        const res = await searchUnifiedPlaces(query, {
+          gpsCenter: searchCenter,
+          mapCenter: searchCenter,
+          sortBy: 'distance',
+        });
+        setNearbyPins(res.places);
+        if (res.searchBasis) setSearchBasis(res.searchBasis);
+        if (res.places.length > 0) {
+          handleInspectPlaceOnMap(res.places[0]);
         } else {
-          nav.setErrorMessage(`附近暫無「${catLabel}」搜尋結果`);
+          nav.setErrorMessage(`此區域附近暫無「${catLabel}」搜尋結果`);
         }
       } catch (err: any) {
         nav.setErrorMessage(err?.message || '附近景點搜尋失敗');
@@ -416,8 +456,78 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         setSearching(false);
       }
     },
-    [activePoiCat, nav, handleInspectPlaceOnMap]
+    [activePoiCat, nav, mapMovedCenter, handleInspectPlaceOnMap]
   );
+
+  // 地圖移動後點擊「搜尋這個區域」（Section 三.2 & 八）
+  const handleSearchThisArea = useCallback(async () => {
+    const center = mapMovedCenter || nav.effectiveOrigin;
+    setShowSearchAreaBtn(false);
+    const activeCatObj = QUICK_POI_CATEGORIES.find((c) => c.label === activePoiCat);
+    const q = activeCatObj ? activeCatObj.query : searchQuery.trim() || '加油站';
+    await handleQuickPoiCategory(activeCatObj?.label || q, q, center);
+  }, [mapMovedCenter, nav.effectiveOrigin, activePoiCat, searchQuery, handleQuickPoiCategory]);
+
+  const handleOpenFeedbackModal = useCallback((place?: SearchPlace | null) => {
+    const target = place || nav.inspectedPlace || nav.destination;
+    setFeedbackName(target?.name || '');
+    setFeedbackAddress(target?.address || '');
+    setFeedbackPhone(target?.phone || '');
+    setFeedbackHours(target?.openingHours || '');
+    setFeedbackNote('');
+    setFeedbackIssueType(target ? 'relocated' : 'missing_place');
+    setFeedbackModalVisible(true);
+  }, [nav.inspectedPlace, nav.destination]);
+
+  const handleSubmitFeedback = useCallback(async () => {
+    const target = nav.inspectedPlace || nav.destination;
+    setFeedbackSubmitting(true);
+    try {
+      const res = await submitPlaceErrorFeedback({
+        placeId: target?.placeId || target?.id,
+        issueType: feedbackIssueType,
+        proposedChanges: {
+          name: feedbackName.trim() || undefined,
+          address: feedbackAddress.trim() || undefined,
+          phone: feedbackPhone.trim() || undefined,
+          opening_hours: feedbackHours.trim() || undefined,
+          lat: target?.lat ?? nav.effectiveOrigin.lat,
+          lon: target?.lon ?? nav.effectiveOrigin.lon,
+          note: feedbackNote.trim() || undefined,
+        },
+        originalSnapshot: target || null,
+      });
+      setFeedbackModalVisible(false);
+      Alert.alert('已送出地點修正回報', `${res.message}\n（回報單號 #${res.feedback_id}）`);
+    } catch (err: any) {
+      Alert.alert('回報失敗', err?.message || '請稍後再試');
+    } finally {
+      setFeedbackSubmitting(false);
+    }
+  }, [
+    nav.inspectedPlace,
+    nav.destination,
+    nav.effectiveOrigin,
+    feedbackIssueType,
+    feedbackName,
+    feedbackAddress,
+    feedbackPhone,
+    feedbackHours,
+    feedbackNote,
+  ]);
+
+  const handleSharePlace = useCallback(async (place: SearchPlace) => {
+    try {
+      await Share.share({
+        title: place.name,
+        message: `${place.name}\n地址：${place.address}${
+          place.phone ? `\n電話：${place.phone}` : ''
+        }\n座標：${place.lat.toFixed(5)}, ${place.lon.toFixed(5)}`,
+      });
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const handleStartNavigationPress = useCallback(() => {
     if (!activeProfile.isProductionVerified) {
@@ -555,8 +665,27 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           if (typeof e?.nativeEvent?.zoom === 'number') {
             setZoomLevel(e.nativeEvent.zoom);
           }
-          if (e?.nativeEvent?.userInteraction && nav.followMode !== 'free') {
-            nav.setFollowMode('free');
+          if (e?.nativeEvent?.userInteraction) {
+            if (nav.followMode !== 'free') {
+              nav.setFollowMode('free');
+            }
+            const center = e?.nativeEvent?.center;
+            if (Array.isArray(center) && center.length >= 2) {
+              const moved: Coordinate = { lat: Number(center[1]), lon: Number(center[0]) };
+              setMapMovedCenter(moved);
+              if (
+                uiState === 'browse' &&
+                (activePoiCat || nearbyPins.length > 0) &&
+                haversineKm(
+                  nav.effectiveOrigin.lat,
+                  nav.effectiveOrigin.lon,
+                  moved.lat,
+                  moved.lon
+                ) > 0.5
+              ) {
+                setShowSearchAreaBtn(true);
+              }
+            }
           }
         }}
       >
@@ -784,6 +913,32 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 );
               })}
             </ScrollView>
+            {/* 地圖移動後顯示「搜尋這個區域」浮動按鈕（Section 三.2 & 八） */}
+            {showSearchAreaBtn && (
+              <TouchableOpacity
+                style={{ alignSelf: 'center', marginTop: 2 }}
+                activeOpacity={0.9}
+                onPress={handleSearchThisArea}
+              >
+                <LiquidGlassSurface
+                  variant="dark"
+                  interactive
+                  borderRadius={20}
+                  contentStyle={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 6,
+                    paddingHorizontal: 14,
+                    paddingVertical: 8,
+                  }}
+                >
+                  <Ionicons name="refresh" size={14} color="#F472B6" />
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#FFFFFF' }}>
+                    搜尋這個區域
+                  </Text>
+                </LiquidGlassSurface>
+              </TouchableOpacity>
+            )}
           </>
         )}
 
@@ -1042,7 +1197,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               <View style={styles.dockDivider} />
               <TouchableOpacity
                 style={styles.dockBtn}
-                onPress={() => setShowSettingsPanel((v) => !v)}
+                onPress={() => {
+                  const next = !showSettingsPanel;
+                  setShowSettingsPanel(next);
+                  if (next) {
+                    fetchAdminFeedbackQueue().then(setAdminQueue);
+                  }
+                }}
                 activeOpacity={0.7}
               >
                 <Ionicons
@@ -1092,6 +1253,78 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 <Text style={styles.optChipText}>底圖：{currentMapStyle.label}</Text>
               </TouchableOpacity>
             </View>
+
+            <Text style={styles.diagTitle}>
+              待審核地點回報佇列 ({adminQueue.filter((f) => f.status === 'pending').length} 筆)
+            </Text>
+            <ScrollView style={{ maxHeight: 110 }}>
+              {adminQueue.filter((f) => f.status === 'pending').length === 0 ? (
+                <Text style={{ fontSize: 11, color: '#9CA3AF' }}>目前無待審核地點回報</Text>
+              ) : (
+                adminQueue
+                  .filter((f) => f.status === 'pending')
+                  .slice(0, 5)
+                  .map((fb) => (
+                    <View
+                      key={fb.feedback_id}
+                      style={{
+                        paddingVertical: 6,
+                        borderBottomWidth: StyleSheet.hairlineWidth,
+                        borderBottomColor: 'rgba(0,0,0,0.08)',
+                        gap: 3,
+                      }}
+                    >
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#111827' }}>
+                        #{fb.feedback_id} [{fb.issue_type}] {fb.proposed_changes?.name || fb.place_id}
+                      </Text>
+                      <Text style={{ fontSize: 10, color: '#6B7280' }}>
+                        新址：{fb.proposed_changes?.address || '未變更'}
+                      </Text>
+                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+                        <TouchableOpacity
+                          style={{
+                            paddingHorizontal: 8,
+                            paddingVertical: 3,
+                            borderRadius: 6,
+                            backgroundColor: '#10B981',
+                          }}
+                          onPress={async () => {
+                            await reviewAdminFeedback(
+                              fb.feedback_id,
+                              'approve',
+                              '經後台核實通過並更新索引'
+                            );
+                            const refreshed = await fetchAdminFeedbackQueue();
+                            setAdminQueue(refreshed);
+                            Alert.alert('已核准更新', 'POI 索引已更新並清除舊快取！');
+                          }}
+                        >
+                          <Text style={{ fontSize: 10, fontWeight: '700', color: '#FFFFFF' }}>
+                            核准更新
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={{
+                            paddingHorizontal: 8,
+                            paddingVertical: 3,
+                            borderRadius: 6,
+                            backgroundColor: '#EF4444',
+                          }}
+                          onPress={async () => {
+                            await reviewAdminFeedback(fb.feedback_id, 'reject', '資料待補充');
+                            const refreshed = await fetchAdminFeedbackQueue();
+                            setAdminQueue(refreshed);
+                          }}
+                        >
+                          <Text style={{ fontSize: 10, fontWeight: '700', color: '#FFFFFF' }}>
+                            駁回
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))
+              )}
+            </ScrollView>
 
             <Text style={styles.diagTitle}>隱私安全診斷紀錄（不含任何座標資訊）</Text>
             <ScrollView style={{ maxHeight: 100 }}>
@@ -1267,40 +1500,121 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   </View>
                 )}
 
-                {/* 即時搜尋結果 */}
+                {/* 即時搜尋結果（Section 八：顯示品牌、類別、核實狀態、地址、直線/行車距離、營業時間、電話、搬遷提示與路線按鈕） */}
                 {searchResults.length > 0 ? (
                   <View style={styles.searchSection}>
-                    <Text style={styles.searchSectionLabel}>搜尋結果</Text>
-                    {searchResults.map((p) => (
-                      <TouchableOpacity
-                        key={p.id}
-                        style={styles.searchItem}
-                        onPress={() => handleSelectPlaceFromSearch(p)}
-                      >
-                        <View style={styles.searchItemIcon}>
-                          <Ionicons name="location" size={16} color="#EC4899" />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text
-                            style={[styles.searchItemTitle, isNight && { color: '#FFFFFF' }]}
-                            numberOfLines={1}
-                            maxFontSizeMultiplier={1.2}
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        paddingHorizontal: 4,
+                        marginBottom: 6,
+                      }}
+                    >
+                      <Text style={styles.searchSectionLabel}>
+                        搜尋依據：{searchBasis} ({searchResults.length} 筆)
+                      </Text>
+                      {searchLatencyMs !== null && (
+                        <Text style={{ fontSize: 11, color: '#9CA3AF' }}>{searchLatencyMs} ms</Text>
+                      )}
+                    </View>
+                    {searchResults.map((p) => {
+                      const isClosed = p.businessStatus === 'closed_permanently';
+                      const isVerified = p.verificationStatus === 'verified';
+                      const hasRelocHistory = Array.isArray(p.history) && p.history.length > 0;
+                      return (
+                        <TouchableOpacity
+                          key={p.id}
+                          style={styles.searchItem}
+                          onPress={() => handleSelectPlaceFromSearch(p)}
+                        >
+                          <View
+                            style={[
+                              styles.searchItemIcon,
+                              isClosed && { backgroundColor: '#FEE2E2' },
+                            ]}
                           >
-                            {p.name}
-                          </Text>
-                          <Text
-                            style={styles.searchItemAddr}
-                            numberOfLines={1}
-                            maxFontSizeMultiplier={1.2}
+                            <Ionicons
+                              name={isClosed ? 'alert-circle' : 'location'}
+                              size={16}
+                              color={isClosed ? '#DC2626' : '#EC4899'}
+                            />
+                          </View>
+                          <View style={{ flex: 1, gap: 2 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                              <Text
+                                style={[
+                                  styles.searchItemTitle,
+                                  isNight && { color: '#FFFFFF' },
+                                  isClosed && { textDecorationLine: 'line-through', color: '#9CA3AF' },
+                                ]}
+                                numberOfLines={1}
+                                maxFontSizeMultiplier={1.2}
+                              >
+                                {p.name}
+                              </Text>
+                              {isVerified && !isClosed && (
+                                <View style={styles.verifiedMicroBadge}>
+                                  <Ionicons name="checkmark-circle" size={11} color="#059669" />
+                                  <Text style={styles.verifiedMicroText}>已核實</Text>
+                                </View>
+                              )}
+                              {isClosed && (
+                                <View style={styles.closedMicroBadge}>
+                                  <Text style={styles.closedMicroText}>已停業</Text>
+                                </View>
+                              )}
+                            </View>
+
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                              {p.brand && (
+                                <Text style={styles.brandTagText}>{p.brand}</Text>
+                              )}
+                              {typeof p.distanceKm === 'number' && (
+                                <Text style={styles.searchDistText}>
+                                  直線 {p.distanceKm.toFixed(1)} km
+                                  {typeof p.estimatedDriveDistanceKm === 'number'
+                                    ? ` • 行車約 ${p.estimatedDriveDistanceKm.toFixed(1)} km`
+                                    : ''}
+                                </Text>
+                              )}
+                            </View>
+
+                            <Text
+                              style={styles.searchItemAddr}
+                              numberOfLines={1}
+                              maxFontSizeMultiplier={1.2}
+                            >
+                              {p.address}
+                            </Text>
+
+                            {(p.openingHours || p.phone) && (
+                              <Text style={styles.metaMicroText} numberOfLines={1}>
+                                {p.openingHours ? `🕒 ${p.openingHours}` : ''}
+                                {p.openingHours && p.phone ? '  •  ' : ''}
+                                {p.phone ? `📞 ${p.phone}` : ''}
+                              </Text>
+                            )}
+
+                            {hasRelocHistory && p.history![0]?.old_address && (
+                              <Text style={styles.relocMicroText} numberOfLines={1}>
+                                ✦ 已由舊址（{p.history![0].old_name || ''}{' '}
+                                {p.history![0].old_address}）搬遷至此核實新址
+                              </Text>
+                            )}
+                          </View>
+
+                          <TouchableOpacity
+                            style={styles.inlineRouteBtn}
+                            onPress={() => handleSelectPlaceFromSearch(p)}
                           >
-                            {p.address}
-                          </Text>
-                        </View>
-                        {typeof p.distanceKm === 'number' && (
-                          <Text style={styles.searchDistText}>{p.distanceKm.toFixed(1)} km</Text>
-                        )}
-                      </TouchableOpacity>
-                    ))}
+                            <Ionicons name="navigate" size={13} color="#FFFFFF" />
+                            <Text style={styles.inlineRouteBtnText}>路線</Text>
+                          </TouchableOpacity>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                 ) : searchQuery.trim().length > 0 && !searching ? (
                   <View style={styles.mascotEmptyBox}>
@@ -1312,8 +1626,24 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                       鍋巴找不到這個地點
                     </Text>
                     <Text style={styles.mascotEmptyDesc} maxFontSizeMultiplier={1.2}>
-                      試試輸入完整台灣路名、商圈名稱，或直接回到地圖點擊位置設定。
+                      試試輸入完整台灣路名、商圈名稱，或直接新增缺少的店家資訊。
                     </Text>
+                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                      <TouchableOpacity style={styles.optChip} onPress={handleSearchSubmit}>
+                        <Text style={styles.optChipText}>重試搜尋</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.optChip, { backgroundColor: '#FCE7F3' }]}
+                        onPress={() => {
+                          setIsSearchOpen(false);
+                          handleOpenFeedbackModal(null);
+                        }}
+                      >
+                        <Text style={[styles.optChipText, { color: '#9D174D' }]}>
+                          + 回報缺少地點
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                 ) : (
                   <>
@@ -1433,15 +1763,29 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   <View style={{ gap: 10 }}>
                     <View style={styles.routeHeader}>
                       <View style={{ flex: 1 }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <View style={styles.placeCatBadge}>
                             <Text style={styles.placeCatBadgeText}>
-                              {nav.inspectedPlace.category || '台灣地標'}
+                              {nav.inspectedPlace.brand || nav.inspectedPlace.category || '台灣地標'}
                             </Text>
                           </View>
+                          {nav.inspectedPlace.verificationStatus === 'verified' && (
+                            <View style={styles.verifiedMicroBadge}>
+                              <Ionicons name="checkmark-circle" size={11} color="#059669" />
+                              <Text style={styles.verifiedMicroText}>已核實地點</Text>
+                            </View>
+                          )}
+                          {nav.inspectedPlace.businessStatus === 'closed_permanently' && (
+                            <View style={styles.closedMicroBadge}>
+                              <Text style={styles.closedMicroText}>已結束營業</Text>
+                            </View>
+                          )}
                           {typeof nav.inspectedPlace.distanceKm === 'number' && (
                             <Text style={styles.placeDistLabel}>
-                              距離 {nav.inspectedPlace.distanceKm.toFixed(1)} 公里
+                              直線 {nav.inspectedPlace.distanceKm.toFixed(1)} km
+                              {typeof nav.inspectedPlace.estimatedDriveDistanceKm === 'number'
+                                ? ` • 行車約 ${nav.inspectedPlace.estimatedDriveDistanceKm.toFixed(1)} km`
+                                : ''}
                             </Text>
                           )}
                         </View>
@@ -1466,6 +1810,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                       <View style={{ flexDirection: 'row', gap: 6 }}>
                         <TouchableOpacity
                           style={styles.closeSheetBtn}
+                          onPress={() => handleSharePlace(nav.inspectedPlace!)}
+                        >
+                          <Ionicons name="share-outline" size={17} color="#6B7280" />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.closeSheetBtn}
                           onPress={() => nav.handleToggleFavorite(nav.inspectedPlace!)}
                         >
                           <Ionicons
@@ -1485,6 +1835,53 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
                     {!sheetCollapsed && (
                       <>
+                        {/* 營業資訊與電話（有可信資料時顯示，缺少資料時絕不顯示虛構內容） */}
+                        {(nav.inspectedPlace.openingHours || nav.inspectedPlace.phone) && (
+                          <View style={{ gap: 4 }}>
+                            {nav.inspectedPlace.openingHours && (
+                              <Text style={styles.metaMicroText}>
+                                🕒 營業時間：{nav.inspectedPlace.openingHours}
+                              </Text>
+                            )}
+                            {nav.inspectedPlace.phone && (
+                              <TouchableOpacity
+                                onPress={() =>
+                                  Linking.openURL(`tel:${nav.inspectedPlace?.phone}`).catch(() => {})
+                                }
+                              >
+                                <Text style={[styles.metaMicroText, { color: '#2563EB' }]}>
+                                  📞 電話：{nav.inspectedPlace.phone}（點擊撥打）
+                                </Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        )}
+
+                        {/* 服務項目膠囊 */}
+                        {Array.isArray(nav.inspectedPlace.services) &&
+                          nav.inspectedPlace.services.length > 0 && (
+                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5 }}>
+                              {nav.inspectedPlace.services.slice(0, 5).map((svc, idx) => (
+                                <View key={idx} style={styles.serviceMicroPill}>
+                                  <Text style={styles.serviceMicroText}>{svc}</Text>
+                                </View>
+                              ))}
+                            </View>
+                          )}
+
+                        {/* 歷史搬遷或改名核實紀錄（如味朋餐廳） */}
+                        {Array.isArray(nav.inspectedPlace.history) &&
+                          nav.inspectedPlace.history.length > 0 &&
+                          nav.inspectedPlace.history[0]?.old_address && (
+                            <View style={styles.warningStrip}>
+                              <Ionicons name="checkmark-done-circle" size={15} color="#065F46" />
+                              <Text style={[styles.warningStripText, { color: '#065F46' }]}>
+                                搬遷核實紀錄：原「{nav.inspectedPlace.history[0].old_name || '舊址'}」（
+                                {nav.inspectedPlace.history[0].old_address}）已核實搬遷至本新址。
+                              </Text>
+                            </View>
+                          )}
+
                         <View style={styles.optionRow}>
                           <TouchableOpacity
                             style={styles.optChip}
@@ -1502,9 +1899,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                           >
                             <Text style={styles.optChipText}>設為公司</Text>
                           </TouchableOpacity>
-                          <Text style={styles.coordMicroText}>
-                            {nav.inspectedPlace.lat.toFixed(4)}, {nav.inspectedPlace.lon.toFixed(4)}
-                          </Text>
+                          <TouchableOpacity
+                            style={[styles.optChip, { backgroundColor: '#FEF3C7' }]}
+                            onPress={() => handleOpenFeedbackModal(nav.inspectedPlace)}
+                          >
+                            <Text style={[styles.optChipText, { color: '#92400E' }]}>
+                              回報地點錯誤
+                            </Text>
+                          </TouchableOpacity>
                         </View>
 
                         <TouchableOpacity
@@ -2067,6 +2469,116 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </LiquidGlassSurface>
         </View>
       )}
+
+      {/* ==================== 回報地點錯誤 Modal（Section 九：支援搬遷、地址錯誤、停業、名稱錯誤、重複、缺少地點） ==================== */}
+      <Modal
+        visible={feedbackModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setFeedbackModalVisible(false)}
+      >
+        <View style={styles.feedbackModalBackdrop}>
+          <LiquidGlassSurface
+            variant={isNight ? 'dark' : 'light'}
+            borderRadius={26}
+            style={{ width: '92%', maxWidth: 420 }}
+            contentStyle={{ padding: 20, gap: 12 }}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={[styles.settingsTitle, isNight && { color: '#FFFFFF' }]}>
+                回報地點錯誤或商家搬遷
+              </Text>
+              <TouchableOpacity onPress={() => setFeedbackModalVisible(false)}>
+                <Ionicons name="close-circle" size={24} color="#9CA3AF" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ fontSize: 12, color: '#6B7280' }}>
+              提交後將送入核實佇列，經查證無誤後會立即更新正式 POI 並攔截舊址。
+            </Text>
+
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+              {[
+                { key: 'relocated', label: '店家搬遷' },
+                { key: 'address_wrong', label: '地址錯誤' },
+                { key: 'name_wrong', label: '名稱錯誤' },
+                { key: 'closed', label: '店家停業' },
+                { key: 'duplicate', label: '重複地點' },
+                { key: 'missing_place', label: '缺少地點' },
+                { key: 'other', label: '其他問題' },
+              ].map((it) => {
+                const active = feedbackIssueType === it.key;
+                return (
+                  <TouchableOpacity
+                    key={it.key}
+                    style={[styles.optChip, active && { backgroundColor: '#DB2777' }]}
+                    onPress={() => setFeedbackIssueType(it.key as any)}
+                  >
+                    <Text style={[styles.optChipText, active && { color: '#FFFFFF' }]}>
+                      {it.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <TextInput
+              style={styles.feedbackInput}
+              placeholder="正確商家名稱（如：味朋餐廳）"
+              placeholderTextColor="#9CA3AF"
+              value={feedbackName}
+              onChangeText={setFeedbackName}
+            />
+            <TextInput
+              style={styles.feedbackInput}
+              placeholder="正確完整地址（如：新北市林口區民族路96號1樓）"
+              placeholderTextColor="#9CA3AF"
+              value={feedbackAddress}
+              onChangeText={setFeedbackAddress}
+            />
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TextInput
+                style={[styles.feedbackInput, { flex: 1 }]}
+                placeholder="電話（選填）"
+                placeholderTextColor="#9CA3AF"
+                value={feedbackPhone}
+                onChangeText={setFeedbackPhone}
+              />
+              <TextInput
+                style={[styles.feedbackInput, { flex: 1 }]}
+                placeholder="營業時間（選填）"
+                placeholderTextColor="#9CA3AF"
+                value={feedbackHours}
+                onChangeText={setFeedbackHours}
+              />
+            </View>
+            <TextInput
+              style={styles.feedbackInput}
+              placeholder="補充說明（如：已由中山路舊址搬遷至此）"
+              placeholderTextColor="#9CA3AF"
+              value={feedbackNote}
+              onChangeText={setFeedbackNote}
+            />
+
+            <TouchableOpacity
+              activeOpacity={0.9}
+              disabled={feedbackSubmitting}
+              onPress={handleSubmitFeedback}
+            >
+              <LinearGradient colors={['#F472B6', '#DB2777']} style={styles.primaryGradBtn}>
+                {feedbackSubmitting ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <>
+                    <Ionicons name="paper-plane" size={15} color="#FFFFFF" />
+                    <Text style={styles.primaryBtnText}>送出修正回報（待核實）</Text>
+                  </>
+                )}
+              </LinearGradient>
+            </TouchableOpacity>
+          </LiquidGlassSurface>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -2795,4 +3307,89 @@ const styles = StyleSheet.create({
   maneuverMeta: { fontSize: 11, color: '#6B7280', marginTop: 2 },
   idleTitle: { fontSize: 16, fontWeight: '800', color: '#111827', letterSpacing: -0.2 },
   idleDesc: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  verifiedMicroBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: '#D1FAE5',
+  },
+  verifiedMicroText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#065F46',
+  },
+  closedMicroBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: '#FEE2E2',
+  },
+  closedMicroText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#B91C1C',
+  },
+  brandTagText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#9D174D',
+    backgroundColor: '#FCE7F3',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 5,
+    overflow: 'hidden',
+  },
+  metaMicroText: {
+    fontSize: 11,
+    color: '#4B5563',
+    fontWeight: '500',
+  },
+  relocMicroText: {
+    fontSize: 11,
+    color: '#059669',
+    fontWeight: '700',
+    marginTop: 1,
+  },
+  inlineRouteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 14,
+    backgroundColor: '#EC4899',
+  },
+  inlineRouteBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  serviceMicroPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    backgroundColor: 'rgba(236, 72, 153, 0.1)',
+  },
+  serviceMicroText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#831843',
+  },
+  feedbackModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  feedbackInput: {
+    height: 42,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    fontSize: 13,
+    color: '#111827',
+  },
 });

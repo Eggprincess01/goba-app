@@ -328,6 +328,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         const res = await fetchValhallaRoute({
           origin: opts?.originOverride ?? effectiveOrigin,
           destination: { lat: target.lat, lon: target.lon },
+          destinationPlaceId: target.placeId || target.id,
           vehicleType: opts?.vehicleTypeOverride ?? vehicleType,
           avoidTolls: opts?.avoidTolls ?? avoidTolls,
           avoidHighways: opts?.avoidHighways ?? avoidHighways,

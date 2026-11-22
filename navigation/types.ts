@@ -3,14 +3,38 @@ export interface Coordinate {
   lon: number;
 }
 
+export interface PlaceHistoryRecord {
+  event?: string;
+  old_name?: string | null;
+  old_address?: string | null;
+  new_name?: string | null;
+  new_address?: string | null;
+  verified_at?: string;
+  note?: string;
+}
+
 export interface SearchPlace {
   id: string;
+  placeId?: string;
   name: string;
+  aliases?: string[];
+  brand?: string | null;
   address: string;
+  city?: string | null;
+  district?: string | null;
   lat: number;
   lon: number;
   category?: string;
+  phone?: string | null;
+  openingHours?: string | null;
+  services?: string[];
+  source?: string;
+  verificationStatus?: 'verified' | 'unverified' | 'conflict_pending' | 'historical_relocated';
+  businessStatus?: 'open' | 'closed_permanently' | 'relocated' | 'unknown';
   distanceKm?: number;
+  straightDistanceKm?: number;
+  estimatedDriveDistanceKm?: number;
+  history?: PlaceHistoryRecord[];
 }
 
 export type VehicleClassId =
