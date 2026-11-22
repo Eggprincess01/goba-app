@@ -24,6 +24,10 @@ export interface SearchPlace {
   district?: string | null;
   lat: number;
   lon: number;
+  navLat?: number;
+  navLon?: number;
+  fuzzyMatch?: boolean;
+  fuzzySimilarity?: number;
   category?: string;
   phone?: string | null;
   openingHours?: string | null;

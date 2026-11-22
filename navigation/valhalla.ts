@@ -58,6 +58,10 @@ export function mapRawPlaceToSearchPlace(p: any): SearchPlace {
     district: p.district ? String(p.district) : null,
     lat: Number(p.lat),
     lon: Number(p.lon),
+    navLat: typeof p.nav_lat === 'number' ? Number(p.nav_lat) : Number(p.lat),
+    navLon: typeof p.nav_lon === 'number' ? Number(p.nav_lon) : Number(p.lon),
+    fuzzyMatch: Boolean(p.fuzzy_match),
+    fuzzySimilarity: typeof p.fuzzy_similarity === 'number' ? Number(p.fuzzy_similarity) : undefined,
     category: p.category ? String(p.category) : undefined,
     phone: p.phone ? String(p.phone) : null,
     openingHours: p.opening_hours ? String(p.opening_hours) : null,
@@ -243,10 +247,11 @@ export async function submitPlaceErrorFeedback(params: {
     opening_hours?: string;
     lat?: number;
     lon?: number;
+    manual_pin_confirmed?: boolean;
     note?: string;
   };
   originalSnapshot?: any;
-}): Promise<{ feedback_id: number; message: string }> {
+}): Promise<{ feedback_id: number; message: string; coordinate_warning?: string | null }> {
   const res = await fetchWithTimeout(
     `${API_BASE}/api/maps/feedback`,
     {
@@ -268,7 +273,36 @@ export async function submitPlaceErrorFeedback(params: {
   return {
     feedback_id: Number(json.feedback_id || 0),
     message: String(json.message || '感謝您的回報，已送交審核佇列！'),
+    coordinate_warning: json.coordinate_warning ? String(json.coordinate_warning) : null,
   };
+}
+
+export interface AddressGeocodeCandidate {
+  address: string;
+  lat: number;
+  lon: number;
+  score: number;
+  addr_type?: string;
+}
+
+/**
+ * 台灣門牌地址地理編碼（GET /api/maps/geocode-address），供新增／修改地點前預覽座標，絕不回傳預設假座標
+ */
+export async function geocodeTaiwanAddress(address: string): Promise<AddressGeocodeCandidate[]> {
+  const q = address.trim();
+  if (q.length < 4) return [];
+  try {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/api/maps/geocode-address?address=${encodeURIComponent(q)}`,
+      {},
+      7500
+    );
+    if (!res.ok) return [];
+    const json = await res.json();
+    return Array.isArray(json?.candidates) ? json.candidates : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function fetchAdminFeedbackQueue(): Promise<any[]> {

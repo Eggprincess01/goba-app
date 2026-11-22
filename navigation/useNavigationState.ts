@@ -369,7 +369,10 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
             opts?.originHeadingDeg !== undefined
               ? opts.originHeadingDeg
               : activeGps?.rawHeadingDeg ?? activeGps?.headingDeg ?? null,
-          destination: { lat: target.lat, lon: target.lon },
+          destination: {
+            lat: target.navLat ?? target.lat,
+            lon: target.navLon ?? target.lon,
+          },
           destinationPlaceId: target.placeId || target.id,
           vehicleType: opts?.vehicleTypeOverride ?? vehicleType,
           avoidTolls: opts?.avoidTolls ?? avoidTolls,

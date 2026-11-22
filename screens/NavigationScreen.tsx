@@ -40,11 +40,14 @@ import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngin
 import { Coordinate, HdRoadsPayload, SearchPlace, TrafficSignalNode } from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
+  type AddressGeocodeCandidate,
   fetchAdminFeedbackQueue,
   fetchHdRoadsNear,
+  fetchPlaceDetailById,
   fetchTrafficSignalsNear,
   formatDurationZh,
   formatEtaTime,
+  geocodeTaiwanAddress,
   getManeuverIconName,
   reverseGeocodeLocation,
   reviewAdminFeedback,
@@ -115,6 +118,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   // Section 5：預留未來合法即時路況圖層槽位（無合法路況來源時嚴格維持 null，絕不將道路邊界塗綠假裝順暢）
   const [liveTrafficGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
   const [feedbackModalVisible, setFeedbackModalVisible] = useState(false);
+  const [feedbackTargetPlace, setFeedbackTargetPlace] = useState<SearchPlace | null>(null);
   const [feedbackIssueType, setFeedbackIssueType] = useState<
     'address_wrong' | 'relocated' | 'closed' | 'name_wrong' | 'duplicate' | 'missing_place' | 'other'
   >('relocated');
@@ -123,11 +127,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [feedbackPhone, setFeedbackPhone] = useState('');
   const [feedbackHours, setFeedbackHours] = useState('');
   const [feedbackNote, setFeedbackNote] = useState('');
+  const [feedbackLat, setFeedbackLat] = useState<number | null>(null);
+  const [feedbackLon, setFeedbackLon] = useState<number | null>(null);
+  const [feedbackGeoCandidates, setFeedbackGeoCandidates] = useState<AddressGeocodeCandidate[]>([]);
+  const [feedbackGeocoding, setFeedbackGeocoding] = useState(false);
+  const [feedbackManualPin, setFeedbackManualPin] = useState(false);
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [overlappingCandidates, setOverlappingCandidates] = useState<SearchPlace[]>([]);
   const [is3D, setIs3D] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(14.5);
 
   const lastCameraPushRef = useRef(0);
+  const lastMarkerTapTsRef = useRef(0);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currentMapStyle = MAP_STYLE_OPTIONS[styleIdx] || MAP_STYLE_OPTIONS[0];
@@ -484,10 +495,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     [bindingAnchorSlot, nav]
   );
 
-  // Browse 狀態下點擊地圖或 POI：先展開「地點詳細資訊卡」，不強迫直接跳路線
+  // Browse 狀態下點擊地圖或 POI：先展開「地點詳細資訊卡」，並自動清除過期搜尋錯誤訊息
   const handleInspectPlaceOnMap = useCallback(
     (place: SearchPlace) => {
       Keyboard.dismiss();
+      nav.setErrorMessage(null);
       const withDist: SearchPlace = {
         ...place,
         distanceKm:
@@ -505,22 +517,62 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       nav.setFollowMode('free');
       cameraRef.current?.easeTo({
         center: [place.lon, place.lat],
-        zoom: Math.max(zoomLevel, 15.8),
-        duration: 450,
+        zoom: Math.max(zoomLevel, 16.0),
+        duration: 420,
       });
     },
     [nav, zoomLevel]
   );
 
-  // 點擊或長按地圖任意處：反查台灣真實地址並顯示地點詳細資訊卡（Priority 2.6）
+  // Section 四：地標 Marker 點擊專用處理器
+  // 1. 立即記錄 lastMarkerTapTsRef 阻擋底層 <Map onPress> 事件冒泡覆蓋選取結果
+  // 2. 若 35m 內有多個重疊地標，提供候選清單供使用者確認
+  // 3. 若有穩定 placeId，同步向後端確認最新核實資料，確保卡片與座標完全一致
+  const handleMarkerSelectPlace = useCallback(
+    async (pin: SearchPlace) => {
+      lastMarkerTapTsRef.current = Date.now();
+      const overlapping = nearbyPins.filter(
+        (other) => haversineKm(pin.lat, pin.lon, other.lat, other.lon) <= 0.035
+      );
+      if (overlapping.length > 1) {
+        setOverlappingCandidates(overlapping);
+      } else {
+        setOverlappingCandidates([]);
+      }
+      handleInspectPlaceOnMap(pin);
+      if (pin.placeId && !pin.placeId.startsWith('pin-')) {
+        const verified = await fetchPlaceDetailById(pin.placeId, nav.effectiveOrigin);
+        if (verified) {
+          nav.setInspectedPlace(verified);
+        }
+      }
+    },
+    [nearbyPins, handleInspectPlaceOnMap, nav]
+  );
+
+  // 點擊或長按地圖任意處：反查台灣真實地址並顯示地點詳細資訊卡（絕不覆蓋剛點擊的 Marker！）
   const handleMapTapInspect = useCallback(
     async (event: any) => {
       if (uiState !== 'browse' || showSettingsPanel) return;
+      // 阻擋 iOS MapLibre 點擊 Marker 後同步冒泡觸發的 Map onPress（修復點擊 7-11 卻跳出底層社區大樓的問題）
+      if (Date.now() - lastMarkerTapTsRef.current < 480) return;
       const lngLat = event?.nativeEvent?.lngLat;
       if (!Array.isArray(lngLat) || lngLat.length < 2) return;
       Keyboard.dismiss();
       const [lon, lat] = lngLat;
+
+      // 若點擊位置正好落在已顯示的 POI Marker 22m 內，優先選取可見 POI 而非底圖反查
+      const hitPins = nearbyPins.filter((p) => haversineKm(lat, lon, p.lat, p.lon) <= 0.022);
+      if (hitPins.length > 0) {
+        await handleMarkerSelectPlace(hitPins[0]);
+        return;
+      }
+
+      setOverlappingCandidates([]);
+      const tapTs = Date.now();
       const resolved = await reverseGeocodeLocation(lat, lon);
+      // 反查期間若使用者點擊了 Marker，放棄此次過期反查結果
+      if (lastMarkerTapTsRef.current >= tapTs) return;
       const droppedPlace: SearchPlace = {
         id: `pin-${lat.toFixed(5)}-${lon.toFixed(5)}`,
         name: resolved.name,
@@ -532,7 +584,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       };
       handleInspectPlaceOnMap(droppedPlace);
     },
-    [uiState, showSettingsPanel, nav.effectiveOrigin, handleInspectPlaceOnMap]
+    [
+      uiState,
+      showSettingsPanel,
+      nearbyPins,
+      nav.effectiveOrigin,
+      handleMarkerSelectPlace,
+      handleInspectPlaceOnMap,
+    ]
   );
 
   const handleQuickPoiCategory = useCallback(
@@ -579,52 +638,145 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     await handleQuickPoiCategory(activeCatObj?.label || q, q, center);
   }, [mapMovedCenter, nav.effectiveOrigin, activePoiCat, searchQuery, handleQuickPoiCategory]);
 
+  // Section 六：每次開啟新增／修改地點表單皆完全重置獨立狀態，絕不繼承上一筆商家或目前 GPS 座標！
   const handleOpenFeedbackModal = useCallback((place?: SearchPlace | null) => {
-    const target = place || nav.inspectedPlace || nav.destination;
+    const isAddMissing = place === null;
+    const target = isAddMissing ? null : place || null;
+    setFeedbackTargetPlace(target);
     setFeedbackName(target?.name || '');
     setFeedbackAddress(target?.address || '');
     setFeedbackPhone(target?.phone || '');
     setFeedbackHours(target?.openingHours || '');
     setFeedbackNote('');
     setFeedbackIssueType(target ? 'relocated' : 'missing_place');
+    setFeedbackLat(target ? target.lat : null);
+    setFeedbackLon(target ? target.lon : null);
+    setFeedbackGeoCandidates([]);
+    setFeedbackManualPin(false);
+    setFeedbackGeocoding(false);
     setFeedbackModalVisible(true);
-  }, [nav.inspectedPlace, nav.destination]);
+  }, []);
+
+  const handleGeocodeFeedbackAddress = useCallback(async (addrInput?: string) => {
+    const addr = (addrInput ?? feedbackAddress).trim();
+    if (addr.length < 4) {
+      Alert.alert('請輸入完整地址', '請先輸入包含縣市與路名的台灣完整地址再解析位置。');
+      return null;
+    }
+    setFeedbackGeocoding(true);
+    try {
+      const cands = await geocodeTaiwanAddress(addr);
+      setFeedbackGeoCandidates(cands);
+      if (cands.length > 0) {
+        setFeedbackLat(cands[0].lat);
+        setFeedbackLon(cands[0].lon);
+        setFeedbackManualPin(false);
+        return cands[0];
+      } else {
+        setFeedbackLat(null);
+        setFeedbackLon(null);
+        Alert.alert(
+          '門牌無法自動解析',
+          '找不到此門牌座標，請確認地址是否正確，或直接點擊下方預覽地圖手動標記正確位置。'
+        );
+        return null;
+      }
+    } finally {
+      setFeedbackGeocoding(false);
+    }
+  }, [feedbackAddress]);
 
   const handleSubmitFeedback = useCallback(async () => {
-    const target = nav.inspectedPlace || nav.destination;
+    const trimmedName = feedbackName.trim();
+    const trimmedAddr = feedbackAddress.trim();
+    if (!trimmedName) {
+      Alert.alert('請填寫名稱', '請輸入正確的商家或地點名稱。');
+      return;
+    }
+
     setFeedbackSubmitting(true);
     try {
+      let finalLat = feedbackLat;
+      let finalLon = feedbackLon;
+
+      // 若是新增地點、搬遷或地址錯誤，且尚未手動在地圖確認標記，送出前一律先以填寫的地址進行地理編碼驗證
+      const needsAddrGeocode =
+        feedbackIssueType === 'missing_place' ||
+        feedbackIssueType === 'relocated' ||
+        feedbackIssueType === 'address_wrong';
+
+      if (needsAddrGeocode && !feedbackManualPin && trimmedAddr.length >= 4) {
+        const cands = await geocodeTaiwanAddress(trimmedAddr);
+        if (cands.length > 0) {
+          finalLat = cands[0].lat;
+          finalLon = cands[0].lon;
+          setFeedbackLat(finalLat);
+          setFeedbackLon(finalLon);
+        } else if (feedbackIssueType === 'missing_place') {
+          Alert.alert(
+            '尚未確認座標',
+            '系統無法自動解析您輸入的地址，為避免座標錯誤（絕不使用預設或目前位置代替），請點選下方地圖預覽手動標記正確位置後再送出。'
+          );
+          return;
+        }
+      }
+
+      if (
+        feedbackIssueType === 'missing_place' &&
+        (finalLat === null || finalLon === null)
+      ) {
+        Alert.alert(
+          '請先確認地點位置',
+          '請點擊「解析門牌定位」或在預覽地圖上點擊正確位置後再送出。'
+        );
+        return;
+      }
+
       const res = await submitPlaceErrorFeedback({
-        placeId: target?.placeId || target?.id,
+        placeId: feedbackTargetPlace?.placeId || feedbackTargetPlace?.id || undefined,
         issueType: feedbackIssueType,
         proposedChanges: {
-          name: feedbackName.trim() || undefined,
-          address: feedbackAddress.trim() || undefined,
+          name: trimmedName,
+          address: trimmedAddr || undefined,
           phone: feedbackPhone.trim() || undefined,
           opening_hours: feedbackHours.trim() || undefined,
-          lat: target?.lat ?? nav.effectiveOrigin.lat,
-          lon: target?.lon ?? nav.effectiveOrigin.lon,
+          lat: finalLat ?? undefined,
+          lon: finalLon ?? undefined,
+          manual_pin_confirmed: feedbackManualPin,
           note: feedbackNote.trim() || undefined,
         },
-        originalSnapshot: target || null,
+        originalSnapshot: feedbackTargetPlace || null,
       });
+
       setFeedbackModalVisible(false);
-      Alert.alert('已送出地點修正回報', `${res.message}\n（回報單號 #${res.feedback_id}）`);
+      // 送出後立即徹底清空表單，防止跨地點殘留
+      setFeedbackTargetPlace(null);
+      setFeedbackLat(null);
+      setFeedbackLon(null);
+      setFeedbackGeoCandidates([]);
+      setFeedbackManualPin(false);
+
+      const warnSuffix = res.coordinate_warning ? `\n\n⚠️ ${res.coordinate_warning}` : '';
+      Alert.alert(
+        '已送出地點修正回報',
+        `${res.message}\n（回報單號 #${res.feedback_id}）${warnSuffix}`
+      );
     } catch (err: any) {
       Alert.alert('回報失敗', err?.message || '請稍後再試');
     } finally {
       setFeedbackSubmitting(false);
     }
   }, [
-    nav.inspectedPlace,
-    nav.destination,
-    nav.effectiveOrigin,
+    feedbackTargetPlace,
     feedbackIssueType,
     feedbackName,
     feedbackAddress,
     feedbackPhone,
     feedbackHours,
     feedbackNote,
+    feedbackLat,
+    feedbackLon,
+    feedbackManualPin,
   ]);
 
   const handleSharePlace = useCallback(async (place: SearchPlace) => {
@@ -1139,7 +1291,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               id={`poi-${pin.id}`}
               lngLat={[pin.lon, pin.lat]}
               anchor="bottom"
-              onPress={() => handleInspectPlaceOnMap(pin)}
+              onPress={() => handleMarkerSelectPlace(pin)}
             >
               <View style={styles.poiPinWrap}>
                 <View style={styles.poiPinBubble}>
@@ -2040,6 +2192,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                                   <Text style={styles.verifiedMicroText}>已核實</Text>
                                 </View>
                               )}
+                              {p.fuzzyMatch && !isClosed && (
+                                <View
+                                  style={[
+                                    styles.verifiedMicroBadge,
+                                    { backgroundColor: '#FEF3C7' },
+                                  ]}
+                                >
+                                  <Text style={[styles.verifiedMicroText, { color: '#92400E' }]}>
+                                    模糊建議
+                                  </Text>
+                                </View>
+                              )}
                               {isClosed && (
                                 <View style={styles.closedMicroBadge}>
                                   <Text style={styles.closedMicroText}>已停業</Text>
@@ -2315,6 +2479,38 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
                     {!sheetCollapsed && (
                       <>
+                        {/* Section 四：重疊地標無法明確判定時，顯示候選地點切換清單 */}
+                        {overlappingCandidates.length > 1 && (
+                          <View style={{ gap: 4 }}>
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#6B7280' }}>
+                              此位置附近有多個重疊地標，請確認要查看的地點：
+                            </Text>
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                              {overlappingCandidates.map((cand) => {
+                                const selected = cand.id === nav.inspectedPlace?.id;
+                                return (
+                                  <TouchableOpacity
+                                    key={cand.id}
+                                    style={[
+                                      styles.optChip,
+                                      selected && { backgroundColor: '#DB2777' },
+                                    ]}
+                                    onPress={() => handleInspectPlaceOnMap(cand)}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.optChipText,
+                                        selected && { color: '#FFFFFF' },
+                                      ]}
+                                    >
+                                      {cand.name}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </ScrollView>
+                          </View>
+                        )}
                         {/* 營業資訊與電話（有可信資料時顯示，缺少資料時絕不顯示虛構內容） */}
                         {(nav.inspectedPlace.openingHours || nav.inspectedPlace.phone) && (
                           <View style={{ gap: 4 }}>
@@ -3018,18 +3214,133 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
             <TextInput
               style={styles.feedbackInput}
-              placeholder="正確商家名稱（如：味朋餐廳）"
+              placeholder="正確商家名稱（如：日威車業）"
               placeholderTextColor="#9CA3AF"
               value={feedbackName}
               onChangeText={setFeedbackName}
             />
-            <TextInput
-              style={styles.feedbackInput}
-              placeholder="正確完整地址（如：新北市林口區民族路96號1樓）"
-              placeholderTextColor="#9CA3AF"
-              value={feedbackAddress}
-              onChangeText={setFeedbackAddress}
-            />
+            <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+              <TextInput
+                style={[styles.feedbackInput, { flex: 1 }]}
+                placeholder="正確完整地址（如：桃園市龜山區文化三路462號）"
+                placeholderTextColor="#9CA3AF"
+                value={feedbackAddress}
+                onChangeText={(txt) => {
+                  setFeedbackAddress(txt);
+                  if (!feedbackManualPin) {
+                    setFeedbackLat(null);
+                    setFeedbackLon(null);
+                  }
+                }}
+              />
+              <TouchableOpacity
+                style={[
+                  styles.optChip,
+                  { backgroundColor: '#DB2777', height: 42, justifyContent: 'center' },
+                ]}
+                disabled={feedbackGeocoding}
+                onPress={() => handleGeocodeFeedbackAddress()}
+              >
+                {feedbackGeocoding ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#FFFFFF' }}>
+                    📍 定位
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            {/* Section 六：新增／修改地點前顯示互動式地圖預覽，支援點擊預覽圖手動微調標記，絕不沿用上一個商家座標 */}
+            <View
+              style={{
+                height: 138,
+                borderRadius: 14,
+                overflow: 'hidden',
+                borderWidth: 1,
+                borderColor: feedbackLat !== null ? '#10B981' : '#F59E0B',
+                backgroundColor: '#E5E7EB',
+              }}
+            >
+              <Map
+                style={{ flex: 1 }}
+                mapStyle={effectiveStyleUrl}
+                onPress={(e: any) => {
+                  const ll = e?.nativeEvent?.lngLat;
+                  if (Array.isArray(ll) && ll.length >= 2) {
+                    setFeedbackLon(Number(Number(ll[0]).toFixed(6)));
+                    setFeedbackLat(Number(Number(ll[1]).toFixed(6)));
+                    setFeedbackManualPin(true);
+                  }
+                }}
+              >
+                <Camera
+                  center={[
+                    feedbackLon ?? nav.effectiveOrigin.lon,
+                    feedbackLat ?? nav.effectiveOrigin.lat,
+                  ]}
+                  zoom={feedbackLat !== null ? 16.5 : 13.5}
+                  duration={350}
+                />
+                {feedbackLat !== null && feedbackLon !== null && (
+                  <Marker
+                    id="goba-feedback-preview-pin"
+                    lngLat={[feedbackLon, feedbackLat]}
+                    anchor="bottom"
+                  >
+                    <View style={styles.destMarkerWrap}>
+                      <LinearGradient
+                        colors={['#10B981', '#059669']}
+                        style={styles.destMarkerBadge}
+                      >
+                        <Ionicons name="pin" size={14} color="#FFFFFF" />
+                      </LinearGradient>
+                      <View style={[styles.destMarkerTip, { borderTopColor: '#059669' }]} />
+                    </View>
+                  </Marker>
+                )}
+              </Map>
+              <View
+                style={{
+                  position: 'absolute',
+                  bottom: 6,
+                  left: 8,
+                  right: 8,
+                  backgroundColor: 'rgba(15,23,42,0.78)',
+                  borderRadius: 8,
+                  paddingHorizontal: 8,
+                  paddingVertical: 4,
+                }}
+              >
+                <Text style={{ fontSize: 10, color: '#FFFFFF', fontWeight: '600' }} numberOfLines={1}>
+                  {feedbackLat !== null && feedbackLon !== null
+                    ? `${feedbackManualPin ? '✓ 已手動標記' : '✓ 門牌解析座標'}：${feedbackLat.toFixed(
+                        5
+                      )}, ${feedbackLon.toFixed(5)}（點擊地圖可微調）`
+                    : '⚠️ 請按「📍 定位」解析門牌，或直接點擊此地圖標記正確位置'}
+                </Text>
+              </View>
+            </View>
+
+            {feedbackGeoCandidates.length > 1 && (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                {feedbackGeoCandidates.slice(0, 3).map((gc, idx) => (
+                  <TouchableOpacity
+                    key={idx}
+                    style={styles.optChip}
+                    onPress={() => {
+                      setFeedbackLat(gc.lat);
+                      setFeedbackLon(gc.lon);
+                      setFeedbackManualPin(false);
+                    }}
+                  >
+                    <Text style={styles.optChipText} numberOfLines={1}>
+                      候選 {idx + 1}：{gc.address.slice(0, 16)}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <TextInput
                 style={[styles.feedbackInput, { flex: 1 }]}
