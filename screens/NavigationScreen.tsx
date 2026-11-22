@@ -314,53 +314,89 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     };
   }, [hdDetailActive, hdGridLat, hdGridLon]);
 
-  // 合併視野內紅綠燈與當前規劃路線沿途紅綠燈（導航/路線預覽時標示 isOnRoute 並對下一個即將通過的紅綠燈發光高亮）
+  // 任務三：依畫面狀態與縮放等級進行紅綠燈視覺防碰撞聚類（絕不修改 nav.route.trafficSignals 導航核心資料！）
   const displayedTrafficSignals = useMemo(() => {
     if (!showTrafficSignals) return [];
     const routeSigs = nav.route?.trafficSignals || [];
     const nextSigId = nav.progress?.nextTrafficSignal?.id || null;
     const curShapeIdx = nav.progress?.nearestShapeIndex ?? 0;
 
-    if (uiState === 'navigation' || uiState === 'route_preview') {
-      // 路線預覽與導航時：優先顯示整條路線上的所有紅綠燈 + 車輛周邊視野紅綠燈
-      const merged: Array<
-        TrafficSignalNode & { isOnRoute: boolean; isPassed: boolean; isNextSignal: boolean }
-      > = routeSigs.map((rs) => ({
-        ...rs,
-        isOnRoute: true,
-        isPassed:
-          uiState === 'navigation' &&
-          typeof rs.shapeIndex === 'number' &&
-          rs.shapeIndex <= curShapeIdx,
-        isNextSignal: uiState === 'navigation' && rs.id === nextSigId,
-      }));
-
-      if (zoomLevel >= 13.8) {
-        for (const vs of viewportSignals) {
-          const dup = merged.some(
-            (m) => Math.abs(m.lat - vs.lat) < 0.00025 && Math.abs(m.lon - vs.lon) < 0.00025
-          );
-          if (!dup && merged.length < 48) {
-            merged.push({
-              ...vs,
-              isOnRoute: false,
-              isPassed: false,
-              isNextSignal: false,
-            });
-          }
-        }
-      }
-      return merged;
+    // 1. 正式導航中：僅顯示車頭前方即將經過且與路線相關的 4 個路口紅綠燈（優先聚焦下一個紅綠燈，不遮擋畫面）
+    if (uiState === 'navigation') {
+      return routeSigs
+        .filter((rs) => typeof rs.shapeIndex !== 'number' || rs.shapeIndex > curShapeIdx)
+        .slice(0, 4)
+        .map((rs) => ({
+          ...rs,
+          isOnRoute: true,
+          isPassed: false,
+          isNextSignal: rs.id === nextSigId,
+          isCompact: false,
+        }));
     }
 
-    // 一般瀏覽地圖（Browse）時：縮放 >= 13.2 顯示周邊紅綠燈號誌
-    if (zoomLevel < 13.2) return [];
-    return viewportSignals.slice(0, 42).map((vs) => ({
-      ...vs,
-      isOnRoute: false,
-      isPassed: false,
-      isNextSignal: false,
-    }));
+    // 2. 路線預覽中：使用小型紅綠燈標記 + 依縮放比例動態防碰撞過濾，絕不堆疊遮擋粉色路線與轉向節點
+    if (uiState === 'route_preview') {
+      const minSpacingKm =
+        zoomLevel < 13.2
+          ? 0.65
+          : zoomLevel < 14.5
+          ? 0.36
+          : zoomLevel < 15.8
+          ? 0.16
+          : 0.055;
+      const kept: Array<
+        TrafficSignalNode & {
+          isOnRoute: boolean;
+          isPassed: boolean;
+          isNextSignal: boolean;
+          isCompact: boolean;
+        }
+      > = [];
+      for (const rs of routeSigs) {
+        const collides = kept.some(
+          (k) => haversineKm(k.lat, k.lon, rs.lat, rs.lon) < minSpacingKm
+        );
+        if (!collides) {
+          kept.push({
+            ...rs,
+            isOnRoute: true,
+            isPassed: false,
+            isNextSignal: false,
+            isCompact: zoomLevel < 16.0,
+          });
+        }
+      }
+      return kept;
+    }
+
+    // 3. 一般瀏覽／地點詳情：縮放 >= 14.2 才顯示並套用防碰撞過濾
+    if (zoomLevel < 14.2) return [];
+    const browseMinSpacingKm = zoomLevel < 15.8 ? 0.12 : 0.045;
+    const keptBrowse: Array<
+      TrafficSignalNode & {
+        isOnRoute: boolean;
+        isPassed: boolean;
+        isNextSignal: boolean;
+        isCompact: boolean;
+      }
+    > = [];
+    for (const vs of viewportSignals) {
+      if (keptBrowse.length >= 28) break;
+      const collides = keptBrowse.some(
+        (k) => haversineKm(k.lat, k.lon, vs.lat, vs.lon) < browseMinSpacingKm
+      );
+      if (!collides) {
+        keptBrowse.push({
+          ...vs,
+          isOnRoute: false,
+          isPassed: false,
+          isNextSignal: false,
+          isCompact: zoomLevel < 15.8,
+        });
+      }
+    }
+    return keptBrowse;
   }, [
     showTrafficSignals,
     nav.route?.trafficSignals,
@@ -463,10 +499,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     }
   }, [searchQuery, nav, mapMovedCenter]);
 
-  // 從搜尋頁或住家/公司選取地點：若處於設定住家/公司則綁定，否則直接進入 Route Preview
+  // 任務一（P0）：搜尋流程修正 — 搜尋地點 -> 顯示地點資訊 (PLACE_DETAILS) -> 點擊「路線規劃」才進入 ROUTE_PREVIEW！
+  // 絕不因選取搜尋結果而自動呼叫路線引擎或直接跳進路線預覽。
   const handleSelectPlaceFromSearch = useCallback(
     async (place: SearchPlace) => {
       Keyboard.dismiss();
+      nav.setErrorMessage(null);
       if (bindingAnchorSlot) {
         await nav.handleSetCommuteAnchor(bindingAnchorSlot, place);
         setBindingAnchorSlot(null);
@@ -477,20 +515,53 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         setSheetCollapsed(false);
         cameraRef.current?.easeTo({
           center: [place.lon, place.lat],
-          zoom: 16,
+          zoom: 16.5,
           duration: 500,
         });
         return;
+      }
+
+      // 切換至 PLACE_DETAILS 狀態（清除可能殘留的舊路線，保留地點卡片與地圖標記）
+      if (nav.route) {
+        nav.clearRoute();
       }
       setIsSearchOpen(false);
       setSearchResults([]);
       setNearbyPins([]);
       setActivePoiCat(null);
+      setOverlappingCandidates([]);
       setSearchQuery(place.name);
       setShowManeuvers(false);
       setSheetCollapsed(false);
-      nav.setInspectedPlace(place);
-      await nav.calculateRoute(place);
+      nav.setFollowMode('free');
+
+      const withDist: SearchPlace = {
+        ...place,
+        distanceKm:
+          typeof place.distanceKm === 'number'
+            ? place.distanceKm
+            : haversineKm(
+                nav.effectiveOrigin.lat,
+                nav.effectiveOrigin.lon,
+                place.lat,
+                place.lon
+              ),
+      };
+      nav.setInspectedPlace(withDist);
+      cameraRef.current?.easeTo({
+        center: [place.lon, place.lat],
+        zoom: 16.5,
+        pitch: 0,
+        duration: 500,
+      });
+
+      // 背景同步最新核實地點詳情（確保名稱、地址、座標與資料庫一致），不觸發路線規劃
+      if (place.placeId && !place.placeId.startsWith('pin-')) {
+        const verified = await fetchPlaceDetailById(place.placeId, nav.effectiveOrigin);
+        if (verified) {
+          nav.setInspectedPlace(verified);
+        }
+      }
     },
     [bindingAnchorSlot, nav]
   );
@@ -1054,6 +1125,19 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             />
           </GeoJSONSource>
         )}
+        {hdDetailActive && hdRoads?.layers?.bus_lanes && (
+          <GeoJSONSource id="goba-hd-buslanes-src" data={hdRoads.layers.bus_lanes}>
+            <Layer
+              id="goba-hd-buslanes-fill"
+              type="fill"
+              minzoom={16.5}
+              paint={{
+                'fill-color': isNight ? 'rgba(59, 130, 246, 0.28)' : 'rgba(59, 130, 246, 0.22)',
+                'fill-outline-color': 'rgba(37, 99, 235, 0.45)',
+              }}
+            />
+          </GeoJSONSource>
+        )}
         {hdDetailActive && hdRoads?.layers?.edge_lines && (
           <GeoJSONSource id="goba-hd-edges-src" data={hdRoads.layers.edge_lines}>
             <Layer
@@ -1087,10 +1171,17 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             <Layer
               id="goba-hd-lane-dashes"
               type="line"
-              minzoom={16.8}
+              minzoom={16.5}
               layout={{ 'line-cap': 'butt' }}
               paint={{
-                'line-color': isNight ? 'rgba(226,232,240,0.68)' : 'rgba(255,255,255,0.88)',
+                'line-color': isNight ? '#E2E8F0' : '#FFFFFF',
+                'line-opacity': [
+                  'match',
+                  ['get', 'accuracy'],
+                  'approximate_visual_only',
+                  isNight ? 0.48 : 0.68,
+                  isNight ? 0.72 : 0.9,
+                ],
                 'line-width': 1.4,
                 'line-dasharray': [5, 5],
               }}
@@ -1215,7 +1306,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </GeoJSONSource>
         )}
 
-        {/* 紅綠燈號誌路口標記（清楚顯示紅黃綠三色號誌箱，沿途紅綠燈與下一個號誌路口高亮） */}
+        {/* 紅綠燈號誌路口標記（路線預覽自動切換小型防碰撞標記不遮擋路線，導航中僅顯示前方相關號誌並高亮下一個） */}
         {displayedTrafficSignals.map((sig) => (
           <Marker
             key={sig.id}
@@ -1225,15 +1316,30 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           >
             <View
               style={[
-                styles.trafficSignalHousing,
-                sig.isOnRoute && styles.trafficSignalHousingOnRoute,
+                sig.isCompact ? styles.trafficSignalHousingCompact : styles.trafficSignalHousing,
+                sig.isOnRoute && !sig.isCompact && styles.trafficSignalHousingOnRoute,
                 sig.isNextSignal && styles.trafficSignalHousingNext,
                 sig.isPassed && { opacity: 0.42 },
               ]}
             >
-              <View style={[styles.trafficSignalDot, { backgroundColor: '#EF4444' }]} />
-              <View style={[styles.trafficSignalDot, { backgroundColor: '#F59E0B' }]} />
-              <View style={[styles.trafficSignalDot, { backgroundColor: '#10B981' }]} />
+              <View
+                style={[
+                  sig.isCompact ? styles.trafficSignalDotCompact : styles.trafficSignalDot,
+                  { backgroundColor: '#EF4444' },
+                ]}
+              />
+              <View
+                style={[
+                  sig.isCompact ? styles.trafficSignalDotCompact : styles.trafficSignalDot,
+                  { backgroundColor: '#F59E0B' },
+                ]}
+              />
+              <View
+                style={[
+                  sig.isCompact ? styles.trafficSignalDotCompact : styles.trafficSignalDot,
+                  { backgroundColor: '#10B981' },
+                ]}
+              />
             </View>
           </Marker>
         ))}
@@ -2249,13 +2355,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                             )}
                           </View>
 
-                          <TouchableOpacity
-                            style={styles.inlineRouteBtn}
-                            onPress={() => handleSelectPlaceFromSearch(p)}
-                          >
-                            <Ionicons name="navigate" size={13} color="#FFFFFF" />
-                            <Text style={styles.inlineRouteBtnText}>路線</Text>
-                          </TouchableOpacity>
+                          <View style={{ paddingLeft: 4 }}>
+                            <Ionicons name="chevron-forward" size={16} color="#9CA3AF" />
+                          </View>
                         </TouchableOpacity>
                       );
                     })}
@@ -3195,7 +3297,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 { key: 'closed', label: '店家停業' },
                 { key: 'duplicate', label: '重複地點' },
                 { key: 'missing_place', label: '缺少地點' },
-                { key: 'other', label: '其他問題' },
+                { key: 'other', label: '缺少車道／標線或其他' },
               ].map((it) => {
                 const active = feedbackIssueType === it.key;
                 return (
@@ -4233,6 +4335,23 @@ const styles = StyleSheet.create({
     width: 5,
     height: 5,
     borderRadius: 2.5,
+  },
+  trafficSignalHousingCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 1.5,
+    paddingHorizontal: 3.5,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: 'rgba(15, 23, 42, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.85)',
+  },
+  trafficSignalDotCompact: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
   },
   hudTrafficLightPill: {
     flexDirection: 'row',

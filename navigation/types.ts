@@ -79,6 +79,7 @@ export interface HdRoadsPayload {
     bridge_surfaces?: GeoJSON.FeatureCollection;
     bridge_asphalt?: GeoJSON.FeatureCollection;
     medians?: GeoJSON.FeatureCollection;
+    bus_lanes?: GeoJSON.FeatureCollection;
     edge_lines?: GeoJSON.FeatureCollection;
     center_lines?: GeoJSON.FeatureCollection;
     lane_dividers?: GeoJSON.FeatureCollection;
