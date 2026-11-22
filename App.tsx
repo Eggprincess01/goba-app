@@ -90,9 +90,9 @@ import {
 
 import { HomeTab } from './components/HomeTab';
 import { GarageTab } from './components/GarageTab';
-import { MapTab } from './components/MapTab';
 import { ServicesTab } from './components/ServicesTab';
 import { ProfileTab } from './components/ProfileTab';
+import { NavigationScreen } from './screens/NavigationScreen';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -136,7 +136,8 @@ export default function App() {
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const localUpdatedAtRef = useRef<number>(0);
 
-  // 內建 GOBA Maps (MapLibre) + 高公局 1968 即時路況
+  // 內建 GOBA Maps (MapLibre) 底部導覽列顯隱（瀏覽時顯示 5 分頁列，進入搜尋/路線預覽/導航自動全螢幕隱藏）
+  const [mapTabBarVisible, setMapTabBarVisible] = useState(true);
   const mapCameraRef = useRef<CameraRef | null>(null);
   const poiReqIdRef = useRef(0);
   const [mapCategory, setMapCategory] = useState<MapCategory>('gas');
@@ -974,11 +975,23 @@ export default function App() {
       <View style={styles.ambientOrbTopRight} pointerEvents="none" />
       <View style={styles.ambientOrbBottomLeft} pointerEvents="none" />
 
-      <SafeAreaView style={styles.safeArea}>
+      {/* 地圖分頁：直接全螢幕 edge-to-edge 顯示 GOBA Maps，不需另外點擊按鈕 */}
+      {activeTab === 'map' && (
+        <View style={StyleSheet.absoluteFill}>
+          <NavigationScreen
+            initialCenter={{ lat: region.lat, lon: region.lon }}
+            embeddedInTab
+            onTabBarVisibilityChange={setMapTabBarVisible}
+            onClose={() => setActiveTab('home')}
+          />
+        </View>
+      )}
+
+      <SafeAreaView style={styles.safeArea} pointerEvents="box-none">
         <StatusBar style="dark" />
 
-        {/* ==================== 頂部導覽列 ==================== */}
-        {activeTab === 'home' ? (
+        {/* ==================== 頂部導覽列（地圖分頁直接全螢幕顯示 GOBA Maps，不顯示多餘頂部標題） ==================== */}
+        {activeTab === 'map' ? null : activeTab === 'home' ? (
           <View style={styles.homeTopBar}>
             <View style={styles.brandRow}>
               <Image source={require('./assets/icon.png')} style={styles.topMascotLogo} />
@@ -1011,8 +1024,6 @@ export default function App() {
             <Text style={styles.centeredTitle}>
               {activeTab === 'garage'
                 ? '我的車庫'
-                : activeTab === 'map'
-                ? '交通地圖'
                 : activeTab === 'services'
                 ? '服務'
                 : '我的'}
@@ -1021,14 +1032,6 @@ export default function App() {
               <TouchableOpacity style={styles.addCircleBtn} onPress={() => setAddVehicleModalVisible(true)}>
                 <Ionicons name="add" size={22} color="#DB2777" />
               </TouchableOpacity>
-            ) : activeTab === 'map' ? (
-              <TouchableOpacity style={styles.addCircleBtn} onPress={handleUseGpsLocation} disabled={gpsLoading}>
-                {gpsLoading ? (
-                  <ActivityIndicator size="small" color="#DB2777" />
-                ) : (
-                  <Ionicons name="locate" size={20} color="#DB2777" />
-                )}
-              </TouchableOpacity>
             ) : (
               <View style={{ width: 38 }} />
             )}
@@ -1036,30 +1039,7 @@ export default function App() {
         )}
 
         {/* ==================== 5 大模組分頁 ==================== */}
-        {activeTab === 'map' ? (
-          <MapTab
-            cameraRef={mapCameraRef}
-            region={region}
-            mapCategory={mapCategory}
-            onChangeCategory={setMapCategory}
-            gasBrandFilter={gasBrandFilter}
-            onChangeGasBrand={setGasBrandFilter}
-            mapPois={mapPois}
-            mapLoading={mapLoading}
-            mapError={mapError}
-            selectedPoi={selectedPoi}
-            onSelectPoi={setSelectedPoi}
-            onFocusPoi={focusPoiOnMap}
-            onRetryPois={() => loadMapPois(region.lat, region.lon, mapCategory)}
-            trafficData={trafficData}
-            trafficLoading={trafficLoading}
-            trafficError={trafficError}
-            trafficSubTab={trafficSubTab}
-            onChangeTrafficSubTab={setTrafficSubTab}
-            onRefreshTraffic={loadLiveTraffic}
-            onOpenRegionModal={() => setRegionModalVisible(true)}
-          />
-        ) : (
+        {activeTab === 'map' ? null : (
           <ScrollView
             style={styles.scrollView}
             contentContainerStyle={styles.scrollContent}
@@ -1184,6 +1164,7 @@ export default function App() {
         )}
 
         {/* ==================== 浮空 Apple 原生 Liquid Glass 底部導覽列 ==================== */}
+        {(activeTab !== 'map' || mapTabBarVisible) && (
         <View style={styles.liquidTabOuter}>
           <LiquidGlassSurface
             variant="sakura"
@@ -1219,6 +1200,7 @@ export default function App() {
             })}
           </LiquidGlassSurface>
         </View>
+        )}
 
         {/* ==================== 地區與 GPS 定位 Modal ==================== */}
         <Modal visible={regionModalVisible} transparent animationType="slide">

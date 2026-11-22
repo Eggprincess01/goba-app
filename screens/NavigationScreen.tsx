@@ -100,12 +100,16 @@ type MapUiState = 'browse' | 'search' | 'route_preview' | 'navigation';
 export interface NavigationScreenProps {
   initialCenter: Coordinate;
   initialDestination?: SearchPlace | null;
+  embeddedInTab?: boolean;
+  onTabBarVisibilityChange?: (visible: boolean) => void;
   onClose: () => void;
 }
 
 export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   initialCenter,
   initialDestination = null,
+  embeddedInTab = false,
+  onTabBarVisibilityChange,
   onClose,
 }) => {
   const mapRef = useRef<MapRef>(null);
@@ -209,6 +213,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     }
     return 'browse';
   }, [isActiveNav, nav.phase, isSearchOpen, nav.route]);
+
+  useEffect(() => {
+    if (embeddedInTab && onTabBarVisibilityChange) {
+      onTabBarVisibilityChange(uiState === 'browse');
+    }
+  }, [embeddedInTab, onTabBarVisibilityChange, uiState]);
 
   const effectiveStyleUrl = useMemo(
     () => getEffectiveMapStyleUrl(styleIdx, uiState === 'navigation', useFallbackStyle),
@@ -2967,7 +2977,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
       {/* ==================== 底部可收合動態資訊卡（Priority 2.5：依 Browse / Route Preview / Navigation 切換） ==================== */}
       {uiState !== 'search' && (
-        <View style={styles.bottomSheetOuter}>
+        <View
+          style={[
+            styles.bottomSheetOuter,
+            embeddedInTab && uiState === 'browse' && { bottom: 92 },
+          ]}
+        >
           <LiquidGlassSurface
             variant={isNight ? 'dark' : 'light'}
             borderRadius={28}
