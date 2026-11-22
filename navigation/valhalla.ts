@@ -1,5 +1,12 @@
 import { API_BASE, fetchWithTimeout } from '../services/api';
-import { Coordinate, NavigationRoute, RouteManeuver, SearchPlace, VehicleClassId } from './types';
+import {
+  Coordinate,
+  NavigationRoute,
+  RouteManeuver,
+  SearchPlace,
+  TrafficSignalNode,
+  VehicleClassId,
+} from './types';
 
 /**
  * 解碼 Valhalla 6 位精度 Polyline，回傳 GeoJSON / MapLibre 標準 [lon, lat][]
@@ -388,6 +395,17 @@ export async function fetchValhallaRoute(params: {
         verifiedLegalUTurn: Boolean(
           m.verified_legal_uturn || Number(m.type) === 12 || Number(m.type) === 13
         ),
+        hasTrafficSignal: Boolean(m.has_traffic_signal),
+      }))
+    : [];
+
+  const trafficSignals: TrafficSignalNode[] = Array.isArray(json.traffic_signals)
+    ? json.traffic_signals.map((s: any, idx: number) => ({
+        id: String(s.id || `route-sig-${idx}`),
+        lat: Number(s.lat),
+        lon: Number(s.lon),
+        shapeIndex: typeof s.shape_index === 'number' ? Number(s.shape_index) : undefined,
+        streetName: s.street_name ? String(s.street_name) : undefined,
       }))
     : [];
 
@@ -411,8 +429,41 @@ export async function fetchValhallaRoute(params: {
           ],
     coordinates: Array.isArray(json.coordinates) ? json.coordinates : [],
     maneuvers,
+    trafficSignals,
+    trafficSignalCount:
+      typeof json.traffic_signal_count === 'number'
+        ? Number(json.traffic_signal_count)
+        : trafficSignals.length,
     fetchedAt: Date.now(),
   };
+}
+
+/**
+ * 查詢地圖中心周邊的 OSM / Valhalla 紅綠燈號誌位置（GET /api/maps/traffic-signals）
+ */
+export async function fetchTrafficSignalsNear(
+  center: Coordinate,
+  radiusMeters = 850
+): Promise<TrafficSignalNode[]> {
+  try {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/api/maps/traffic-signals?lat=${center.lat.toFixed(4)}&lon=${center.lon.toFixed(
+        4
+      )}&radius_m=${radiusMeters}`,
+      {},
+      7500
+    );
+    if (!res.ok) return [];
+    const json = await res.json();
+    if (!Array.isArray(json?.signals)) return [];
+    return json.signals.map((s: any, idx: number) => ({
+      id: String(s.id || `sig-${idx}`),
+      lat: Number(s.lat),
+      lon: Number(s.lon),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 export function formatDurationZh(seconds: number): string {

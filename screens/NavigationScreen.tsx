@@ -37,10 +37,11 @@ import {
 } from '../navigation/gpsReplayTester';
 import { getEffectiveMapStyleUrl, MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
 import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
-import { Coordinate, SearchPlace } from '../navigation/types';
+import { Coordinate, SearchPlace, TrafficSignalNode } from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
   fetchAdminFeedbackQueue,
+  fetchTrafficSignalsNear,
   formatDurationZh,
   formatEtaTime,
   getManeuverIconName,
@@ -107,6 +108,8 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [adminQueue, setAdminQueue] = useState<any[]>([]);
   const [replayResults, setReplayResults] = useState<ReplayScenarioResult[]>([]);
+  const [viewportSignals, setViewportSignals] = useState<TrafficSignalNode[]>([]);
+  const [showTrafficSignals, setShowTrafficSignals] = useState(true);
   const [feedbackModalVisible, setFeedbackModalVisible] = useState(false);
   const [feedbackIssueType, setFeedbackIssueType] = useState<
     'address_wrong' | 'relocated' | 'closed' | 'name_wrong' | 'duplicate' | 'missing_place' | 'other'
@@ -253,6 +256,85 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     if (!isActiveNav) return null;
     return nav.progress?.nextManeuver?.coordinate || nav.route?.maneuvers[1]?.coordinate || null;
   }, [isActiveNav, nav.progress?.nextManeuver?.coordinate, nav.route?.maneuvers]);
+
+  // 自動載入目前地圖視野周邊的紅綠燈號誌位置（一般瀏覽/預覽時顯示周邊號誌，路線規劃與導航時突顯沿途紅綠燈）
+  const signalQueryCenter = mapMovedCenter || nav.effectiveOrigin;
+  useEffect(() => {
+    if (!showTrafficSignals) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      fetchTrafficSignalsNear(signalQueryCenter, 850).then((sigs) => {
+        if (active && sigs.length > 0) {
+          setViewportSignals(sigs);
+        }
+      });
+    }, 280);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [
+    showTrafficSignals,
+    Math.round(signalQueryCenter.lat * 200),
+    Math.round(signalQueryCenter.lon * 200),
+  ]);
+
+  // 合併視野內紅綠燈與當前規劃路線沿途紅綠燈（導航/路線預覽時標示 isOnRoute 並對下一個即將通過的紅綠燈發光高亮）
+  const displayedTrafficSignals = useMemo(() => {
+    if (!showTrafficSignals) return [];
+    const routeSigs = nav.route?.trafficSignals || [];
+    const nextSigId = nav.progress?.nextTrafficSignal?.id || null;
+    const curShapeIdx = nav.progress?.nearestShapeIndex ?? 0;
+
+    if (uiState === 'navigation' || uiState === 'route_preview') {
+      // 路線預覽與導航時：優先顯示整條路線上的所有紅綠燈 + 車輛周邊視野紅綠燈
+      const merged: Array<
+        TrafficSignalNode & { isOnRoute: boolean; isPassed: boolean; isNextSignal: boolean }
+      > = routeSigs.map((rs) => ({
+        ...rs,
+        isOnRoute: true,
+        isPassed:
+          uiState === 'navigation' &&
+          typeof rs.shapeIndex === 'number' &&
+          rs.shapeIndex <= curShapeIdx,
+        isNextSignal: uiState === 'navigation' && rs.id === nextSigId,
+      }));
+
+      if (zoomLevel >= 13.8) {
+        for (const vs of viewportSignals) {
+          const dup = merged.some(
+            (m) => Math.abs(m.lat - vs.lat) < 0.00025 && Math.abs(m.lon - vs.lon) < 0.00025
+          );
+          if (!dup && merged.length < 48) {
+            merged.push({
+              ...vs,
+              isOnRoute: false,
+              isPassed: false,
+              isNextSignal: false,
+            });
+          }
+        }
+      }
+      return merged;
+    }
+
+    // 一般瀏覽地圖（Browse）時：縮放 >= 13.2 顯示周邊紅綠燈號誌
+    if (zoomLevel < 13.2) return [];
+    return viewportSignals.slice(0, 42).map((vs) => ({
+      ...vs,
+      isOnRoute: false,
+      isPassed: false,
+      isNextSignal: false,
+    }));
+  }, [
+    showTrafficSignals,
+    nav.route?.trafficSignals,
+    nav.progress?.nextTrafficSignal?.id,
+    nav.progress?.nearestShapeIndex,
+    uiState,
+    zoomLevel,
+    viewportSignals,
+  ]);
 
   // 3D 車輛座艙視角
   useEffect(() => {
@@ -759,6 +841,29 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </GeoJSONSource>
         )}
 
+        {/* 紅綠燈號誌路口標記（清楚顯示紅黃綠三色號誌箱，沿途紅綠燈與下一個號誌路口高亮） */}
+        {displayedTrafficSignals.map((sig) => (
+          <Marker
+            key={sig.id}
+            id={`traffic-signal-${sig.id}`}
+            lngLat={[sig.lon, sig.lat]}
+            anchor="center"
+          >
+            <View
+              style={[
+                styles.trafficSignalHousing,
+                sig.isOnRoute && styles.trafficSignalHousingOnRoute,
+                sig.isNextSignal && styles.trafficSignalHousingNext,
+                sig.isPassed && { opacity: 0.42 },
+              ]}
+            >
+              <View style={[styles.trafficSignalDot, { backgroundColor: '#EF4444' }]} />
+              <View style={[styles.trafficSignalDot, { backgroundColor: '#F59E0B' }]} />
+              <View style={[styles.trafficSignalDot, { backgroundColor: '#10B981' }]} />
+            </View>
+          </Marker>
+        ))}
+
         {/* 導航中下一個轉彎路口高亮點（Priority 1.6） */}
         {nextTurnCoord && (
           <Marker id="goba-next-turn-node" lngLat={nextTurnCoord} anchor="center">
@@ -1020,9 +1125,21 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   />
                 </LinearGradient>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.navHudDistance} maxFontSizeMultiplier={1.2}>
-                    {formatDistanceMetersZh(nav.progress?.distanceToNextTurnMeters ?? 0)}
-                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={styles.navHudDistance} maxFontSizeMultiplier={1.2}>
+                      {formatDistanceMetersZh(nav.progress?.distanceToNextTurnMeters ?? 0)}
+                    </Text>
+                    {nav.progress?.nextManeuver?.hasTrafficSignal && (
+                      <View style={styles.hudTrafficLightPill}>
+                        <View style={styles.hudMiniTrafficLight}>
+                          <View style={[styles.trafficSignalDotMini, { backgroundColor: '#EF4444' }]} />
+                          <View style={[styles.trafficSignalDotMini, { backgroundColor: '#F59E0B' }]} />
+                          <View style={[styles.trafficSignalDotMini, { backgroundColor: '#10B981' }]} />
+                        </View>
+                        <Text style={styles.hudTrafficLightPillText}>紅綠燈路口</Text>
+                      </View>
+                    )}
+                  </View>
                   <Text
                     style={styles.navHudInstruction}
                     numberOfLines={2}
@@ -1087,6 +1204,24 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   />
                   <Text style={styles.hudTagText}>{nav.commandState}</Text>
                 </LiquidGlassSurface>
+                {(nav.progress?.remainingTrafficSignalCount ??
+                  nav.route?.trafficSignalCount ??
+                  0) > 0 && (
+                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
+                    <View style={styles.hudMiniTrafficLight}>
+                      <View style={[styles.trafficSignalDotMini, { backgroundColor: '#EF4444' }]} />
+                      <View style={[styles.trafficSignalDotMini, { backgroundColor: '#F59E0B' }]} />
+                      <View style={[styles.trafficSignalDotMini, { backgroundColor: '#10B981' }]} />
+                    </View>
+                    <Text style={styles.hudTagText}>
+                      {typeof nav.progress?.distanceToNextTrafficSignalMeters === 'number'
+                        ? `下個紅綠燈 ${formatDistanceMetersZh(
+                            nav.progress.distanceToNextTrafficSignalMeters
+                          )} • 剩 ${nav.progress.remainingTrafficSignalCount} 個`
+                        : `沿途 ${nav.route?.trafficSignalCount ?? 0} 個紅綠燈`}
+                    </Text>
+                  </LiquidGlassSurface>
+                )}
                 {nav.route?.headingUnverified && (
                   <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
                     <Ionicons name="warning" size={12} color="#FBBF24" />
@@ -1295,6 +1430,19 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 onPress={() => setStyleIdx((prev) => (prev + 1) % MAP_STYLE_OPTIONS.length)}
               >
                 <Text style={styles.optChipText}>底圖：{currentMapStyle.label}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.optChip, showTrafficSignals && { backgroundColor: '#1F2937' }]}
+                onPress={() => setShowTrafficSignals((prev) => !prev)}
+              >
+                <Text
+                  style={[
+                    styles.optChipText,
+                    showTrafficSignals && { color: '#FFFFFF' },
+                  ]}
+                >
+                  🚦 紅綠燈圖層：{showTrafficSignals ? '開啟' : '關閉'}
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.optChip, { backgroundColor: '#FCE7F3' }]}
@@ -2230,6 +2378,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                         </View>
                         <Text style={styles.etaSub} numberOfLines={1}>
                           預計 {formatEtaTime(remainingSec)} 抵達 •{' '}
+                          {typeof nav.route?.trafficSignalCount === 'number' &&
+                          nav.route.trafficSignalCount > 0
+                            ? `剩餘 ${
+                                nav.progress?.remainingTrafficSignalCount ??
+                                nav.route.trafficSignalCount
+                              } 個紅綠燈 • `
+                            : ''}
                           {nav.destination?.name || '目的地'}
                         </Text>
                       </View>
@@ -2467,6 +2622,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                         </View>
                         <Text style={styles.etaSub} numberOfLines={1}>
                           預計 {formatEtaTime(remainingSec)} 抵達 •{' '}
+                          {typeof nav.route?.trafficSignalCount === 'number' &&
+                          nav.route.trafficSignalCount > 0
+                            ? `剩餘 ${
+                                nav.progress?.remainingTrafficSignalCount ??
+                                nav.route.trafficSignalCount
+                              } 個紅綠燈 • `
+                            : ''}
                           {nav.destination?.name || '目的地'}
                         </Text>
                       </View>
@@ -3501,5 +3663,72 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.05)',
     fontSize: 13,
     color: '#111827',
+  },
+  trafficSignalHousing: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2.5,
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    borderRadius: 9,
+    backgroundColor: '#1E293B',
+    borderWidth: 1.2,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.25,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  trafficSignalHousingOnRoute: {
+    backgroundColor: '#0F172A',
+    borderColor: '#F472B6',
+    borderWidth: 1.6,
+    transform: [{ scale: 1.08 }],
+  },
+  trafficSignalHousingNext: {
+    backgroundColor: '#0F172A',
+    borderColor: '#FBBF24',
+    borderWidth: 2,
+    transform: [{ scale: 1.22 }],
+    shadowColor: '#F59E0B',
+    shadowOpacity: 0.55,
+    shadowRadius: 5,
+  },
+  trafficSignalDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  hudTrafficLightPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: 'rgba(15, 23, 42, 0.78)',
+    borderWidth: 1,
+    borderColor: 'rgba(251, 191, 36, 0.65)',
+  },
+  hudTrafficLightPillText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#FDE68A',
+  },
+  hudMiniTrafficLight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: '#0F172A',
+  },
+  trafficSignalDotMini: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
   },
 });

@@ -1,4 +1,10 @@
-import { Coordinate, NavCommandState, NavigationRoute, RouteManeuver } from './types';
+import {
+  Coordinate,
+  NavCommandState,
+  NavigationRoute,
+  RouteManeuver,
+  TrafficSignalNode,
+} from './types';
 
 const EARTH_RADIUS_M = 6371000;
 
@@ -238,6 +244,9 @@ export interface RouteProgressSnapshot {
   isMissedManeuver: boolean;
   commandState: NavCommandState;
   thresholds: SpeedAdaptiveThresholds;
+  remainingTrafficSignalCount: number;
+  nextTrafficSignal: TrafficSignalNode | null;
+  distanceToNextTrafficSignalMeters: number | null;
   hasArrived: boolean;
 }
 
@@ -274,6 +283,9 @@ export function computeNavigationProgress(
       isMissedManeuver: false,
       commandState: 'FOLLOWING_ROUTE',
       thresholds: defaultThresholds,
+      remainingTrafficSignalCount: 0,
+      nextTrafficSignal: null,
+      distanceToNextTrafficSignalMeters: null,
       hasArrived: false,
     };
   }
@@ -465,6 +477,23 @@ export function computeNavigationProgress(
 
   const thresholds = computeSpeedAdaptiveThresholds(currentSpeedMps, nextManeuver?.type ?? 10);
 
+  // 計算前方剩餘紅綠燈數量與下一個紅綠燈距離
+  const routeSignals = route.trafficSignals || [];
+  const upcomingSignals = routeSignals.filter(
+    (s) => typeof s.shapeIndex === 'number' && s.shapeIndex > nearestShapeIndex
+  );
+  const nextTrafficSignal = upcomingSignals[0] || null;
+  let distanceToNextTrafficSignalMeters: number | null = null;
+  if (nextTrafficSignal && typeof nextTrafficSignal.shapeIndex === 'number') {
+    const sigTargetIdx = Math.min(
+      coords.length - 1,
+      Math.max(nextVertexIdx, nextTrafficSignal.shapeIndex)
+    );
+    distanceToNextTrafficSignalMeters = Math.round(
+      distToNextVertex + computePolylineLengthMeters(coords, nextVertexIdx, sigTargetIdx)
+    );
+  }
+
   let commandState: NavCommandState = 'FOLLOWING_ROUTE';
   if (hasArrived) {
     commandState = 'ARRIVED';
@@ -492,6 +521,9 @@ export function computeNavigationProgress(
     isMissedManeuver,
     commandState,
     thresholds,
+    remainingTrafficSignalCount: upcomingSignals.length,
+    nextTrafficSignal,
+    distanceToNextTrafficSignalMeters,
     hasArrived,
   };
 }
@@ -590,9 +622,10 @@ export function pickVoiceAnnouncement(
         };
       }
       const isRampOrRoundabout = maneuver.type >= 17 && maneuver.type <= 27;
+      const intersectionLabel = maneuver.hasTrafficSignal ? '紅綠燈路口' : '路口';
       const execCore = isRampOrRoundabout
         ? `前方${maneuver.instruction}`
-        : `前方路口${shortAction}`;
+        : `前方${intersectionLabel}${shortAction}`;
       const chainSuffix =
         isShortChainedTurn && thenShortAction ? `，接著立即${thenShortAction}` : '';
       return {

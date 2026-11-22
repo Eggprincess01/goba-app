@@ -47,6 +47,14 @@ export type VehicleClassId =
   | 'pedestrian'
   | 'transit';
 
+export interface TrafficSignalNode {
+  id: string;
+  lat: number;
+  lon: number;
+  shapeIndex?: number;
+  streetName?: string;
+}
+
 export interface RouteManeuver {
   index: number;
   type: number;
@@ -59,6 +67,7 @@ export interface RouteManeuver {
   endShapeIndex?: number;
   coordinate: [number, number] | null; // [lon, lat]
   verifiedLegalUTurn?: boolean;
+  hasTrafficSignal?: boolean;
 }
 
 export interface NavigationRoute {
@@ -73,6 +82,8 @@ export interface NavigationRoute {
   bbox: [number, number, number, number]; // [west, south, east, north]
   coordinates: [number, number][]; // [lon, lat][]
   maneuvers: RouteManeuver[];
+  trafficSignals?: TrafficSignalNode[];
+  trafficSignalCount?: number;
   fetchedAt: number;
   requestVersion?: number;
 }
