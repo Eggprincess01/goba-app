@@ -1569,19 +1569,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             <LiquidGlassSurface variant={isNight ? 'dark' : 'light'} interactive borderRadius={26}>
               <View style={styles.searchCapsule}>
                 <TouchableOpacity
-                  style={styles.capsuleBackBtn}
-                  onPress={onClose}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons
-                    name="chevron-back"
-                    size={22}
-                    color={isNight ? '#F8FAFC' : '#1F2937'}
-                  />
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.searchTriggerArea}
+                  style={[styles.searchTriggerArea, { paddingLeft: 10 }]}
                   activeOpacity={0.85}
                   onPress={() => handleOpenSearch()}
                 >
