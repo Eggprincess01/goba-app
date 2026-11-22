@@ -1,4 +1,4 @@
-import { Coordinate, NavigationRoute, RouteManeuver } from './types';
+import { Coordinate, NavCommandState, NavigationRoute, RouteManeuver } from './types';
 
 const EARTH_RADIUS_M = 6371000;
 
@@ -165,6 +165,63 @@ export function computePolylineLengthMeters(
   return total;
 }
 
+export interface SpeedAdaptiveThresholds {
+  advanceLeadMeters: number;
+  approachLeadMeters: number;
+  executeLeadMeters: number;
+}
+
+/**
+ * Section 二.A & B：速度感知三階段預告距離計算
+ * 預告距離 = 車速（m/s） × 預告秒數 + 安全緩衝距離（GPS 更新延遲 + TTS 合成播放延遲 + 路口反應緩衝）
+ * 對應四段車速表：
+ * - 0～30 km/h (0~8.3 m/s)：初次預告約 150～250m
+ * - 30～60 km/h (8.3~16.7 m/s)：初次預告約 300～500m
+ * - 60～90 km/h (16.7~25 m/s)：初次預告約 600～900m
+ * - 90 km/h 以上 (>25 m/s)：初次預告約 1000～1500m
+ */
+export function computeSpeedAdaptiveThresholds(
+  speedMps: number | null,
+  maneuverType: number = 10
+): SpeedAdaptiveThresholds {
+  const v = Math.max(0, Math.min(40, speedMps && speedMps > 0 ? speedMps : 9.5));
+  const speedKmh = v * 3.6;
+  const isHighwayRamp = maneuverType >= 17 && maneuverType <= 21;
+  const rampBonus = isHighwayRamp ? 1.25 : 1.0;
+
+  let advanceLeadMeters: number;
+  if (speedKmh <= 30) {
+    // 0~30 km/h -> 150~250m
+    advanceLeadMeters = Math.round((150 + (speedKmh / 30) * 100) * rampBonus);
+  } else if (speedKmh <= 60) {
+    // 30~60 km/h -> 300~500m
+    advanceLeadMeters = Math.round((300 + ((speedKmh - 30) / 30) * 200) * rampBonus);
+  } else if (speedKmh <= 90) {
+    // 60~90 km/h -> 600~900m
+    advanceLeadMeters = Math.round((600 + ((speedKmh - 60) / 30) * 300) * rampBonus);
+  } else {
+    // >90 km/h -> 1000~1500m
+    const over90 = Math.min(1, (speedKmh - 90) / 40);
+    advanceLeadMeters = Math.round((1000 + over90 * 500) * rampBonus);
+  }
+
+  // 接近階段（Approach）：車速 × 10.5 秒 + 70m 安全緩衝（市區約 140~220m，高速約 320~420m）
+  const approachLeadMeters = Math.round(
+    Math.max(125, Math.min(450, (v * 10.5 + 70) * rampBonus))
+  );
+
+  // 執行階段（Execute）：車速 × 5.2 秒 + 35m TTS/GPS 延遲緩衝（低速約 55m，市區 45km/h 約 100m，高速約 150m）
+  const executeLeadMeters = Math.round(
+    Math.max(52, Math.min(165, (v * 5.2 + 35) * (isHighwayRamp ? 1.15 : 1.0)))
+  );
+
+  return {
+    advanceLeadMeters: Math.max(advanceLeadMeters, approachLeadMeters + 70),
+    approachLeadMeters: Math.max(approachLeadMeters, executeLeadMeters + 45),
+    executeLeadMeters,
+  };
+}
+
 export interface RouteProgressSnapshot {
   snappedCoord: [number, number];
   distanceToRouteMeters: number;
@@ -175,19 +232,31 @@ export interface RouteProgressSnapshot {
   distanceToNextTurnMeters: number;
   remainingDistanceMeters: number;
   remainingDurationSec: number;
+  routeSegmentBearingDeg: number;
+  headingDeltaDeg: number;
+  isWrongWay: boolean;
+  isMissedManeuver: boolean;
+  commandState: NavCommandState;
+  thresholds: SpeedAdaptiveThresholds;
   hasArrived: boolean;
 }
 
 /**
- * 即時導航核心：將目前 GPS 座標吸附至路線（Snap-to-Route），
- * 計算偏離距離、下一個轉彎距離、剩餘距離／時間與抵達判定。
+ * Section 八 & 六：獨立於視覺平滑動畫的即時道路匹配（Heading-Aware Map Matching）與導航狀態機計算
+ * - 綜合評估點到線段距離 + 線段方位角與實際車頭方向差異（懲罰逆向或垂直分支，當車輛完成轉彎後立即吸附至新道路）
+ * - 嚴格保護迴轉（type 12/13）：在車頭尚未實際完成掉頭對齊迴轉後路線方向前，不得跳過迴轉直接進到下一個右轉/左轉
  */
 export function computeNavigationProgress(
   current: Coordinate,
   route: NavigationRoute,
-  lastShapeIndex: number = 0
+  lastShapeIndex: number = 0,
+  currentHeadingDeg: number | null = null,
+  currentSpeedMps: number | null = null,
+  prevDistanceToNextTurnMeters: number | null = null,
+  prevActiveManeuverIndex: number | null = null
 ): RouteProgressSnapshot {
   const coords = route.coordinates;
+  const defaultThresholds = computeSpeedAdaptiveThresholds(currentSpeedMps, 10);
   if (coords.length < 2) {
     return {
       snappedCoord: [current.lon, current.lat],
@@ -199,12 +268,21 @@ export function computeNavigationProgress(
       distanceToNextTurnMeters: 0,
       remainingDistanceMeters: 0,
       remainingDurationSec: 0,
+      routeSegmentBearingDeg: 0,
+      headingDeltaDeg: 0,
+      isWrongWay: false,
+      isMissedManeuver: false,
+      commandState: 'FOLLOWING_ROUTE',
+      thresholds: defaultThresholds,
       hasArrived: false,
     };
   }
 
-  // 優先在目前進度視窗 [-5, +45] 搜尋，避免迴轉或立體交叉路口跳回起點
-  const windowStart = Math.max(0, lastShapeIndex - 5);
+  const isMovingForHeading =
+    (currentSpeedMps ?? 0) >= 1.5 && currentHeadingDeg !== null && currentHeadingDeg >= 0;
+
+  // 優先在目前進度視窗 [-4, +45] 搜尋，並加入車頭方向權重（轉過彎後新路段的方位角與車頭一致，會立即勝出原路段）
+  const windowStart = Math.max(0, lastShapeIndex - 4);
   const windowEnd = Math.min(coords.length - 2, lastShapeIndex + 45);
 
   let best = {
@@ -212,9 +290,10 @@ export function computeNavigationProgress(
     lon: coords[windowStart][0],
     lat: coords[windowStart][1],
     distM: Number.POSITIVE_INFINITY,
+    score: Number.POSITIVE_INFINITY,
   };
 
-  for (let i = windowStart; i <= windowEnd; i++) {
+  const evaluateSegment = (i: number) => {
     const p = projectPointOnSegment(
       current.lat,
       current.lon,
@@ -223,55 +302,108 @@ export function computeNavigationProgress(
       coords[i + 1][0],
       coords[i + 1][1]
     );
-    if (p.distM < best.distM) {
-      best = { segIdx: i, lon: p.lon, lat: p.lat, distM: p.distM };
+    let headingPenaltyM = 0;
+    if (isMovingForHeading && currentHeadingDeg !== null) {
+      const segBearing = computeBearingDeg(
+        { lat: coords[i][1], lon: coords[i][0] },
+        { lat: coords[i + 1][1], lon: coords[i + 1][0] }
+      );
+      const diff = Math.abs(((currentHeadingDeg - segBearing + 540) % 360) - 180);
+      // 當在路口轉彎時，已轉入的新路段 diff < 25°，原路段 diff ~ 90°（加 14m 虛擬懲罰），確保立即切換到新道路
+      if (diff > 55 && diff <= 125) {
+        headingPenaltyM = ((diff - 55) / 70) * 16;
+      } else if (diff > 125) {
+        headingPenaltyM = 24;
+      }
     }
+    const score = p.distM + headingPenaltyM;
+    if (score < best.score) {
+      best = { segIdx: i, lon: p.lon, lat: p.lat, distM: p.distM, score };
+    }
+  };
+
+  for (let i = windowStart; i <= windowEnd; i++) {
+    evaluateSegment(i);
   }
 
-  // 若局部視窗偏離超過 120m，擴大為全線掃描（處理跳躍或剛開始導航）
-  if (best.distM > 120) {
+  // 若局部視窗偏離超過 90m，擴大為全線掃描
+  if (best.distM > 90) {
     for (let i = 0; i < coords.length - 1; i++) {
-      const p = projectPointOnSegment(
-        current.lat,
-        current.lon,
-        coords[i][0],
-        coords[i][1],
-        coords[i + 1][0],
-        coords[i + 1][1]
-      );
-      if (p.distM < best.distM) {
-        best = { segIdx: i, lon: p.lon, lat: p.lat, distM: p.distM };
-      }
+      evaluateSegment(i);
     }
   }
 
   const nearestShapeIndex = best.segIdx;
 
-  // 剩餘距離（公尺）：從吸附點到下一頂點 + 後續整段折線
+  // 計算當前所處路線區段的順向方位角與車頭方向夾角
+  const nextVertexIdx = Math.min(coords.length - 1, nearestShapeIndex + 1);
+  const lookAheadIdx = Math.min(coords.length - 1, nearestShapeIndex + 2);
+  const routeSegmentBearingDeg = computeBearingDeg(
+    { lat: coords[nearestShapeIndex][1], lon: coords[nearestShapeIndex][0] },
+    { lat: coords[lookAheadIdx][1], lon: coords[lookAheadIdx][0] }
+  );
+
+  let headingDeltaDeg = 0;
+  let isWrongWay = false;
+  if (isMovingForHeading && currentHeadingDeg !== null) {
+    headingDeltaDeg = Math.round(
+      Math.abs(((currentHeadingDeg - routeSegmentBearingDeg + 540) % 360) - 180)
+    );
+    isWrongWay = headingDeltaDeg > 110;
+  }
+
+  // 剩餘距離（公尺）：從吸附點到下一頂點 + 後續整段折線（真實路線距離，非直線距離）
   const distToNextVertex = haversineMeters(
     best.lat,
     best.lon,
-    coords[nearestShapeIndex + 1][1],
-    coords[nearestShapeIndex + 1][0]
+    coords[nextVertexIdx][1],
+    coords[nextVertexIdx][0]
   );
   const remainingDistanceMeters = Math.round(
-    distToNextVertex + computePolylineLengthMeters(coords, nearestShapeIndex + 1, coords.length - 1)
+    distToNextVertex + computePolylineLengthMeters(coords, nextVertexIdx, coords.length - 1)
   );
 
-  // 依比例估算剩餘時間
   const totalRouteMeters = Math.max(1, route.distanceKm * 1000);
   const ratio = Math.max(0, Math.min(1, remainingDistanceMeters / totalRouteMeters));
   const remainingDurationSec = Math.max(0, Math.round(route.durationSec * ratio));
 
-  // 找出下一個尚未通過的轉彎步驟
+  // 找出下一個尚未通過的轉彎步驟（含 Section 五.C & 六：迴轉完成確認鎖定機制）
   const maneuvers = route.maneuvers;
   let nextIdx = maneuvers.length - 1;
   for (let i = 0; i < maneuvers.length; i++) {
-    // 跳過「出發」步驟（index 0），一旦開始行進就指向下一個轉彎
-    if (i === 0 && maneuvers.length > 1 && nearestShapeIndex > 0) continue;
+    if (i === 0 && maneuvers.length > 1) continue;
     if (maneuvers[i].beginShapeIndex > nearestShapeIndex) {
       nextIdx = i;
       break;
+    }
+  }
+
+  // Section 五.C & 六：當上一個動作是迴轉（type 12/13），若車輛仍在迴轉點附近但車頭方向尚未完成掉頭（與迴轉後路段夾角 > 65°），
+  // 嚴格鎖定在該迴轉動作，絕不跳過迴轉去播報迴轉後的右轉！
+  if (
+    prevActiveManeuverIndex !== null &&
+    prevActiveManeuverIndex < nextIdx &&
+    maneuvers[prevActiveManeuverIndex] &&
+    (maneuvers[prevActiveManeuverIndex].type === 12 ||
+      maneuvers[prevActiveManeuverIndex].type === 13)
+  ) {
+    const uturnM = maneuvers[prevActiveManeuverIndex];
+    const uturnCoord = uturnM.coordinate;
+    const distFromUTurnNode = uturnCoord
+      ? haversineMeters(current.lat, current.lon, uturnCoord[1], uturnCoord[0])
+      : 999;
+    const postIdx = Math.min(coords.length - 1, uturnM.beginShapeIndex + 2);
+    const postBearing = computeBearingDeg(
+      { lat: coords[uturnM.beginShapeIndex][1], lon: coords[uturnM.beginShapeIndex][0] },
+      { lat: coords[postIdx][1], lon: coords[postIdx][0] }
+    );
+    const alignedWithPostUTurn =
+      currentHeadingDeg !== null &&
+      currentHeadingDeg >= 0 &&
+      Math.abs(((currentHeadingDeg - postBearing + 540) % 360) - 180) <= 65;
+
+    if (!alignedWithPostUTurn && distFromUTurnNode <= 42) {
+      nextIdx = prevActiveManeuverIndex;
     }
   }
 
@@ -280,15 +412,69 @@ export function computeNavigationProgress(
 
   let distanceToNextTurnMeters = remainingDistanceMeters;
   if (nextManeuver) {
-    const targetIdx = Math.min(coords.length - 1, Math.max(nearestShapeIndex + 1, nextManeuver.beginShapeIndex));
-    distanceToNextTurnMeters = Math.round(
-      distToNextVertex + computePolylineLengthMeters(coords, nearestShapeIndex + 1, targetIdx)
+    if (nextManeuver.beginShapeIndex <= nearestShapeIndex && nextManeuver.coordinate) {
+      distanceToNextTurnMeters = Math.round(
+        haversineMeters(
+          current.lat,
+          current.lon,
+          nextManeuver.coordinate[1],
+          nextManeuver.coordinate[0]
+        )
+      );
+    } else {
+      const targetIdx = Math.min(
+        coords.length - 1,
+        Math.max(nextVertexIdx, nextManeuver.beginShapeIndex)
+      );
+      distanceToNextTurnMeters = Math.round(
+        distToNextVertex + computePolylineLengthMeters(coords, nextVertexIdx, targetIdx)
+      );
+    }
+  }
+
+  // Section 二.C & 五.D：錯過路口／經過迴轉位置卻未迴轉偵測（Missed Maneuver / Missed U-Turn Detection）
+  let isMissedManeuver = false;
+  if (nextManeuver && nextManeuver.coordinate && isMovingForHeading && currentHeadingDeg !== null) {
+    const distToNodeDirect = haversineMeters(
+      current.lat,
+      current.lon,
+      nextManeuver.coordinate[1],
+      nextManeuver.coordinate[0]
     );
+    const bearingToNode = computeBearingDeg(current, {
+      lat: nextManeuver.coordinate[1],
+      lon: nextManeuver.coordinate[0],
+    });
+    const angleAwayFromNode = Math.abs(((currentHeadingDeg - bearingToNode + 540) % 360) - 180);
+
+    // 若曾經接近路口（<= 55m），現在正背離該路口直行（夾角 > 115°）且距離開始拉遠（或橫向偏離 > 18m）
+    if (
+      prevActiveManeuverIndex === nextIdx &&
+      prevDistanceToNextTurnMeters !== null &&
+      prevDistanceToNextTurnMeters <= 55 &&
+      angleAwayFromNode > 115 &&
+      (distToNodeDirect > prevDistanceToNextTurnMeters + 8 || best.distM > 18)
+    ) {
+      isMissedManeuver = true;
+    }
   }
 
   const destCoord = coords[coords.length - 1];
   const directDistToDest = haversineMeters(current.lat, current.lon, destCoord[1], destCoord[0]);
   const hasArrived = remainingDistanceMeters <= 35 || directDistToDest <= 30;
+
+  const thresholds = computeSpeedAdaptiveThresholds(currentSpeedMps, nextManeuver?.type ?? 10);
+
+  let commandState: NavCommandState = 'FOLLOWING_ROUTE';
+  if (hasArrived) {
+    commandState = 'ARRIVED';
+  } else if (best.distM > 24 || isWrongWay || isMissedManeuver) {
+    commandState = 'OFF_ROUTE';
+  } else if (distanceToNextTurnMeters <= thresholds.executeLeadMeters) {
+    commandState = 'EXECUTING_MANEUVER';
+  } else if (distanceToNextTurnMeters <= thresholds.approachLeadMeters) {
+    commandState = 'APPROACHING_MANEUVER';
+  }
 
   return {
     snappedCoord: [best.lon, best.lat],
@@ -300,6 +486,12 @@ export function computeNavigationProgress(
     distanceToNextTurnMeters: Math.max(0, distanceToNextTurnMeters),
     remainingDistanceMeters,
     remainingDurationSec,
+    routeSegmentBearingDeg,
+    headingDeltaDeg,
+    isWrongWay,
+    isMissedManeuver,
+    commandState,
+    thresholds,
     hasArrived,
   };
 }
@@ -317,48 +509,196 @@ export function formatDistanceMetersZh(meters: number): string {
 }
 
 /**
- * 判斷是否達到語音播報門檻（500m / 150m / 35m），避免重複播報
+ * 將完整指令精簡為短動作詞（供「接近」與「執行」階段使用，避免語句過長錯過第一個路口）
+ */
+export function getShortManeuverActionZh(maneuver: RouteManeuver): string {
+  const t = maneuver.type;
+  if (t === 4 || t === 5 || t === 6) return '抵達目的地';
+  if (t === 12 || t === 13) return '迴轉';
+  if (t === 9) return '向右微轉';
+  if (t === 10) return '右轉';
+  if (t === 11) return '向右急轉';
+  if (t === 14) return '向左急轉';
+  if (t === 15) return '左轉';
+  if (t === 16) return '向左微轉';
+  if (t === 17) return '直行上匝道';
+  if (t === 18) return '靠右上匝道';
+  if (t === 19) return '靠左上匝道';
+  if (t === 20) return '靠右下交流道';
+  if (t === 21) return '靠左下交流道';
+  if (t === 23) return '靠右行駛';
+  if (t === 24) return '靠左行駛';
+  if (t === 25) return '匯入主線';
+  if (t === 26 || t === 27) return maneuver.instruction;
+  return maneuver.instruction;
+}
+
+export interface VoiceAnnouncementDecision {
+  key: string;
+  stage: 'advance' | 'approach' | 'execute' | 'transition';
+  text: string;
+}
+
+/**
+ * Section 二、五、七：速度感知三階段語音導航與合法迴轉／連續轉彎語音引擎
+ * - 嚴禁使用太晚的「現在左轉」通用語句
+ * - 第一階段（預告 Advance）：依車速 150m~1500m 提前告知，如「前方 500 公尺，左轉進入 文化二路二段。」
+ * - 第二階段（接近 Approach）：依車速 125m~450m 提醒，如「前方 150 公尺，準備左轉。」或迴轉「前方 150 公尺，請準備迴轉。」（若為短距離連續轉彎則合併預告：「前方 200 公尺右轉，接著立即左轉。」）
+ * - 第三階段（執行 Execute）：依車速 52m~165m 提前於路口前給出簡短明確指令，如「前方路口左轉。」或合法迴轉「前方允許迴轉處，請迴轉。」
+ * - 轉向完成確認後（Transition）：當迴轉或轉彎完成、車頭進入正確方向後，立即播報下一步：「前方 310 公尺，右轉進入 文化二路二段。」
  */
 export function pickVoiceAnnouncement(
   maneuver: RouteManeuver | null,
+  thenManeuver: RouteManeuver | null,
   distanceMeters: number,
-  spokenKeys: Set<string>
-): { key: string; text: string } | null {
+  speedMps: number | null,
+  spokenKeys: Set<string>,
+  isStepTransition: boolean = false
+): VoiceAnnouncementDecision | null {
   if (!maneuver) return null;
 
   const isArrival = maneuver.type === 4 || maneuver.type === 5 || maneuver.type === 6;
+  const isUTurn = maneuver.type === 12 || maneuver.type === 13;
+  const thresholds = computeSpeedAdaptiveThresholds(speedMps, maneuver.type);
+  const shortAction = getShortManeuverActionZh(maneuver);
 
-  // 35 公尺內：立即動作提示
-  if (distanceMeters <= 40) {
-    const key = `${maneuver.index}:now`;
+  // 判斷是否為短距離連續轉彎（本步驟執行點與下一步驟距離 <= 90 公尺）
+  const isShortChainedTurn =
+    Boolean(thenManeuver) &&
+    maneuver.distanceKm > 0 &&
+    maneuver.distanceKm <= 0.09 &&
+    thenManeuver!.type !== 4 &&
+    thenManeuver!.type !== 5 &&
+    thenManeuver!.type !== 6;
+  const thenShortAction = thenManeuver ? getShortManeuverActionZh(thenManeuver) : '';
+
+  // 1. 執行階段（Execute）：簡短有力，預留約 5.5 秒 + 35m 安全距離，絕不等到壓線才講，也絕不講「現在左轉」
+  if (distanceMeters <= thresholds.executeLeadMeters && distanceMeters >= 8) {
+    const key = `${maneuver.index}:execute`;
     if (!spokenKeys.has(key)) {
+      if (isArrival) {
+        return { key, stage: 'execute', text: '即將抵達目的地。' };
+      }
+      if (isUTurn) {
+        const uturnPrefix = maneuver.verifiedLegalUTurn ? '前方允許迴轉處' : '前方路口';
+        const chainSuffix =
+          isShortChainedTurn && thenShortAction ? `，接著立即${thenShortAction}` : '';
+        return {
+          key,
+          stage: 'execute',
+          text: `${uturnPrefix}，請迴轉${chainSuffix}。`,
+        };
+      }
+      const isRampOrRoundabout = maneuver.type >= 17 && maneuver.type <= 27;
+      const execCore = isRampOrRoundabout
+        ? `前方${maneuver.instruction}`
+        : `前方路口${shortAction}`;
+      const chainSuffix =
+        isShortChainedTurn && thenShortAction ? `，接著立即${thenShortAction}` : '';
       return {
         key,
-        text: isArrival ? '即將抵達目的地' : `現在，${maneuver.instruction}`,
+        stage: 'execute',
+        text: `${execCore}${chainSuffix}。`,
       };
     }
     return null;
   }
 
-  // 150 公尺前提示
-  if (distanceMeters <= 170 && distanceMeters > 60) {
-    const key = `${maneuver.index}:150`;
+  // 2. 剛完成上一個轉彎或迴轉後（Transition）：立即告知下一個轉彎距離與路名（例如迴轉完成後立即播報「前方 310 公尺，右轉進入 文化二路二段。」）
+  if (isStepTransition && distanceMeters > thresholds.executeLeadMeters + 20) {
+    const transKey = `${maneuver.index}:transition`;
+    if (!spokenKeys.has(transKey)) {
+      const distLabel = formatDistanceMetersZh(distanceMeters);
+      // 若距離已經進入 approach 區間，一併標記 approach 已播報避免數秒後重複
+      if (distanceMeters <= thresholds.approachLeadMeters + 45) {
+        spokenKeys.add(`${maneuver.index}:approach`);
+      }
+      if (distanceMeters <= thresholds.advanceLeadMeters + 60) {
+        spokenKeys.add(`${maneuver.index}:advance`);
+      }
+      if (isUTurn) {
+        return {
+          key: transKey,
+          stage: 'transition',
+          text: `前方 ${distLabel}，請準備迴轉。`,
+        };
+      }
+      const chainSuffix =
+        isShortChainedTurn && thenShortAction ? `，接著立即${thenShortAction}` : '';
+      return {
+        key: transKey,
+        stage: 'transition',
+        text: `前方 ${distLabel}，${maneuver.instruction}${chainSuffix}。`,
+      };
+    }
+  }
+
+  // 3. 接近階段（Approach）：依車速動態於 115m~450m 提醒準備動作
+  if (
+    distanceMeters <= thresholds.approachLeadMeters &&
+    distanceMeters > thresholds.executeLeadMeters
+  ) {
+    const key = `${maneuver.index}:approach`;
     if (!spokenKeys.has(key)) {
+      const distLabel = formatDistanceMetersZh(distanceMeters);
+      if (isArrival) {
+        return {
+          key,
+          stage: 'approach',
+          text: `前方 ${distLabel}，即將抵達目的地。`,
+        };
+      }
+      if (isUTurn) {
+        const chainSuffix =
+          isShortChainedTurn && thenShortAction ? `，迴轉後立即${thenShortAction}` : '';
+        return {
+          key,
+          stage: 'approach',
+          text: `前方 ${distLabel}，請準備迴轉${chainSuffix}。`,
+        };
+      }
+      if (isShortChainedTurn && thenShortAction) {
+        return {
+          key,
+          stage: 'approach',
+          text: `前方 ${distLabel}${shortAction}，接著立即${thenShortAction}。`,
+        };
+      }
       return {
         key,
-        text: `前方 150 公尺，${maneuver.instruction}`,
+        stage: 'approach',
+        text: `前方 ${distLabel}，準備${shortAction}。`,
       };
     }
     return null;
   }
 
-  // 500 公尺前預告
-  if (distanceMeters <= 530 && distanceMeters > 350) {
-    const key = `${maneuver.index}:500`;
+  // 4. 初次預告階段（Advance）：依車速對照表（0~30km/h: 150~250m, 30~60km/h: 300~500m, 60~90km/h: 600~900m, >90km/h: 1~1.5km）
+  if (
+    distanceMeters <= thresholds.advanceLeadMeters &&
+    distanceMeters > thresholds.approachLeadMeters
+  ) {
+    const key = `${maneuver.index}:advance`;
     if (!spokenKeys.has(key)) {
+      const distLabel = formatDistanceMetersZh(distanceMeters);
+      if (isUTurn) {
+        return {
+          key,
+          stage: 'advance',
+          text: `前方 ${distLabel}，請準備迴轉。`,
+        };
+      }
+      if (isShortChainedTurn && thenShortAction) {
+        return {
+          key,
+          stage: 'advance',
+          text: `前方 ${distLabel}${shortAction}，接著立即${thenShortAction}。`,
+        };
+      }
       return {
         key,
-        text: `前方 500 公尺，${maneuver.instruction}`,
+        stage: 'advance',
+        text: `前方 ${distLabel}，${maneuver.instruction}。`,
       };
     }
     return null;

@@ -31,6 +31,10 @@ import {
 } from '@maplibre/maplibre-react-native';
 import { LiquidGlassSurface } from '../components/LiquidGlassSurface';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
+import {
+  type ReplayScenarioResult,
+  runAllGpsReplayScenarios,
+} from '../navigation/gpsReplayTester';
 import { getEffectiveMapStyleUrl, MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
 import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
 import { Coordinate, SearchPlace } from '../navigation/types';
@@ -102,6 +106,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [showManeuvers, setShowManeuvers] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [adminQueue, setAdminQueue] = useState<any[]>([]);
+  const [replayResults, setReplayResults] = useState<ReplayScenarioResult[]>([]);
   const [feedbackModalVisible, setFeedbackModalVisible] = useState(false);
   const [feedbackIssueType, setFeedbackIssueType] = useState<
     'address_wrong' | 'relocated' | 'closed' | 'name_wrong' | 'duplicate' | 'missing_place' | 'other'
@@ -666,7 +671,10 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             setZoomLevel(e.nativeEvent.zoom);
           }
           if (e?.nativeEvent?.userInteraction) {
-            if (nav.followMode !== 'free') {
+            // 防止程式自動更新 3D 座艙鏡頭時誤判為手勢拖曳而跳出車頭視角
+            const isProgrammaticCockpitPush =
+              uiState === 'navigation' && Date.now() - lastCameraPushRef.current < 340;
+            if (!isProgrammaticCockpitPush && nav.followMode !== 'free') {
               nav.setFollowMode('free');
             }
             const center = e?.nativeEvent?.center;
@@ -770,7 +778,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </Marker>
         )}
 
-        {/* 導航中 3D 車輛指向游標 */}
+        {/* 導航中 3D 車輛指向游標（車頭視角時固定朝上，2D 自由北向模式時依實際車頭方位角旋轉） */}
         {uiState === 'navigation' && vehicleDisplayCoord && (
           <Marker id="goba-vehicle-puck" lngLat={vehicleDisplayCoord} anchor="center">
             <View style={styles.vehiclePuckHalo}>
@@ -779,7 +787,17 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   name="navigate"
                   size={20}
                   color={activeProfile.routeColor}
-                  style={{ transform: [{ rotate: '-45deg' }] }}
+                  style={{
+                    transform: [
+                      {
+                        rotate: `${
+                          nav.followMode === 'course'
+                            ? -45
+                            : Math.round((nav.gps?.headingDeg ?? 0) - 45)
+                        }deg`,
+                      },
+                    ],
+                  }}
                 />
               </View>
             </View>
@@ -1047,8 +1065,34 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               nav.gpsSignalLost ||
               nav.gpsWeakSignal ||
               nav.rerouteOfflinePending ||
-              nav.phase === 'paused') && (
+              nav.route?.headingUnverified ||
+              nav.phase === 'paused' ||
+              Boolean(nav.commandState)) && (
               <View style={styles.hudMetaRow}>
+                <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
+                  <View
+                    style={[
+                      styles.statusDot,
+                      {
+                        backgroundColor:
+                          nav.commandState === 'OFF_ROUTE' || nav.commandState === 'REROUTING'
+                            ? '#F59E0B'
+                            : nav.commandState === 'EXECUTING_MANEUVER'
+                            ? '#F472B6'
+                            : nav.commandState === 'ROUTE_RECOVERED'
+                            ? '#38BDF8'
+                            : '#34D399',
+                      },
+                    ]}
+                  />
+                  <Text style={styles.hudTagText}>{nav.commandState}</Text>
+                </LiquidGlassSurface>
+                {nav.route?.headingUnverified && (
+                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
+                    <Ionicons name="warning" size={12} color="#FBBF24" />
+                    <Text style={styles.hudTagText}>迴轉限制資料不足，請依現場標誌行駛</Text>
+                  </LiquidGlassSurface>
+                )}
                 {nav.phase === 'paused' && (
                   <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
                     <View style={[styles.statusDot, { backgroundColor: '#F59E0B' }]} />
@@ -1252,7 +1296,73 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               >
                 <Text style={styles.optChipText}>底圖：{currentMapStyle.label}</Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.optChip, { backgroundColor: '#FCE7F3' }]}
+                onPress={() => {
+                  if (nav.speedKmh > 3 && !nav.isSimulating) {
+                    Alert.alert('行車安全保護', '請於車輛靜止時或由乘客操作 GPS 軌跡回放測試。');
+                    return;
+                  }
+                  const res = runAllGpsReplayScenarios();
+                  setReplayResults(res);
+                }}
+              >
+                <Text style={[styles.optChipText, { color: '#9D174D' }]}>
+                  ▶ 執行 15 項 GPS 軌跡回放驗收
+                </Text>
+              </TouchableOpacity>
             </View>
+
+            <Text style={{ fontSize: 10, color: '#EF4444', fontWeight: '600' }}>
+              ⚠️ 駕駛人不得在行駛中操作測試介面，道路測試請由乘客協助記錄。
+            </Text>
+
+            {replayResults.length > 0 && (
+              <>
+                <Text style={styles.diagTitle}>
+                  GPS 軌跡回放測試 ({replayResults.filter((r) => r.passed).length}/
+                  {replayResults.length} 通過)
+                </Text>
+                <ScrollView style={{ maxHeight: 110 }}>
+                  {replayResults.map((r) => (
+                    <Text
+                      key={r.id}
+                      style={[styles.diagRowText, isNight && { color: '#CBD5E1' }]}
+                    >
+                      {r.passed ? '✅' : '❌'} {r.name}{' '}
+                      {r.firstVoiceAction ? `→「${r.firstVoiceAction}」` : ''}
+                    </Text>
+                  ))}
+                </ScrollView>
+              </>
+            )}
+
+            <Text style={styles.diagTitle}>
+              語音播報紀錄 ({nav.voiceHistory.length} 筆) & 偏航重算延遲 ({nav.rerouteMetrics.length} 次)
+            </Text>
+            <ScrollView style={{ maxHeight: 95 }}>
+              {nav.rerouteMetrics.slice(0, 3).map((m) => (
+                <Text
+                  key={m.id}
+                  style={[styles.diagRowText, { color: '#059669', fontWeight: '700' }]}
+                >
+                  ⚡ [{m.reason}] 偵測 {m.detectionLatencyMs}ms / API {m.apiLatencyMs}ms / UI{' '}
+                  {m.uiUpdateLatencyMs}ms
+                </Text>
+              ))}
+              {nav.voiceHistory.length === 0 ? (
+                <Text style={{ fontSize: 11, color: '#9CA3AF' }}>尚無語音播報紀錄</Text>
+              ) : (
+                nav.voiceHistory.slice(0, 6).map((v) => (
+                  <Text
+                    key={v.id}
+                    style={[styles.diagRowText, isNight && { color: '#CBD5E1' }]}
+                  >
+                    🔊 [{v.stage}/{v.speedKmh}km/h/{v.distanceMeters}m] {v.text}
+                  </Text>
+                ))
+              )}
+            </ScrollView>
 
             <Text style={styles.diagTitle}>
               待審核地點回報佇列 ({adminQueue.filter((f) => f.status === 'pending').length} 筆)

@@ -7,10 +7,13 @@ import {
   CameraFollowMode,
   Coordinate,
   GpsSnapshot,
+  NavCommandState,
   NavigationPhase,
   NavigationRoute,
+  ReroutePerformanceEntry,
   SearchPlace,
   VehicleClassId,
+  VoiceLogEntry,
 } from './types';
 import {
   createExpoBackgroundLocationAdapter,
@@ -30,6 +33,7 @@ import {
 import {
   buildCumulativeDistances,
   computeNavigationProgress,
+  formatDistanceMetersZh,
   lerpAngleDeg,
   pickVoiceAnnouncement,
   RouteProgressSnapshot,
@@ -40,9 +44,10 @@ import { getVehicleProfile } from './vehicleRestrictions';
 
 const KEEP_AWAKE_TAG = 'goba-maps-active-navigation';
 const ACTIVE_NAV_SESSION_KEY = 'goba_active_nav_session_v1';
-const OFF_ROUTE_THRESHOLD_METERS = 55;
-const OFF_ROUTE_CONSECUTIVE_HITS = 3;
-const REROUTE_COOLDOWN_MS = 12000;
+const OFF_ROUTE_THRESHOLD_METERS = 25;
+const OFF_ROUTE_CONSECUTIVE_HITS = 2;
+const WRONG_WAY_CONSECUTIVE_HITS = 2;
+const REROUTE_COOLDOWN_MS = 3800;
 const GPS_STALE_TIMEOUT_MS = 9000;
 
 export interface SavedNavSession {
@@ -76,6 +81,9 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const [rerouteOfflinePending, setRerouteOfflinePending] = useState(false);
   const [gpsSignalLost, setGpsSignalLost] = useState(false);
   const [recoverableSession, setRecoverableSession] = useState<SavedNavSession | null>(null);
+  const [commandState, setCommandState] = useState<NavCommandState>('FOLLOWING_ROUTE');
+  const [voiceHistory, setVoiceHistory] = useState<VoiceLogEntry[]>([]);
+  const [rerouteMetrics, setRerouteMetrics] = useState<ReroutePerformanceEntry[]>([]);
 
   // 常用地點（住家 / 公司）、收藏與最近搜尋
   const [recentPlaces, setRecentPlaces] = useState<SearchPlace[]>([]);
@@ -88,14 +96,35 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const watcherRef = useRef<Location.LocationSubscription | null>(null);
   const simTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastShapeIndexRef = useRef(0);
+  const lastActiveManeuverIdxRef = useRef<number | null>(null);
+  const lastDistanceToNextTurnRef = useRef<number | null>(null);
   const spokenKeysRef = useRef<Set<string>>(new Set());
   const offRouteHitsRef = useRef(0);
+  const wrongWayHitsRef = useRef(0);
+  const offRouteFirstSeenTsRef = useRef<number>(0);
   const lastRerouteTsRef = useRef(0);
   const isReroutingRef = useRef(false);
+  const routeVersionRef = useRef(0);
+  const routeRecoveredUntilTsRef = useRef(0);
   const smoothHeadingRef = useRef(0);
+  const rawHeadingRef = useRef<number | null>(null);
   const lastGpsFixTsRef = useRef<number>(Date.now());
 
-  // 抗漂移濾波：停等紅燈（車速 < 1.2 m/s）時鎖定最後有效車頭方向，防止靜止時畫面亂轉
+  const pushVoiceLog = useCallback(
+    (entry: Omit<VoiceLogEntry, 'id' | 'timestamp' | 'routeVersion'>) => {
+      const full: VoiceLogEntry = {
+        ...entry,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: Date.now(),
+        routeVersion: routeVersionRef.current,
+      };
+      setVoiceHistory((prev) => [full, ...prev].slice(0, 30));
+    },
+    []
+  );
+
+  // Section 八：將原始 GPS 方向（rawHeadingDeg 供道路匹配與迴轉完成判定）與視覺平滑方向（headingDeg 供 3D 鏡頭）分開處理，
+  // 絕不為了讓地圖動畫平滑而延後實際導航決策！
   const applyAntiDriftGps = useCallback((incoming: GpsSnapshot) => {
     lastGpsFixTsRef.current = Date.now();
     setGpsSignalLost((prevLost) => {
@@ -111,11 +140,13 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
 
     const isMoving = (incoming.speedMps ?? 0) >= 1.2;
     if (isMoving && incoming.headingDeg !== null && incoming.headingDeg >= 0) {
-      smoothHeadingRef.current = lerpAngleDeg(smoothHeadingRef.current, incoming.headingDeg, 0.35);
+      rawHeadingRef.current = incoming.headingDeg;
+      smoothHeadingRef.current = lerpAngleDeg(smoothHeadingRef.current, incoming.headingDeg, 0.45);
     }
 
     setGps({
       ...incoming,
+      rawHeadingDeg: rawHeadingRef.current ?? incoming.headingDeg,
       headingDeg: smoothHeadingRef.current,
     });
   }, []);
@@ -250,8 +281,8 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         watcherRef.current = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.BestForNavigation,
-            timeInterval: 1000,
-            distanceInterval: 2,
+            timeInterval: 500,
+            distanceInterval: 1,
           },
           (loc) => {
             if (!active) return;
@@ -314,11 +345,18 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         avoidHighways?: boolean;
         vehicleTypeOverride?: VehicleClassId;
         originOverride?: Coordinate;
+        originHeadingDeg?: number | null;
         keepNavigating?: boolean;
       }
     ) => {
       setDestination(target);
       setErrorMessage(null);
+      const reqVersion = routeVersionRef.current + 1;
+      routeVersionRef.current = reqVersion;
+
+      // 路線切換／重新計算時立即取消過期舊語音佇列（Section 三.C & 六）
+      voiceAdapter.stop();
+
       if (!opts?.keepNavigating) {
         setPhase('routing');
         saveRecentSearch(target).then(setRecentPlaces);
@@ -327,29 +365,47 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       try {
         const res = await fetchValhallaRoute({
           origin: opts?.originOverride ?? effectiveOrigin,
+          originHeadingDeg:
+            opts?.originHeadingDeg !== undefined
+              ? opts.originHeadingDeg
+              : activeGps?.rawHeadingDeg ?? activeGps?.headingDeg ?? null,
           destination: { lat: target.lat, lon: target.lon },
           destinationPlaceId: target.placeId || target.id,
           vehicleType: opts?.vehicleTypeOverride ?? vehicleType,
           avoidTolls: opts?.avoidTolls ?? avoidTolls,
           avoidHighways: opts?.avoidHighways ?? avoidHighways,
         });
+
+        // Section 三.C：請求版本識別，丟棄過期路線結果，避免新舊路線互相覆蓋
+        if (reqVersion !== routeVersionRef.current) {
+          return null;
+        }
+
+        res.requestVersion = reqVersion;
         recordNavDiagnostic('route_ok', res.vehicleType, { latencyMs: Date.now() - t0 });
         lastShapeIndexRef.current = 0;
+        lastActiveManeuverIdxRef.current = null;
+        lastDistanceToNextTurnRef.current = null;
         spokenKeysRef.current.clear();
         offRouteHitsRef.current = 0;
+        wrongWayHitsRef.current = 0;
+        offRouteFirstSeenTsRef.current = 0;
         setRerouteOfflinePending(false);
         setRoute(res);
         setProgress(null);
         setPhase(opts?.keepNavigating ? 'navigating' : 'route_preview');
         return res;
       } catch (err: any) {
+        if (reqVersion !== routeVersionRef.current) {
+          return null;
+        }
         recordNavDiagnostic('route_error', 'ROUTE_FAIL', { latencyMs: Date.now() - t0 });
         if (!opts?.keepNavigating) {
           setRoute(null);
           setPhase('idle');
           setErrorMessage(err?.message || '路線規劃失敗，請稍後再試');
         } else {
-          // 偏航重算失敗時保留原路線與安全畫面狀態，待網路恢復後自動再試
+          // 偏航重算失敗時保留原路線與安全畫面狀態，不繼續播報已失效舊路線指令
           setRerouteOfflinePending(true);
           setPhase('navigating');
           recordNavDiagnostic('reroute_failed_offline', 'KEEP_SAFE_STATE');
@@ -357,7 +413,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         return null;
       }
     },
-    [effectiveOrigin, vehicleType, avoidTolls, avoidHighways]
+    [effectiveOrigin, activeGps, vehicleType, avoidTolls, avoidHighways, voiceAdapter]
   );
 
   const selectVehicleType = useCallback(
@@ -384,49 +440,144 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   );
 
   const triggerOffRouteReroute = useCallback(
-    async (currentCoord: Coordinate) => {
+    async (
+      currentCoord: Coordinate,
+      headingDeg?: number | null,
+      reason: 'lateral_off_route' | 'wrong_way' | 'missed_turn' | 'missed_uturn' = 'lateral_off_route'
+    ) => {
       if (!destination || isReroutingRef.current) return;
       const now = Date.now();
       if (now - lastRerouteTsRef.current < REROUTE_COOLDOWN_MS) return;
 
+      const detectionLatencyMs =
+        offRouteFirstSeenTsRef.current > 0
+          ? Math.max(50, now - offRouteFirstSeenTsRef.current)
+          : 120;
+
       isReroutingRef.current = true;
       lastRerouteTsRef.current = now;
       offRouteHitsRef.current = 0;
-      setPhase('off_route_recalculating');
-      recordNavDiagnostic('off_route_reroute', `REROUTE_${rerouteCount + 1}`);
-      voiceAdapter.speak('已偏離路線，正在為您重新規劃');
+      wrongWayHitsRef.current = 0;
+      offRouteFirstSeenTsRef.current = 0;
 
+      // Section 六：立即取消過期舊語音佇列並進入 REROUTING 狀態
+      voiceAdapter.stop();
+      setCommandState('REROUTING');
+      setPhase('off_route_recalculating');
+      recordNavDiagnostic('off_route_reroute', `${reason.toUpperCase()}_${rerouteCount + 1}`);
+
+      const apiT0 = Date.now();
       try {
         const updated = await calculateRoute(destination, {
           originOverride: currentCoord,
+          originHeadingDeg:
+            headingDeg !== undefined
+              ? headingDeg
+              : activeGps?.rawHeadingDeg ?? activeGps?.headingDeg ?? null,
           keepNavigating: true,
         });
+        const apiLatencyMs = Date.now() - apiT0;
+
         if (updated) {
+          const uiT0 = Date.now();
           setRerouteCount((c) => c + 1);
+          setCommandState('ROUTE_RECOVERED');
+          routeRecoveredUntilTsRef.current = Date.now() + 2600;
+
           const firstStep = updated.maneuvers[1] || updated.maneuvers[0];
-          if (firstStep) {
-            voiceAdapter.speak(`已重新規劃路線，${firstStep.instruction}`);
+          const secondStep = updated.maneuvers[2] || null;
+          // 計算從目前位置到新路線第一個轉彎／迴轉點的實際路線距離
+          const initialDistM = Math.max(
+            20,
+            Math.round((updated.maneuvers[0]?.distanceKm || firstStep?.distanceKm || 0.15) * 1000)
+          );
+          const distLabel = formatDistanceMetersZh(initialDistM);
+
+          let announceText = '已重新規劃路線。';
+          if (updated.headingUnverified) {
+            announceText =
+              '已重新規劃路線。目前路段缺乏迴轉限制資料，請依現場標誌繼續直行或於前方合法路口掉頭。';
+          } else if (firstStep) {
+            const isUTurn = firstStep.type === 12 || firstStep.type === 13;
+            if (isUTurn) {
+              // Section 五.C：若新路線第一個動作是合法迴轉，第一階段明確告知「前方 X 公尺，請準備迴轉」，絕不先報迴轉後的右轉！
+              announceText = `已重新規劃路線，前方 ${distLabel}，請準備迴轉。`;
+              spokenKeysRef.current.add(`${firstStep.index}:advance`);
+              if (initialDistM <= 260) {
+                spokenKeysRef.current.add(`${firstStep.index}:approach`);
+              }
+            } else {
+              // Section 四：尊重駕駛自行選擇的順向道路，直接播報順向新路線的下一個動作
+              const shortChain =
+                secondStep && firstStep.distanceKm > 0 && firstStep.distanceKm <= 0.09
+                  ? `，接著${secondStep.instruction}`
+                  : '';
+              announceText = `已切換至新路線，前方 ${distLabel}，${firstStep.instruction}${shortChain}。`;
+              spokenKeysRef.current.add(`${firstStep.index}:advance`);
+              spokenKeysRef.current.add(`${firstStep.index}:transition`);
+            }
           }
+
+          voiceAdapter.speak(announceText);
+          pushVoiceLog({
+            maneuverIndex: firstStep?.index ?? 0,
+            stage: 'reroute',
+            commandState: 'ROUTE_RECOVERED',
+            distanceMeters: initialDistM,
+            speedKmh: Math.round((activeGps?.speedMps ?? 0) * 3.6),
+            text: announceText,
+          });
+
+          const uiUpdateLatencyMs = Math.max(8, Date.now() - uiT0);
+          setRerouteMetrics((prev) =>
+            [
+              {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                timestamp: Date.now(),
+                routeVersion: updated.requestVersion ?? routeVersionRef.current,
+                reason,
+                detectionLatencyMs,
+                apiLatencyMs,
+                uiUpdateLatencyMs,
+                firstManeuverText: announceText,
+              },
+              ...prev,
+            ].slice(0, 20)
+          );
         }
       } finally {
         isReroutingRef.current = false;
       }
     },
-    [destination, calculateRoute, voiceAdapter, rerouteCount]
+    [destination, calculateRoute, voiceAdapter, rerouteCount, activeGps, pushVoiceLog]
   );
 
-  // 即時導航進度計算、抗漂移語音觸發、偏航重算與抵達判定
+  // 即時導航進度計算、7 態狀態機、速度感知語音觸發、獨立偏航／逆向／錯過路口偵測與抵達判定
   useEffect(() => {
     if (phase !== 'navigating' || !activeGps || !route || route.coordinates.length < 2) {
       return;
     }
 
+    const decisionHeading = activeGps.rawHeadingDeg ?? activeGps.headingDeg ?? null;
     const snap = computeNavigationProgress(
       { lat: activeGps.lat, lon: activeGps.lon },
       route,
-      lastShapeIndexRef.current
+      lastShapeIndexRef.current,
+      decisionHeading,
+      activeGps.speedMps,
+      lastDistanceToNextTurnRef.current,
+      lastActiveManeuverIdxRef.current
     );
     lastShapeIndexRef.current = snap.nearestShapeIndex;
+
+    const prevActiveIdx = lastActiveManeuverIdxRef.current;
+    const isStepTransition =
+      prevActiveIdx !== null &&
+      snap.activeManeuverIndex !== prevActiveIdx &&
+      snap.activeManeuverIndex > prevActiveIdx;
+
+    lastActiveManeuverIdxRef.current = snap.activeManeuverIndex;
+    lastDistanceToNextTurnRef.current = snap.distanceToNextTurnMeters;
     setProgress(snap);
 
     // 1. 抵達判定
@@ -436,44 +587,138 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         simTimerRef.current = null;
       }
       setIsSimulating(false);
+      setCommandState('ARRIVED');
       setPhase('arrived');
       setFollowMode('free');
       bgLocationAdapter.stop();
       setBgLocationActive(false);
       AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
-      voiceAdapter.speak('已抵達目的地，導航結束');
+      const arriveText = '已抵達目的地，導航結束。';
+      voiceAdapter.speak(arriveText);
+      pushVoiceLog({
+        maneuverIndex: snap.activeManeuverIndex,
+        stage: 'system',
+        commandState: 'ARRIVED',
+        distanceMeters: 0,
+        speedKmh: Math.round((activeGps.speedMps ?? 0) * 3.6),
+        text: arriveText,
+      });
       return;
     }
 
-    // 若 GPS 精度過差（> 60m），暫不觸發偏航重算或轉彎語音，防止漂移誤判
-    const accuracyOk = (activeGps.accuracyMeters ?? 15) <= 60;
+    // 若 GPS 精度過差（> 55m），暫不觸發偏航重算或轉彎語音，防止單點漂移誤判（Section 三.A & 十.10）
+    const accuracyOk = (activeGps.accuracyMeters ?? 12) <= 55;
     if (!accuracyOk && !isSimulating) {
       return;
     }
 
-    // 2. 偏航偵測（連續 3 次有效 GPS 點偏離 > 55m 才觸發，防止單點漂移誤判）
+    // 2. Section 三 & 五.D：獨立偏航偵測器（綜合橫向偏離 > 25m、逆向行駛 > 110°、錯過轉彎或經過迴轉點未迴轉）
     if (!isSimulating) {
+      // (A) 錯過轉彎或錯過迴轉位置：立即取消過期語音並順向重新計算新路線
+      if (snap.isMissedManeuver) {
+        if (offRouteFirstSeenTsRef.current === 0) {
+          offRouteFirstSeenTsRef.current = Date.now();
+        }
+        voiceAdapter.stop();
+        setCommandState('OFF_ROUTE');
+        const wasUTurn =
+          snap.nextManeuver?.type === 12 || snap.nextManeuver?.type === 13;
+        triggerOffRouteReroute(
+          { lat: activeGps.lat, lon: activeGps.lon },
+          decisionHeading,
+          wasUTurn ? 'missed_uturn' : 'missed_turn'
+        );
+        return;
+      }
+
+      // (B) 橫向偏離原路線 > 25m（駕駛主動選走其他道路）
       if (snap.distanceToRouteMeters > OFF_ROUTE_THRESHOLD_METERS) {
+        if (offRouteHitsRef.current === 0 && offRouteFirstSeenTsRef.current === 0) {
+          offRouteFirstSeenTsRef.current = Date.now();
+        }
         offRouteHitsRef.current += 1;
-        if (offRouteHitsRef.current >= OFF_ROUTE_CONSECUTIVE_HITS) {
-          triggerOffRouteReroute({ lat: activeGps.lat, lon: activeGps.lon });
+        setCommandState('OFF_ROUTE');
+        voiceAdapter.stop();
+        // 當偏離超過 42m 且車速 >= 4 m/s 時立即確認；否則連續 2 筆（約 1 秒）確認，兼顧抗漂移與 1~2 秒極速反應
+        const immediateLateralConfirm =
+          snap.distanceToRouteMeters >= 42 &&
+          (activeGps.speedMps ?? 0) >= 4.0 &&
+          (activeGps.accuracyMeters ?? 12) <= 25;
+        if (
+          immediateLateralConfirm ||
+          offRouteHitsRef.current >= OFF_ROUTE_CONSECUTIVE_HITS
+        ) {
+          triggerOffRouteReroute(
+            { lat: activeGps.lat, lon: activeGps.lon },
+            decisionHeading,
+            'lateral_off_route'
+          );
           return;
         }
+        return;
       } else {
         offRouteHitsRef.current = 0;
+      }
+
+      // (C) 在同一條路上逆向行駛（如林口信義路往西北開，而原路線往東南走）：連續 2 筆（約 1 秒）立即觸發順向重算
+      if (snap.isWrongWay) {
+        if (wrongWayHitsRef.current === 0 && offRouteFirstSeenTsRef.current === 0) {
+          offRouteFirstSeenTsRef.current = Date.now();
+        }
+        wrongWayHitsRef.current += 1;
+        setCommandState('OFF_ROUTE');
+        voiceAdapter.stop();
+        if (wrongWayHitsRef.current >= WRONG_WAY_CONSECUTIVE_HITS) {
+          triggerOffRouteReroute(
+            { lat: activeGps.lat, lon: activeGps.lon },
+            decisionHeading,
+            'wrong_way'
+          );
+          return;
+        }
+        return;
+      } else {
+        wrongWayHitsRef.current = 0;
+      }
+
+      if (offRouteHitsRef.current === 0 && wrongWayHitsRef.current === 0) {
+        offRouteFirstSeenTsRef.current = 0;
         if (rerouteOfflinePending) setRerouteOfflinePending(false);
       }
     }
 
-    // 3. 語音轉彎播報（500m / 150m / 35m 門檻）
+    // 更新導航指令狀態機（若剛完成重算 2.6 秒內保持顯示 ROUTE_RECOVERED）
+    const nextCmdState: NavCommandState =
+      Date.now() < routeRecoveredUntilTsRef.current
+        ? 'ROUTE_RECOVERED'
+        : snap.commandState;
+    setCommandState(nextCmdState);
+
+    // 若正處於離線重算失敗等待中，不繼續播報已失效舊路線的轉彎指示（Section 三.C）
+    if (rerouteOfflinePending) {
+      return;
+    }
+
+    // 3. 速度感知三階段語音與轉彎／迴轉完成後下一步立即播報
     const announcement = pickVoiceAnnouncement(
       snap.nextManeuver,
+      snap.thenManeuver,
       snap.distanceToNextTurnMeters,
-      spokenKeysRef.current
+      activeGps.speedMps,
+      spokenKeysRef.current,
+      isStepTransition
     );
     if (announcement) {
       spokenKeysRef.current.add(announcement.key);
       voiceAdapter.speak(announcement.text);
+      pushVoiceLog({
+        maneuverIndex: snap.nextManeuver?.index ?? 0,
+        stage: announcement.stage,
+        commandState: nextCmdState,
+        distanceMeters: snap.distanceToNextTurnMeters,
+        speedKmh: Math.round((activeGps.speedMps ?? 0) * 3.6),
+        text: announcement.text,
+      });
     }
   }, [
     phase,
@@ -484,6 +729,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     bgLocationAdapter,
     voiceAdapter,
     triggerOffRouteReroute,
+    pushVoiceLog,
   ]);
 
   const startNavigation = useCallback(async () => {
@@ -520,12 +766,39 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     const startStep = route.maneuvers[0];
     const nextStep = route.maneuvers[1];
     const mins = Math.max(1, Math.round(route.durationSec / 60));
-    voiceAdapter.speak(
-      `開始導航，全程 ${route.distanceKm.toFixed(1)} 公里，預計 ${mins} 分鐘。${
-        nextStep ? nextStep.instruction : startStep?.instruction || ''
-      }`
-    );
-  }, [route, destination, vehicleType, avoidTolls, avoidHighways, bgLocationAdapter, voiceAdapter]);
+    const initialDistM = Math.max(20, Math.round((startStep?.distanceKm || 0.2) * 1000));
+    const distLabel = formatDistanceMetersZh(initialDistM);
+    let firstPrompt = startStep?.instruction || '';
+    if (nextStep) {
+      if (nextStep.type === 12 || nextStep.type === 13) {
+        firstPrompt = `前方 ${distLabel}，請準備迴轉。`;
+        spokenKeysRef.current.add(`${nextStep.index}:advance`);
+      } else {
+        firstPrompt = `前方 ${distLabel}，${nextStep.instruction}。`;
+        spokenKeysRef.current.add(`${nextStep.index}:advance`);
+      }
+    }
+    const startVoiceText = `開始導航，全程 ${route.distanceKm.toFixed(1)} 公里，預計 ${mins} 分鐘。${firstPrompt}`;
+    setCommandState('FOLLOWING_ROUTE');
+    voiceAdapter.speak(startVoiceText);
+    pushVoiceLog({
+      maneuverIndex: nextStep?.index ?? 0,
+      stage: 'system',
+      commandState: 'FOLLOWING_ROUTE',
+      distanceMeters: initialDistM,
+      speedKmh: 0,
+      text: startVoiceText,
+    });
+  }, [
+    route,
+    destination,
+    vehicleType,
+    avoidTolls,
+    avoidHighways,
+    bgLocationAdapter,
+    voiceAdapter,
+    pushVoiceLog,
+  ]);
 
   const pauseNavigation = useCallback(() => {
     if (phase !== 'navigating') return;
@@ -710,6 +983,9 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     isSimulating,
     rerouteCount,
     rerouteOfflinePending,
+    commandState,
+    voiceHistory,
+    rerouteMetrics,
     triggerOffRouteReroute,
     recoverableSession,
     resumeRecoveredSession,

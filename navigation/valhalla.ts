@@ -325,19 +325,33 @@ export async function reverseGeocodeLocation(
  */
 export async function fetchValhallaRoute(params: {
   origin: Coordinate;
+  originHeadingDeg?: number | null;
   destination: Coordinate;
   destinationPlaceId?: string;
   vehicleType: VehicleClassId;
   avoidTolls?: boolean;
   avoidHighways?: boolean;
 }): Promise<NavigationRoute> {
+  const originPayload: { lat: number; lon: number; heading?: number } = {
+    lat: params.origin.lat,
+    lon: params.origin.lon,
+  };
+  if (
+    typeof params.originHeadingDeg === 'number' &&
+    !Number.isNaN(params.originHeadingDeg) &&
+    params.originHeadingDeg >= 0 &&
+    params.originHeadingDeg <= 360
+  ) {
+    originPayload.heading = Math.round(params.originHeadingDeg) % 360;
+  }
+
   const res = await fetchWithTimeout(
     `${API_BASE}/api/maps/route`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        origin: { lat: params.origin.lat, lon: params.origin.lon },
+        origin: originPayload,
         destination: { lat: params.destination.lat, lon: params.destination.lon },
         destination_place_id: params.destinationPlaceId,
         vehicle_type: params.vehicleType,
@@ -363,10 +377,17 @@ export async function fetchValhallaRoute(params: {
         distanceKm: Number(m.distance_km || 0),
         durationSec: Number(m.duration_sec || 0),
         beginShapeIndex: Number(m.begin_shape_index || 0),
+        endShapeIndex:
+          typeof m.end_shape_index === 'number'
+            ? Number(m.end_shape_index)
+            : Number(m.begin_shape_index || 0),
         coordinate:
           Array.isArray(m.coordinate) && m.coordinate.length >= 2
             ? [Number(m.coordinate[0]), Number(m.coordinate[1])]
             : null,
+        verifiedLegalUTurn: Boolean(
+          m.verified_legal_uturn || Number(m.type) === 12 || Number(m.type) === 13
+        ),
       }))
     : [];
 
@@ -374,6 +395,8 @@ export async function fetchValhallaRoute(params: {
     engine: 'valhalla',
     vehicleType: params.vehicleType,
     transitPending: Boolean(json.transit_pending),
+    headingVerified: Boolean(json.heading_verified),
+    headingUnverified: Boolean(json.heading_unverified),
     warning: json.warning ? String(json.warning) : null,
     distanceKm: Number(json.distance_km || 0),
     durationSec: Number(json.duration_sec || 0),

@@ -56,13 +56,17 @@ export interface RouteManeuver {
   distanceKm: number;
   durationSec: number;
   beginShapeIndex: number;
+  endShapeIndex?: number;
   coordinate: [number, number] | null; // [lon, lat]
+  verifiedLegalUTurn?: boolean;
 }
 
 export interface NavigationRoute {
   engine: 'valhalla';
   vehicleType: VehicleClassId;
   transitPending?: boolean;
+  headingVerified?: boolean;
+  headingUnverified?: boolean;
   warning?: string | null;
   distanceKm: number;
   durationSec: number;
@@ -70,6 +74,43 @@ export interface NavigationRoute {
   coordinates: [number, number][]; // [lon, lat][]
   maneuvers: RouteManeuver[];
   fetchedAt: number;
+  requestVersion?: number;
+}
+
+/**
+ * Section 六：導航指令明確狀態機（7 大狀態）
+ */
+export type NavCommandState =
+  | 'FOLLOWING_ROUTE'
+  | 'APPROACHING_MANEUVER'
+  | 'EXECUTING_MANEUVER'
+  | 'OFF_ROUTE'
+  | 'REROUTING'
+  | 'ROUTE_RECOVERED'
+  | 'ARRIVED';
+
+export interface VoiceLogEntry {
+  id: string;
+  timestamp: number;
+  routeVersion: number;
+  maneuverIndex: number;
+  stage: 'advance' | 'approach' | 'execute' | 'transition' | 'reroute' | 'system';
+  commandState: NavCommandState;
+  distanceMeters: number;
+  speedKmh: number;
+  text: string;
+  canceled?: boolean;
+}
+
+export interface ReroutePerformanceEntry {
+  id: string;
+  timestamp: number;
+  routeVersion: number;
+  reason: 'lateral_off_route' | 'wrong_way' | 'missed_turn' | 'missed_uturn';
+  detectionLatencyMs: number;
+  apiLatencyMs: number;
+  uiUpdateLatencyMs: number;
+  firstManeuverText: string;
 }
 
 export type NavigationPhase =
@@ -89,6 +130,7 @@ export interface GpsSnapshot {
   lon: number;
   accuracyMeters: number | null;
   headingDeg: number | null;
+  rawHeadingDeg?: number | null;
   speedMps: number | null;
   timestamp: number;
 }
