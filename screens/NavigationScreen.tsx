@@ -37,10 +37,7 @@ import {
 } from '../components/ManeuverArrowIcon';
 import { OpeningHoursPicker } from '../components/OpeningHoursPicker';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
-import {
-  type ReplayScenarioResult,
-  runAllGpsReplayScenarios,
-} from '../navigation/gpsReplayTester';
+import type { ReplayScenarioResult } from '../navigation/gpsReplayTester';
 import { getEffectiveMapStyleUrl, MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
 import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
 import {
@@ -73,7 +70,7 @@ import {
 import { DISPLAY_VEHICLE_PROFILES, getVehicleProfile } from '../navigation/vehicleRestrictions';
 import { haversineKm } from '../services/api';
 
-const GOBA_MASCOT = require('../assets/icon.png');
+const GOBA_MASCOT = require('../assets/icon-small.png');
 
 const QUICK_POI_CATEGORIES = [
   { label: '加油站', query: '加油站', categoryId: 'gas_station', icon: 'flame-outline' },
@@ -2394,11 +2391,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.optChip, { backgroundColor: '#FCE7F3' }]}
-                onPress={() => {
+                onPress={async () => {
                   if (nav.speedKmh > 3 && !nav.isSimulating) {
                     Alert.alert('行車安全保護', '請於車輛靜止時或由乘客操作 GPS 軌跡回放測試。');
                     return;
                   }
+                  const { runAllGpsReplayScenarios } = await import(
+                    '../navigation/gpsReplayTester'
+                  );
                   const res = runAllGpsReplayScenarios();
                   setReplayResults(res);
                 }}

@@ -252,7 +252,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     voiceAdapter.speak('鍋巴導航語音測試，前方一百五十公尺，右轉進入忠孝東路四段');
   }, [voiceAdapter]);
 
-  // 啟動前景即時 GPS 監聽
+  // 1. 初始化定位權限與首次位置（僅於掛載時執行一次），並於卸載時清理計時器與語音
   useEffect(() => {
     let active = true;
     (async () => {
@@ -278,13 +278,45 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
             timestamp: current.timestamp,
           });
         }
+      } catch {
+        if (active) setGpsPermission('denied');
+      }
+    })();
 
-        watcherRef.current = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.BestForNavigation,
-            timeInterval: 500,
-            distanceInterval: 1,
-          },
+    return () => {
+      active = false;
+      if (simTimerRef.current) {
+        clearInterval(simTimerRef.current);
+        simTimerRef.current = null;
+      }
+      bgLocationAdapter.stop();
+      voiceAdapter.stop();
+      KeepAwake.deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {});
+    };
+  }, [applyAntiDriftGps, bgLocationAdapter, voiceAdapter]);
+
+  // 2. 依導航狀態動態調整 GPS 更新頻率：瀏覽/預覽省電平衡（3s / 5m），正式導航最高精度（0.5s / 1m）
+  const isHighFreqGps =
+    (phase === 'navigating' || phase === 'off_route_recalculating') && !isSimulating;
+  useEffect(() => {
+    if (gpsPermission !== 'granted') return;
+    let active = true;
+    (async () => {
+      try {
+        watcherRef.current?.remove();
+        watcherRef.current = null;
+        const sub = await Location.watchPositionAsync(
+          isHighFreqGps
+            ? {
+                accuracy: Location.Accuracy.BestForNavigation,
+                timeInterval: 500,
+                distanceInterval: 1,
+              }
+            : {
+                accuracy: Location.Accuracy.Balanced,
+                timeInterval: 3000,
+                distanceInterval: 5,
+              },
           (loc) => {
             if (!active) return;
             applyAntiDriftGps({
@@ -297,8 +329,13 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
             });
           }
         );
+        if (!active) {
+          sub.remove();
+          return;
+        }
+        watcherRef.current = sub;
       } catch {
-        if (active) setGpsPermission('denied');
+        // ignore watcher restart errors
       }
     })();
 
@@ -306,15 +343,8 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       active = false;
       watcherRef.current?.remove();
       watcherRef.current = null;
-      if (simTimerRef.current) {
-        clearInterval(simTimerRef.current);
-        simTimerRef.current = null;
-      }
-      bgLocationAdapter.stop();
-      voiceAdapter.stop();
-      KeepAwake.deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {});
     };
-  }, [applyAntiDriftGps, bgLocationAdapter, voiceAdapter]);
+  }, [gpsPermission, isHighFreqGps, applyAntiDriftGps]);
 
   // 導航中維持螢幕恆亮
   useEffect(() => {

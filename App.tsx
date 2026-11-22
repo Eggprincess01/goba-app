@@ -26,7 +26,6 @@ import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import * as WebBrowser from 'expo-web-browser';
 import * as Location from 'expo-location';
-import type { CameraRef } from '@maplibre/maplibre-react-native';
 
 import { styles } from './styles/theme';
 import {
@@ -37,7 +36,6 @@ import {
   FuelPref,
   MaintLog,
   MaintSubItem,
-  MapCategory,
   RefuelLog,
   TabType,
   VehicleFilter,
@@ -55,8 +53,6 @@ import {
   UserProfile,
   PlateResult,
   ExamSlot,
-  MapPOI,
-  LiveTrafficData,
   fetchLiveWeather,
   fetchLiveAqi,
   fetchLiveOilPrices,
@@ -67,8 +63,6 @@ import {
   fetchUserTasks,
   fetchUserFavorites,
   addUserFavorite,
-  fetchNearbyPOIs,
-  fetchLiveTraffic,
   fetchCloudGarage,
   pushCloudGarage,
   calcDaysUntilDate,
@@ -136,21 +130,14 @@ export default function App() {
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const localUpdatedAtRef = useRef<number>(0);
 
-  // 內建 GOBA Maps (MapLibre) 底部導覽列顯隱（瀏覽時顯示 5 分頁列，進入搜尋/路線預覽/導航自動全螢幕隱藏）
+  // 內建 GOBA Maps (MapLibre) 首次開啟後常駐保留（切分頁只隱藏不重新載入）
+  const [hasOpenedMapTab, setHasOpenedMapTab] = useState(false);
   const [mapTabBarVisible, setMapTabBarVisible] = useState(true);
-  const mapCameraRef = useRef<CameraRef | null>(null);
-  const poiReqIdRef = useRef(0);
-  const [mapCategory, setMapCategory] = useState<MapCategory>('gas');
-  const [gasBrandFilter, setGasBrandFilter] = useState('全部');
-  const [mapPois, setMapPois] = useState<MapPOI[]>([]);
-  const [mapLoading, setMapLoading] = useState(false);
-  const [mapError, setMapError] = useState<string | null>(null);
-  const [selectedPoi, setSelectedPoi] = useState<MapPOI | null>(null);
-
-  const [trafficData, setTrafficData] = useState<LiveTrafficData | null>(null);
-  const [trafficLoading, setTrafficLoading] = useState(false);
-  const [trafficError, setTrafficError] = useState<string | null>(null);
-  const [trafficSubTab, setTrafficSubTab] = useState<'speeds' | 'incidents'>('speeds');
+  useEffect(() => {
+    if (activeTab === 'map' && !hasOpenedMapTab) {
+      setHasOpenedMapTab(true);
+    }
+  }, [activeTab, hasOpenedMapTab]);
 
   // 加油紀錄 Modal
   const [refuelModalVisible, setRefuelModalVisible] = useState(false);
@@ -418,53 +405,6 @@ export default function App() {
     bootstrap();
   }, [loadLiveData, syncBackendAccount]);
 
-  // -------------------- 地圖與高公局 1968 即時路況 --------------------
-  const loadLiveTraffic = useCallback(async () => {
-    setTrafficLoading(true);
-    setTrafficError(null);
-    try {
-      const data = await fetchLiveTraffic();
-      setTrafficData(data);
-    } catch (err) {
-      setTrafficError(getReadableError(err, '無法取得高公局即時路況'));
-    } finally {
-      setTrafficLoading(false);
-    }
-  }, []);
-
-  const loadMapPois = useCallback(
-    async (lat: number, lon: number, cat: MapCategory) => {
-      if (cat === 'traffic') {
-        loadLiveTraffic();
-        return;
-      }
-      const reqId = ++poiReqIdRef.current;
-      setMapLoading(true);
-      setMapError(null);
-      try {
-        const pois = await fetchNearbyPOIs(lat, lon, cat);
-        if (reqId === poiReqIdRef.current && pois.length > 0) {
-          setMapPois(pois);
-        }
-      } catch (err) {
-        if (reqId === poiReqIdRef.current) {
-          setMapError(getReadableError(err, '無法取得周邊站點資料'));
-        }
-      } finally {
-        if (reqId === poiReqIdRef.current) {
-          setMapLoading(false);
-        }
-      }
-    },
-    [loadLiveTraffic]
-  );
-
-  useEffect(() => {
-    if (activeTab === 'map') {
-      loadMapPois(region.lat, region.lon, mapCategory);
-    }
-  }, [activeTab, mapCategory, region.lat, region.lon, loadMapPois]);
-
   // -------------------- Deep Link 登入回調 --------------------
   const handleAuthCallbackUrl = useCallback(
     async (url: string) => {
@@ -507,13 +447,6 @@ export default function App() {
     setRegionSearch('');
     loadLiveData(nextRegion);
     pushGarageToCloud(sessionToken, vehicles, refuelLogs, maintLogs, prefs, nextRegion, ts);
-    if (activeTab === 'map') {
-      mapCameraRef.current?.easeTo({
-        center: [nextRegion.lon, nextRegion.lat],
-        zoom: 13.5,
-        duration: 450,
-      });
-    }
   };
 
   const handleUseGpsLocation = async () => {
@@ -935,15 +868,6 @@ export default function App() {
     runExamRadar(examLicenseType);
   };
 
-  const focusPoiOnMap = (poi: MapPOI) => {
-    setSelectedPoi(poi);
-    mapCameraRef.current?.easeTo({
-      center: [poi.lon, poi.lat],
-      zoom: 15.5,
-      duration: 400,
-    });
-  };
-
   const displayName = prefs.customNickname.trim() || user?.name || '鍋巴車友';
   const filteredRegions = TAIWAN_REGIONS.filter((r) =>
     regionSearch.trim() ? r.name.includes(regionSearch.trim()) : true
@@ -975,9 +899,15 @@ export default function App() {
       <View style={styles.ambientOrbTopRight} pointerEvents="none" />
       <View style={styles.ambientOrbBottomLeft} pointerEvents="none" />
 
-      {/* 地圖分頁：直接全螢幕 edge-to-edge 顯示 GOBA Maps，不需另外點擊按鈕 */}
-      {activeTab === 'map' && (
-        <View style={StyleSheet.absoluteFill}>
+      {/* 地圖分頁：首次開啟後常駐保留（切分頁只隱藏不釋放，回來 0 延遲秒開） */}
+      {hasOpenedMapTab && (
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            activeTab !== 'map' && { opacity: 0, zIndex: -1 },
+          ]}
+          pointerEvents={activeTab === 'map' ? 'auto' : 'none'}
+        >
           <NavigationScreen
             initialCenter={{ lat: region.lat, lon: region.lon }}
             embeddedInTab
@@ -994,7 +924,7 @@ export default function App() {
         {activeTab === 'map' ? null : activeTab === 'home' ? (
           <View style={styles.homeTopBar}>
             <View style={styles.brandRow}>
-              <Image source={require('./assets/icon.png')} style={styles.topMascotLogo} />
+              <Image source={require('./assets/icon-small.png')} style={styles.topMascotLogo} />
               <Text style={styles.homeBrandTitle}>鍋巴 GOBA</Text>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -1060,8 +990,7 @@ export default function App() {
                 onRefresh={onPullRefresh}
                 onOpenRegionModal={() => setRegionModalVisible(true)}
                 onSelectTab={setActiveTab}
-                onOpenMapWithCategory={(cat) => {
-                  setMapCategory(cat);
+                onOpenMapWithCategory={() => {
                   setActiveTab('map');
                 }}
                 onOpenExamModal={openExamRadarModal}
@@ -1118,8 +1047,7 @@ export default function App() {
                 aqi={aqi}
                 onOpenExamModal={openExamRadarModal}
                 onOpenPlateModal={openPlateSearchModal}
-                onOpenMapWithCategory={(cat) => {
-                  setMapCategory(cat);
+                onOpenMapWithCategory={() => {
                   setActiveTab('map');
                 }}
                 onSelectTab={setActiveTab}
