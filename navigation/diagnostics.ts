@@ -3,6 +3,12 @@ import { SearchPlace } from './types';
 
 const RECENTS_STORAGE_KEY = 'goba_maps_recents_v1';
 const FAVORITES_STORAGE_KEY = 'goba_maps_favorites_v1';
+const COMMUTE_ANCHORS_KEY = 'goba_maps_commute_anchors_v1';
+
+export interface CommuteAnchors {
+  home: SearchPlace | null;
+  work: SearchPlace | null;
+}
 
 export type DiagnosticEventType =
   | 'route_ok'
@@ -105,5 +111,36 @@ export async function toggleFavoritePlace(place: SearchPlace): Promise<SearchPla
     return next;
   } catch {
     return [];
+  }
+}
+
+export async function loadCommuteAnchors(): Promise<CommuteAnchors> {
+  try {
+    const raw = await AsyncStorage.getItem(COMMUTE_ANCHORS_KEY);
+    if (!raw) return { home: null, work: null };
+    const parsed = JSON.parse(raw);
+    return {
+      home: parsed?.home || null,
+      work: parsed?.work || null,
+    };
+  } catch {
+    return { home: null, work: null };
+  }
+}
+
+export async function saveCommuteAnchor(
+  slot: 'home' | 'work',
+  place: SearchPlace | null
+): Promise<CommuteAnchors> {
+  try {
+    const current = await loadCommuteAnchors();
+    const next: CommuteAnchors = {
+      ...current,
+      [slot]: place,
+    };
+    await AsyncStorage.setItem(COMMUTE_ANCHORS_KEY, JSON.stringify(next));
+    return next;
+  } catch {
+    return { home: null, work: null };
   }
 }

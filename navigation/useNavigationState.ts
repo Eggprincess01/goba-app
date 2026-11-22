@@ -17,10 +17,13 @@ import {
   createExpoVoiceAdapter,
 } from './adapters';
 import {
+  CommuteAnchors,
   getNavDiagnostics,
+  loadCommuteAnchors,
   loadFavoritePlaces,
   loadRecentSearches,
   recordNavDiagnostic,
+  saveCommuteAnchor,
   saveRecentSearch,
   toggleFavoritePlace,
 } from './diagnostics';
@@ -74,9 +77,11 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const [gpsSignalLost, setGpsSignalLost] = useState(false);
   const [recoverableSession, setRecoverableSession] = useState<SavedNavSession | null>(null);
 
-  // 常用地點與最近搜尋
+  // 常用地點（住家 / 公司）、收藏與最近搜尋
   const [recentPlaces, setRecentPlaces] = useState<SearchPlace[]>([]);
   const [favoritePlaces, setFavoritePlaces] = useState<SearchPlace[]>([]);
+  const [commuteAnchors, setCommuteAnchors] = useState<CommuteAnchors>({ home: null, work: null });
+  const [inspectedPlace, setInspectedPlace] = useState<SearchPlace | null>(null);
 
   const voiceAdapter = useMemo(() => createExpoVoiceAdapter(true), []);
 
@@ -142,6 +147,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
 
     loadRecentSearches().then(setRecentPlaces);
     loadFavoritePlaces().then(setFavoritePlaces);
+    loadCommuteAnchors().then(setCommuteAnchors);
   }, []);
 
   // App 回到前景時自動同步最新 GPS 位置（處理鎖屏／來電／切換 App 恢復）
@@ -367,6 +373,14 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     const updated = await toggleFavoritePlace(place);
     setFavoritePlaces(updated);
   }, []);
+
+  const handleSetCommuteAnchor = useCallback(
+    async (slot: 'home' | 'work', place: SearchPlace | null) => {
+      const updated = await saveCommuteAnchor(slot, place);
+      setCommuteAnchors(updated);
+    },
+    []
+  );
 
   const triggerOffRouteReroute = useCallback(
     async (currentCoord: Coordinate) => {
@@ -625,6 +639,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     setBgLocationActive(false);
     setRoute(null);
     setDestination(null);
+    setInspectedPlace(null);
     setProgress(null);
     setRerouteOfflinePending(false);
     setErrorMessage(null);
@@ -700,7 +715,11 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     dismissRecoveredSession,
     recentPlaces,
     favoritePlaces,
+    commuteAnchors,
+    inspectedPlace,
+    setInspectedPlace,
     handleToggleFavorite,
+    handleSetCommuteAnchor,
     getDiagnostics: getNavDiagnostics,
     errorMessage,
     setErrorMessage,
