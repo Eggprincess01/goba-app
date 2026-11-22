@@ -1,16 +1,14 @@
-# GOBA Maps - 自架 Valhalla 路線引擎（台灣 OSM 圖資）
-# 建議規格：至少 2 vCPU / 4GB RAM / 15GB 磁碟（勿部署於 1GB RAM 主站 VPS，避免 OOM 影響官網）
-# 啟動方式：docker compose -f docker-compose.valhalla.yml up -d
-# 啟動完成後，於 GOBA 後端環境變數設定：
-#   VALHALLA_BASE_URL=http://<valhalla-host>:8002/route
+# GOBA Maps - 自架 Valhalla 路線引擎（台灣 OSM 圖資正式部署設定）
+# 映像版本已固定為 3.5.1，確保跨環境一致性與可重複部署。
+# 建議硬體規格：2 vCPU / 4 GB RAM / 20 GB SSD（請部署於獨立導航節點，勿與 1GB RAM 主站混用）
 
 services:
   valhalla:
-    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:3.5.1
     container_name: goba-valhalla-taiwan
     restart: unless-stopped
     ports:
-      - "8002:8002"
+      - "127.0.0.1:8002:8002"
     volumes:
       - ./valhalla_data:/custom_files
     environment:
@@ -20,5 +18,17 @@ services:
       - force_rebuild_elevation=False
       - build_elevation=False
       - build_admins=True
-      - build_time_zones=False
+      - build_time_zones=True
       - serve_tiles=True
+      - server_threads=2
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8002/status || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"

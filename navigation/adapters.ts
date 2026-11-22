@@ -3,6 +3,7 @@ import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
 import * as TaskManager from 'expo-task-manager';
 import { BackgroundLocationAdapter, GpsSnapshot, VoiceGuidanceAdapter } from './types';
+import { recordNavDiagnostic } from './diagnostics';
 
 export const GOBA_BG_LOCATION_TASK = 'GOBA_MAPS_BG_LOCATION_TASK';
 
@@ -34,15 +35,22 @@ if (!TaskManager.isTaskDefined(GOBA_BG_LOCATION_TASK)) {
  */
 export function createExpoVoiceAdapter(initialEnabled = true): VoiceGuidanceAdapter {
   let enabled = initialEnabled;
+  let speechRate = 1.0;
   return {
     get isEnabled() {
       return enabled;
+    },
+    get rate() {
+      return speechRate;
     },
     setEnabled(val: boolean) {
       enabled = val;
       if (!val) {
         Speech.stop();
       }
+    },
+    setRate(nextRate: number) {
+      speechRate = Math.max(0.75, Math.min(1.35, nextRate));
     },
     async speak(text: string) {
       if (!enabled || !text.trim()) return;
@@ -51,10 +59,10 @@ export function createExpoVoiceAdapter(initialEnabled = true): VoiceGuidanceAdap
         Speech.speak(text.trim(), {
           language: 'zh-TW',
           pitch: 1.0,
-          rate: 1.0,
+          rate: speechRate,
         });
       } catch {
-        // ignore speech synth errors
+        recordNavDiagnostic('speech_error', 'TTS_SPEAK_FAIL');
       }
     },
     stop() {

@@ -63,6 +63,38 @@ export const TAIWAN_VEHICLE_PROFILES: VehicleRestrictionProfile[] = [
     verificationNote: '重機模式（測試中）：目前不分黃紅牌，已避開國道收費路段，行駛快速道路請依現場標誌為準。',
   },
   {
+    id: 'heavy_moto_red',
+    label: '紅牌大型重機 (550cc+)',
+    shortLabel: '紅牌重機',
+    iconName: 'speedometer',
+    routeColor: '#DC2626',
+    routeCasingColor: '#7F1D1D',
+    isProductionVerified: false,
+    valhallaCosting: 'motorcycle',
+    allowFreeway: false,
+    allowExpressway: true,
+    restrictedFromInnerFastLane: false,
+    requireTwoStageLeftTurn: false,
+    simSpeedMps: 13.0,
+    verificationNote: '紅牌重機資料模型（測試中）：除國3甲外禁行國道，開放省道快速公路。',
+  },
+  {
+    id: 'heavy_moto_yellow',
+    label: '黃牌大型重機 (250~550cc)',
+    shortLabel: '黃牌重機',
+    iconName: 'speedometer',
+    routeColor: '#EAB308',
+    routeCasingColor: '#713F12',
+    isProductionVerified: false,
+    valhallaCosting: 'motorcycle',
+    allowFreeway: false,
+    allowExpressway: true,
+    restrictedFromInnerFastLane: false,
+    requireTwoStageLeftTurn: false,
+    simSpeedMps: 12.5,
+    verificationNote: '黃牌重機資料模型（測試中）：禁行國道，開放省道快速公路。',
+  },
+  {
     id: 'scooter',
     label: '摩托車',
     shortLabel: '摩托車',
@@ -127,6 +159,10 @@ export const TAIWAN_VEHICLE_PROFILES: VehicleRestrictionProfile[] = [
     verificationNote: '大眾交通時刻表（TDX 捷運／公車／台鐵 GTFS）建置中，目前提供步行距離參考與一鍵查詢即時班次。',
   },
 ];
+
+export const DISPLAY_VEHICLE_PROFILES = TAIWAN_VEHICLE_PROFILES.filter(
+  (v) => v.id !== 'heavy_moto_red' && v.id !== 'heavy_moto_yellow'
+);
 
 export function getVehicleProfile(id: VehicleClassId): VehicleRestrictionProfile {
   return TAIWAN_VEHICLE_PROFILES.find((v) => v.id === id) || TAIWAN_VEHICLE_PROFILES[0];

@@ -28,6 +28,7 @@ import {
 } from '@maplibre/maplibre-react-native';
 import { LiquidGlassSurface } from '../components/LiquidGlassSurface';
 import { MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
+import { recordNavDiagnostic } from '../navigation/diagnostics';
 import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
 import { Coordinate, SearchPlace } from '../navigation/types';
 import { useNavigationState } from '../navigation/useNavigationState';
@@ -38,7 +39,7 @@ import {
   reverseGeocodeLocation,
   searchDestinationPlaces,
 } from '../navigation/valhalla';
-import { getVehicleProfile, TAIWAN_VEHICLE_PROFILES } from '../navigation/vehicleRestrictions';
+import { DISPLAY_VEHICLE_PROFILES, getVehicleProfile } from '../navigation/vehicleRestrictions';
 
 const QUICK_POI_CATEGORIES = [
   { label: '加油站', query: '加油站', icon: 'flame-outline' },
@@ -72,6 +73,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [nearbyPins, setNearbyPins] = useState<SearchPlace[]>([]);
   const [activePoiCat, setActivePoiCat] = useState<string | null>(null);
   const [showManeuvers, setShowManeuvers] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [is3D, setIs3D] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(14.5);
 
@@ -79,8 +81,20 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currentMapStyle = MAP_STYLE_OPTIONS[styleIdx] || MAP_STYLE_OPTIONS[0];
-  const isActiveNav = nav.phase === 'navigating' || nav.phase === 'off_route_recalculating';
+  const isNight = Boolean(currentMapStyle.isNight);
+  const isActiveNav =
+    nav.phase === 'navigating' ||
+    nav.phase === 'paused' ||
+    nav.phase === 'off_route_recalculating';
   const activeProfile = getVehicleProfile(nav.vehicleType);
+  const isDestFavorite = useMemo(() => {
+    if (!nav.destination) return false;
+    return nav.favoritePlaces.some(
+      (f) =>
+        f.name === nav.destination?.name &&
+        Math.abs(f.lat - (nav.destination?.lat || 0)) < 0.001
+    );
+  }, [nav.destination, nav.favoritePlaces]);
 
   const mapLibreTrackMode: TrackUserLocation | undefined = useMemo(() => {
     if (isActiveNav || nav.isSimulating) return undefined;
@@ -282,11 +296,27 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     [activePoiCat, nav]
   );
 
-  const handleLongPressMap = useCallback(
+  // 導航途中一鍵查看完整路線（Section D.7）
+  const handleOverviewRoute = useCallback(() => {
+    if (!nav.route) return;
+    const [west, south, east, north] = nav.route.bbox;
+    nav.setFollowMode('free');
+    setIs3D(false);
+    cameraRef.current?.fitBounds([west, south, east, north], {
+      padding: { top: 185, right: 50, bottom: 260, left: 50 },
+      pitch: 0,
+      bearing: 0,
+      duration: 600,
+    });
+  }, [nav]);
+
+  // 點擊或長按地圖即可設定目的地（Section C.3）
+  const handleMapTapSetDestination = useCallback(
     async (event: any) => {
-      if (isActiveNav) return;
+      if (isActiveNav || searchResults.length > 0 || showSettingsPanel) return;
       const lngLat = event?.nativeEvent?.lngLat;
       if (!Array.isArray(lngLat) || lngLat.length < 2) return;
+      Keyboard.dismiss();
       const [lon, lat] = lngLat;
       const resolved = await reverseGeocodeLocation(lat, lon);
       const droppedPlace: SearchPlace = {
@@ -303,7 +333,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       setSearchQuery(droppedPlace.name);
       await nav.calculateRoute(droppedPlace);
     },
-    [nav, isActiveNav]
+    [nav, isActiveNav, searchResults.length, showSettingsPanel]
   );
 
   // 普通機車／大型重機於道路限制驗證完成前不得作為正式可靠導航：啟動前強制顯示安全確認
@@ -422,7 +452,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         compass
         compassPosition={{ top: isActiveNav ? 195 : 185, left: 16 }}
         attributionPosition={{ bottom: 6, left: 10 }}
-        onLongPress={handleLongPressMap}
+        onPress={handleMapTapSetDestination}
+        onLongPress={handleMapTapSetDestination}
+        onDidFailLoadingMap={() => {
+          recordNavDiagnostic('map_style_fallback', 'STYLE_LOAD_FAIL');
+          if (styleIdx !== 0) setStyleIdx(0);
+        }}
         onRegionDidChange={(e) => {
           if (typeof e?.nativeEvent?.zoom === 'number') {
             setZoomLevel(e.nativeEvent.zoom);
@@ -551,6 +586,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         )}
       </Map>
 
+      {/* 夜間護眼暗色濾鏡層（不阻擋地圖觸控） */}
+      {isNight && (
+        <View
+          pointerEvents="none"
+          style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(10, 15, 28, 0.34)' }]}
+        />
+      )}
+
       {/* 頂部介面：Apple Liquid Glass Turn-by-Turn HUD 或懸浮搜尋膠囊 */}
       <SafeAreaView style={styles.topOverlay} pointerEvents="box-none">
         {isActiveNav ? (
@@ -603,8 +646,48 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               ) : null}
             </LiquidGlassSurface>
 
-            {(nav.isSimulating || nav.bgLocationActive || nav.rerouteCount > 0) && (
+            {(nav.isSimulating ||
+              nav.bgLocationActive ||
+              nav.rerouteCount > 0 ||
+              nav.gpsSignalLost ||
+              nav.gpsWeakSignal ||
+              nav.rerouteOfflinePending ||
+              nav.phase === 'paused') && (
               <View style={styles.hudMetaRow}>
+                {nav.phase === 'paused' && (
+                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
+                    <View style={[styles.statusDot, { backgroundColor: '#F59E0B' }]} />
+                    <Text style={styles.hudTagText}>導航已暫停</Text>
+                  </LiquidGlassSurface>
+                )}
+                {nav.gpsSignalLost && (
+                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
+                    <View style={[styles.statusDot, { backgroundColor: '#EF4444' }]} />
+                    <Text style={styles.hudTagText}>GPS 訊號中斷，等待恢復...</Text>
+                  </LiquidGlassSurface>
+                )}
+                {!nav.gpsSignalLost && nav.gpsWeakSignal && (
+                  <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
+                    <View style={[styles.statusDot, { backgroundColor: '#F59E0B' }]} />
+                    <Text style={styles.hudTagText}>
+                      GPS 精度較弱 (±{Math.round(nav.gps?.accuracyMeters ?? 50)}m)
+                    </Text>
+                  </LiquidGlassSurface>
+                )}
+                {nav.rerouteOfflinePending && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      if (nav.gps) {
+                        nav.triggerOffRouteReroute({ lat: nav.gps.lat, lon: nav.gps.lon });
+                      }
+                    }}
+                  >
+                    <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
+                      <Ionicons name="refresh" size={12} color="#FBBF24" />
+                      <Text style={styles.hudTagText}>網路恢復後點此重算</Text>
+                    </LiquidGlassSurface>
+                  </TouchableOpacity>
+                )}
                 {nav.isSimulating && (
                   <LiquidGlassSurface variant="dark" borderRadius={12} contentStyle={styles.hudTagInner}>
                     <View style={[styles.statusDot, { backgroundColor: '#FBBF24' }]} />
@@ -666,7 +749,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.chipScrollRow}
             >
-              {TAIWAN_VEHICLE_PROFILES.map((v) => {
+              {DISPLAY_VEHICLE_PROFILES.map((v) => {
                 const active = nav.vehicleType === v.id;
                 return (
                   <TouchableOpacity
@@ -738,6 +821,56 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               </ScrollView>
             )}
 
+            {/* 收藏地點與最近搜尋快捷膠囊（Section K.4） */}
+            {!nav.route &&
+              searchResults.length === 0 &&
+              (nav.favoritePlaces.length > 0 || nav.recentPlaces.length > 0) && (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.chipScrollRow}
+                >
+                  {nav.favoritePlaces.slice(0, 4).map((fav) => (
+                    <TouchableOpacity
+                      key={`fav-${fav.id}`}
+                      activeOpacity={0.85}
+                      onPress={() => handleSelectPlace(fav)}
+                    >
+                      <LiquidGlassSurface
+                        variant="sakura"
+                        interactive
+                        borderRadius={16}
+                        contentStyle={styles.poiGlassChip}
+                      >
+                        <Ionicons name="star" size={12} color="#DB2777" />
+                        <Text style={[styles.poiGlassText, { color: '#831843' }]} numberOfLines={1}>
+                          {fav.name}
+                        </Text>
+                      </LiquidGlassSurface>
+                    </TouchableOpacity>
+                  ))}
+                  {nav.recentPlaces.slice(0, 4).map((rec) => (
+                    <TouchableOpacity
+                      key={`rec-${rec.id}`}
+                      activeOpacity={0.85}
+                      onPress={() => handleSelectPlace(rec)}
+                    >
+                      <LiquidGlassSurface
+                        variant="light"
+                        interactive
+                        borderRadius={16}
+                        contentStyle={styles.poiGlassChip}
+                      >
+                        <Ionicons name="time-outline" size={12} color="#6B7280" />
+                        <Text style={styles.poiGlassText} numberOfLines={1}>
+                          {rec.name}
+                        </Text>
+                      </LiquidGlassSurface>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+
             {/* 導航中斷恢復玻璃提示卡 */}
             {nav.recoverableSession && !nav.route && (
               <LiquidGlassSurface variant="sakura" borderRadius={18} contentStyle={styles.recoverRow}>
@@ -801,11 +934,19 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             <Text style={styles.bannerErrorText}>
               {nav.errorMessage || '尚未取得 GPS 定位權限，目前使用預設區域座標規劃路線。'}
             </Text>
+            {nav.gpsPermission === 'denied' && (
+              <TouchableOpacity
+                onPress={() => Linking.openSettings().catch(() => {})}
+                style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#FEE2E2' }}
+              >
+                <Text style={{ fontSize: 11, fontWeight: '700', color: '#B91C1C' }}>開啟設定</Text>
+              </TouchableOpacity>
+            )}
           </LiquidGlassSurface>
         )}
       </SafeAreaView>
 
-      {/* 右側 Apple Maps 風格一體化 Liquid Glass 控制島（兩組精簡膠囊） */}
+      {/* 右側 Apple Maps 風格一體化 Liquid Glass 控制島 */}
       <View style={styles.rightDockWrap}>
         <LiquidGlassSurface variant="light" interactive borderRadius={22}>
           <TouchableOpacity style={styles.dockBtn} onPress={nav.toggleVoice} activeOpacity={0.7}>
@@ -821,7 +962,15 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             onPress={() => setStyleIdx((prev) => (prev + 1) % MAP_STYLE_OPTIONS.length)}
             activeOpacity={0.7}
           >
-            <Ionicons name="layers-outline" size={19} color="#1F2937" />
+            <Ionicons name={isNight ? 'moon' : 'sunny-outline'} size={19} color={isNight ? '#6366F1' : '#1F2937'} />
+          </TouchableOpacity>
+          <View style={styles.dockDivider} />
+          <TouchableOpacity
+            style={styles.dockBtn}
+            onPress={() => setShowSettingsPanel((v) => !v)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="options-outline" size={19} color={showSettingsPanel ? '#DB2777' : '#1F2937'} />
           </TouchableOpacity>
         </LiquidGlassSurface>
 
@@ -837,6 +986,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               color={nav.followMode !== 'free' ? '#DB2777' : '#1F2937'}
             />
           </TouchableOpacity>
+          {nav.route && (
+            <>
+              <View style={styles.dockDivider} />
+              <TouchableOpacity
+                style={styles.dockBtn}
+                onPress={handleOverviewRoute}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="map-outline" size={18} color="#1F2937" />
+              </TouchableOpacity>
+            </>
+          )}
           <View style={styles.dockDivider} />
           <TouchableOpacity style={styles.dockBtn} onPress={handleToggle3D} activeOpacity={0.7}>
             <Text style={[styles.dock3DText, is3D && { color: '#DB2777' }]}>
@@ -857,6 +1018,55 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </TouchableOpacity>
         </LiquidGlassSurface>
       </View>
+
+      {/* 語音設定、地圖樣式與隱私安全診斷面板（Section E.7 / I.7 / K.3 / K.5） */}
+      {showSettingsPanel && (
+        <View style={styles.settingsOverlay}>
+          <LiquidGlassSurface variant="light" borderRadius={22} contentStyle={{ padding: 16, gap: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={{ fontSize: 15, fontWeight: '800', color: '#111827' }}>
+                導航語音與系統診斷
+              </Text>
+              <TouchableOpacity onPress={() => setShowSettingsPanel(false)}>
+                <Ionicons name="close-circle" size={22} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+              <TouchableOpacity style={styles.optChip} onPress={nav.cycleVoiceRate}>
+                <Text style={styles.optChipText}>
+                  語速：{nav.voiceRate < 0.95 ? '慢速' : nav.voiceRate > 1.05 ? '快速' : '標準'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.optChip} onPress={nav.testVoiceGuidance}>
+                <Text style={styles.optChipText}>測試語音（喇叭／藍牙）</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.optChip}
+                onPress={() => setStyleIdx((prev) => (prev + 1) % MAP_STYLE_OPTIONS.length)}
+              >
+                <Text style={styles.optChipText}>樣式：{currentMapStyle.label}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ fontSize: 11, fontWeight: '700', color: '#6B7280', marginTop: 2 }}>
+              隱私安全診斷紀錄（不含任何座標或個人位置資訊）
+            </Text>
+            <ScrollView style={{ maxHeight: 110 }}>
+              {nav.getDiagnostics().length === 0 ? (
+                <Text style={{ fontSize: 11, color: '#9CA3AF' }}>目前無異常事件紀錄</Text>
+              ) : (
+                nav.getDiagnostics().slice(0, 8).map((d) => (
+                  <Text key={d.id} style={{ fontSize: 11, color: '#374151', marginBottom: 2 }}>
+                    • [{new Date(d.timestamp).toLocaleTimeString()}] {d.type} ({d.code})
+                    {d.latencyMs ? ` ${d.latencyMs}ms` : ''}
+                  </Text>
+                ))
+              )}
+            </ScrollView>
+          </LiquidGlassSurface>
+        </View>
+      )}
 
       {/* 導航中左下角深色 Liquid Glass 車速球 */}
       {isActiveNav && (
@@ -929,9 +1139,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 </View>
 
                 {!isActiveNav && (
-                  <TouchableOpacity style={styles.closeSheetBtn} onPress={nav.clearRoute}>
-                    <Ionicons name="close" size={18} color="#4B5563" />
-                  </TouchableOpacity>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {nav.destination && (
+                      <TouchableOpacity
+                        style={styles.closeSheetBtn}
+                        onPress={() => nav.destination && nav.handleToggleFavorite(nav.destination)}
+                      >
+                        <Ionicons
+                          name={isDestFavorite ? 'star' : 'star-outline'}
+                          size={17}
+                          color={isDestFavorite ? '#DB2777' : '#4B5563'}
+                        />
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity style={styles.closeSheetBtn} onPress={nav.clearRoute}>
+                      <Ionicons name="close" size={18} color="#4B5563" />
+                    </TouchableOpacity>
+                  </View>
                 )}
               </View>
 
@@ -997,21 +1221,34 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               ) : isActiveNav ? (
                 <View style={styles.actionRow}>
                   <TouchableOpacity
-                    style={styles.secondaryBtn}
+                    style={styles.iconActionBtn}
                     onPress={() => setShowManeuvers((v) => !v)}
                   >
                     <Ionicons
                       name={showManeuvers ? 'chevron-down' : 'list'}
+                      size={18}
+                      color="#1F2937"
+                    />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.secondaryBtn}
+                    onPress={
+                      nav.phase === 'paused' ? nav.resumeNavigation : nav.pauseNavigation
+                    }
+                  >
+                    <Ionicons
+                      name={nav.phase === 'paused' ? 'play' : 'pause'}
                       size={16}
                       color="#1F2937"
                     />
                     <Text style={styles.secondaryBtnText}>
-                      步驟 ({nav.route.maneuvers.length})
+                      {nav.phase === 'paused' ? '繼續導航' : '暫停'}
                     </Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    style={{ flex: 1.35 }}
+                    style={{ flex: 1.25 }}
                     activeOpacity={0.9}
                     onPress={nav.stopNavigation}
                   >
@@ -1347,6 +1584,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
     color: '#1F2937',
+  },
+  settingsOverlay: {
+    position: 'absolute',
+    left: 16,
+    right: 70,
+    top: '30%',
   },
   // 左下角車速玻璃球
   speedWrap: {

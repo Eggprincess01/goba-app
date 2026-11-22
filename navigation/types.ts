@@ -16,6 +16,8 @@ export interface SearchPlace {
 export type VehicleClassId =
   | 'car'
   | 'heavy_moto'
+  | 'heavy_moto_red'
+  | 'heavy_moto_yellow'
   | 'scooter'
   | 'bicycle'
   | 'pedestrian'
@@ -52,6 +54,7 @@ export type NavigationPhase =
   | 'routing'
   | 'route_preview'
   | 'navigating'
+  | 'paused'
   | 'off_route_recalculating'
   | 'arrived';
 
@@ -71,7 +74,9 @@ export interface GpsSnapshot {
  */
 export interface VoiceGuidanceAdapter {
   isEnabled: boolean;
+  rate: number;
   setEnabled(enabled: boolean): void;
+  setRate(rate: number): void;
   speak(text: string): Promise<void>;
   stop(): void;
 }

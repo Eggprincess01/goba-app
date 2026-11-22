@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as KeepAwake from 'expo-keep-awake';
 import * as Location from 'expo-location';
@@ -16,6 +17,14 @@ import {
   createExpoVoiceAdapter,
 } from './adapters';
 import {
+  getNavDiagnostics,
+  loadFavoritePlaces,
+  loadRecentSearches,
+  recordNavDiagnostic,
+  saveRecentSearch,
+  toggleFavoritePlace,
+} from './diagnostics';
+import {
   buildCumulativeDistances,
   computeNavigationProgress,
   lerpAngleDeg,
@@ -29,8 +38,9 @@ import { getVehicleProfile } from './vehicleRestrictions';
 const KEEP_AWAKE_TAG = 'goba-maps-active-navigation';
 const ACTIVE_NAV_SESSION_KEY = 'goba_active_nav_session_v1';
 const OFF_ROUTE_THRESHOLD_METERS = 55;
-const OFF_ROUTE_CONSECUTIVE_HITS = 2;
-const REROUTE_COOLDOWN_MS = 10000;
+const OFF_ROUTE_CONSECUTIVE_HITS = 3;
+const REROUTE_COOLDOWN_MS = 12000;
+const GPS_STALE_TIMEOUT_MS = 9000;
 
 export interface SavedNavSession {
   destination: SearchPlace;
@@ -52,38 +62,23 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const [route, setRoute] = useState<NavigationRoute | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Phase 2 即時導航狀態
+  // 即時導航、語音、GPS 品質與中斷恢復狀態
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [voiceRate, setVoiceRate] = useState<number>(1.0);
   const [bgLocationActive, setBgLocationActive] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [simGps, setSimGps] = useState<GpsSnapshot | null>(null);
   const [progress, setProgress] = useState<RouteProgressSnapshot | null>(null);
   const [rerouteCount, setRerouteCount] = useState(0);
+  const [rerouteOfflinePending, setRerouteOfflinePending] = useState(false);
+  const [gpsSignalLost, setGpsSignalLost] = useState(false);
   const [recoverableSession, setRecoverableSession] = useState<SavedNavSession | null>(null);
 
-  // 檢查是否有上次因閃退／系統回收而中斷的未完成導航（2 小時內有效）
-  useEffect(() => {
-    AsyncStorage.getItem(ACTIVE_NAV_SESSION_KEY)
-      .then((raw) => {
-        if (!raw) return;
-        const parsed = JSON.parse(raw) as SavedNavSession;
-        if (parsed?.destination && Date.now() - Number(parsed.startedAt || 0) < 2 * 60 * 60 * 1000) {
-          setRecoverableSession(parsed);
-        } else {
-          AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
-        }
-      })
-      .catch(() => {});
-  }, []);
+  // 常用地點與最近搜尋
+  const [recentPlaces, setRecentPlaces] = useState<SearchPlace[]>([]);
+  const [favoritePlaces, setFavoritePlaces] = useState<SearchPlace[]>([]);
 
   const voiceAdapter = useMemo(() => createExpoVoiceAdapter(true), []);
-  const bgLocationAdapter = useMemo(
-    () =>
-      createExpoBackgroundLocationAdapter((snapshot) => {
-        setGps(snapshot);
-      }),
-    []
-  );
 
   const watcherRef = useRef<Location.LocationSubscription | null>(null);
   const simTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -93,8 +88,105 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const lastRerouteTsRef = useRef(0);
   const isReroutingRef = useRef(false);
   const smoothHeadingRef = useRef(0);
+  const lastGpsFixTsRef = useRef<number>(Date.now());
 
-  // 同步語音開關至引擎
+  // 抗漂移濾波：停等紅燈（車速 < 1.2 m/s）時鎖定最後有效車頭方向，防止靜止時畫面亂轉
+  const applyAntiDriftGps = useCallback((incoming: GpsSnapshot) => {
+    lastGpsFixTsRef.current = Date.now();
+    setGpsSignalLost((prevLost) => {
+      if (prevLost) recordNavDiagnostic('gps_signal_restored', 'GPS_RESTORED');
+      return false;
+    });
+
+    if (typeof incoming.accuracyMeters === 'number' && incoming.accuracyMeters > 45) {
+      recordNavDiagnostic('gps_low_accuracy', `ACC_${Math.round(incoming.accuracyMeters)}M`, {
+        accuracyMeters: incoming.accuracyMeters,
+      });
+    }
+
+    const isMoving = (incoming.speedMps ?? 0) >= 1.2;
+    if (isMoving && incoming.headingDeg !== null && incoming.headingDeg >= 0) {
+      smoothHeadingRef.current = lerpAngleDeg(smoothHeadingRef.current, incoming.headingDeg, 0.35);
+    }
+
+    setGps({
+      ...incoming,
+      headingDeg: smoothHeadingRef.current,
+    });
+  }, []);
+
+  const bgLocationAdapter = useMemo(
+    () =>
+      createExpoBackgroundLocationAdapter((snapshot) => {
+        applyAntiDriftGps(snapshot);
+      }),
+    [applyAntiDriftGps]
+  );
+
+  // 載入未完成導航會話、最近搜尋與收藏地點
+  useEffect(() => {
+    AsyncStorage.getItem(ACTIVE_NAV_SESSION_KEY)
+      .then((raw) => {
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as SavedNavSession;
+        if (
+          parsed?.destination &&
+          Date.now() - Number(parsed.startedAt || 0) < 2 * 60 * 60 * 1000
+        ) {
+          setRecoverableSession(parsed);
+        } else {
+          AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
+        }
+      })
+      .catch(() => {});
+
+    loadRecentSearches().then(setRecentPlaces);
+    loadFavoritePlaces().then(setFavoritePlaces);
+  }, []);
+
+  // App 回到前景時自動同步最新 GPS 位置（處理鎖屏／來電／切換 App 恢復）
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (nextState) => {
+      if (nextState === 'active') {
+        recordNavDiagnostic('app_foreground_resync', 'FOREGROUND');
+        try {
+          const fresh = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.BestForNavigation,
+          });
+          applyAntiDriftGps({
+            lat: fresh.coords.latitude,
+            lon: fresh.coords.longitude,
+            accuracyMeters: fresh.coords.accuracy ?? null,
+            headingDeg: fresh.coords.heading ?? null,
+            speedMps: fresh.coords.speed ?? null,
+            timestamp: fresh.timestamp,
+          });
+        } catch {
+          // ignore
+        }
+      }
+    });
+    return () => sub.remove();
+  }, [applyAntiDriftGps]);
+
+  // 監測真實導航期間 GPS 訊號中斷（超過 9 秒無新訊號時提示，訊號進來自動恢復）
+  useEffect(() => {
+    if (phase !== 'navigating' || isSimulating) {
+      setGpsSignalLost(false);
+      return;
+    }
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - lastGpsFixTsRef.current;
+      if (elapsed > GPS_STALE_TIMEOUT_MS) {
+        setGpsSignalLost((already) => {
+          if (!already) recordNavDiagnostic('gps_signal_lost', 'NO_FIX_9S');
+          return true;
+        });
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [phase, isSimulating]);
+
   const toggleVoice = useCallback(() => {
     setVoiceEnabled((prev) => {
       const next = !prev;
@@ -106,7 +198,23 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     });
   }, [voiceAdapter]);
 
-  // 啟動前景即時 GPS 監聽（iOS BestForNavigation 等級）
+  const cycleVoiceRate = useCallback(() => {
+    const order = [0.88, 1.0, 1.15];
+    const labels: Record<number, string> = { 0.88: '慢速', 1.0: '標準', 1.15: '快速' };
+    const idx = order.indexOf(voiceRate);
+    const next = order[(idx + 1) % order.length];
+    setVoiceRate(next);
+    voiceAdapter.setRate(next);
+    voiceAdapter.speak(`語速已設為${labels[next] || '標準'}`);
+  }, [voiceRate, voiceAdapter]);
+
+  const testVoiceGuidance = useCallback(() => {
+    voiceAdapter.setEnabled(true);
+    setVoiceEnabled(true);
+    voiceAdapter.speak('鍋巴導航語音測試，前方一百五十公尺，右轉進入忠孝東路四段');
+  }, [voiceAdapter]);
+
+  // 啟動前景即時 GPS 監聽
   useEffect(() => {
     let active = true;
     (async () => {
@@ -123,7 +231,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
           accuracy: Location.Accuracy.Balanced,
         }).catch(() => null);
         if (active && current) {
-          setGps({
+          applyAntiDriftGps({
             lat: current.coords.latitude,
             lon: current.coords.longitude,
             accuracyMeters: current.coords.accuracy ?? null,
@@ -141,7 +249,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
           },
           (loc) => {
             if (!active) return;
-            setGps({
+            applyAntiDriftGps({
               lat: loc.coords.latitude,
               lon: loc.coords.longitude,
               accuracyMeters: loc.coords.accuracy ?? null,
@@ -168,9 +276,9 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       voiceAdapter.stop();
       KeepAwake.deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {});
     };
-  }, [bgLocationAdapter, voiceAdapter]);
+  }, [applyAntiDriftGps, bgLocationAdapter, voiceAdapter]);
 
-  // 導航中自動維持螢幕恆亮
+  // 導航中維持螢幕恆亮
   useEffect(() => {
     const isActiveNav = phase === 'navigating' || phase === 'off_route_recalculating';
     if (isActiveNav) {
@@ -187,6 +295,11 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     return initialRegionCenter;
   }, [activeGps, initialRegionCenter]);
 
+  const gpsWeakSignal = useMemo(() => {
+    if (isSimulating || !activeGps || activeGps.accuracyMeters === null) return false;
+    return activeGps.accuracyMeters > 45;
+  }, [isSimulating, activeGps]);
+
   const calculateRoute = useCallback(
     async (
       target: SearchPlace,
@@ -202,7 +315,9 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       setErrorMessage(null);
       if (!opts?.keepNavigating) {
         setPhase('routing');
+        saveRecentSearch(target).then(setRecentPlaces);
       }
+      const t0 = Date.now();
       try {
         const res = await fetchValhallaRoute({
           origin: opts?.originOverride ?? effectiveOrigin,
@@ -211,21 +326,27 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
           avoidTolls: opts?.avoidTolls ?? avoidTolls,
           avoidHighways: opts?.avoidHighways ?? avoidHighways,
         });
+        recordNavDiagnostic('route_ok', res.vehicleType, { latencyMs: Date.now() - t0 });
         lastShapeIndexRef.current = 0;
         spokenKeysRef.current.clear();
         offRouteHitsRef.current = 0;
+        setRerouteOfflinePending(false);
         setRoute(res);
         setProgress(null);
         setPhase(opts?.keepNavigating ? 'navigating' : 'route_preview');
         return res;
       } catch (err: any) {
+        recordNavDiagnostic('route_error', 'ROUTE_FAIL', { latencyMs: Date.now() - t0 });
         if (!opts?.keepNavigating) {
           setRoute(null);
           setPhase('idle');
+          setErrorMessage(err?.message || '路線規劃失敗，請稍後再試');
         } else {
+          // 偏航重算失敗時保留原路線與安全畫面狀態，待網路恢復後自動再試
+          setRerouteOfflinePending(true);
           setPhase('navigating');
+          recordNavDiagnostic('reroute_failed_offline', 'KEEP_SAFE_STATE');
         }
-        setErrorMessage(err?.message || '路線規劃失敗，請稍後再試');
         return null;
       }
     },
@@ -242,7 +363,11 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     [destination, phase, calculateRoute]
   );
 
-  // 偏航自動重算
+  const handleToggleFavorite = useCallback(async (place: SearchPlace) => {
+    const updated = await toggleFavoritePlace(place);
+    setFavoritePlaces(updated);
+  }, []);
+
   const triggerOffRouteReroute = useCallback(
     async (currentCoord: Coordinate) => {
       if (!destination || isReroutingRef.current) return;
@@ -253,6 +378,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       lastRerouteTsRef.current = now;
       offRouteHitsRef.current = 0;
       setPhase('off_route_recalculating');
+      recordNavDiagnostic('off_route_reroute', `REROUTE_${rerouteCount + 1}`);
       voiceAdapter.speak('已偏離路線，正在為您重新規劃');
 
       try {
@@ -271,10 +397,10 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         isReroutingRef.current = false;
       }
     },
-    [destination, calculateRoute, voiceAdapter]
+    [destination, calculateRoute, voiceAdapter, rerouteCount]
   );
 
-  // 核心即時導航進度計算、語音播報、偏航偵測與抵達判定
+  // 即時導航進度計算、抗漂移語音觸發、偏航重算與抵達判定
   useEffect(() => {
     if (phase !== 'navigating' || !activeGps || !route || route.coordinates.length < 2) {
       return;
@@ -304,7 +430,13 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       return;
     }
 
-    // 2. 偏航偵測（僅真實 GPS 模式觸發，避免模擬模式誤觸）
+    // 若 GPS 精度過差（> 60m），暫不觸發偏航重算或轉彎語音，防止漂移誤判
+    const accuracyOk = (activeGps.accuracyMeters ?? 15) <= 60;
+    if (!accuracyOk && !isSimulating) {
+      return;
+    }
+
+    // 2. 偏航偵測（連續 3 次有效 GPS 點偏離 > 55m 才觸發，防止單點漂移誤判）
     if (!isSimulating) {
       if (snap.distanceToRouteMeters > OFF_ROUTE_THRESHOLD_METERS) {
         offRouteHitsRef.current += 1;
@@ -314,6 +446,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         }
       } else {
         offRouteHitsRef.current = 0;
+        if (rerouteOfflinePending) setRerouteOfflinePending(false);
       }
     }
 
@@ -327,9 +460,17 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       spokenKeysRef.current.add(announcement.key);
       voiceAdapter.speak(announcement.text);
     }
-  }, [phase, activeGps, route, isSimulating, bgLocationAdapter, voiceAdapter, triggerOffRouteReroute]);
+  }, [
+    phase,
+    activeGps,
+    route,
+    isSimulating,
+    rerouteOfflinePending,
+    bgLocationAdapter,
+    voiceAdapter,
+    triggerOffRouteReroute,
+  ]);
 
-  // 啟動真實 GPS 語音導航
   const startNavigation = useCallback(async () => {
     if (!route) return;
     if (simTimerRef.current) {
@@ -342,11 +483,11 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     spokenKeysRef.current.clear();
     offRouteHitsRef.current = 0;
     setRerouteCount(0);
+    setRerouteOfflinePending(false);
     setRecoverableSession(null);
     setPhase('navigating');
     setFollowMode('course');
 
-    // 寫入導航中斷恢復快照（若背景被系統回收，重開 App 可一鍵無縫接續）
     if (destination) {
       const snapshot: SavedNavSession = {
         destination,
@@ -358,7 +499,6 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       AsyncStorage.setItem(ACTIVE_NAV_SESSION_KEY, JSON.stringify(snapshot)).catch(() => {});
     }
 
-    // 嘗試啟用 iOS 背景定位（使用者若僅允許使用期間則自動維持前景運作）
     const bgStarted = await bgLocationAdapter.start();
     setBgLocationActive(bgStarted);
 
@@ -370,9 +510,29 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         nextStep ? nextStep.instruction : startStep?.instruction || ''
       }`
     );
-  }, [route, bgLocationAdapter, voiceAdapter]);
+  }, [route, destination, vehicleType, avoidTolls, avoidHighways, bgLocationAdapter, voiceAdapter]);
 
-  // 啟動模擬行駛測試（20 FPS 連續線性插值 + 前瞻角度平滑轉向，近似 Google Maps 滑順車頭視角）
+  const pauseNavigation = useCallback(() => {
+    if (phase !== 'navigating') return;
+    if (simTimerRef.current) {
+      clearInterval(simTimerRef.current);
+      simTimerRef.current = null;
+    }
+    voiceAdapter.stop();
+    setPhase('paused');
+    setFollowMode('free');
+  }, [phase, voiceAdapter]);
+
+  const resumeNavigation = useCallback(() => {
+    if (phase !== 'paused' || !route) return;
+    setPhase('navigating');
+    setFollowMode('course');
+    const step = progress?.nextManeuver || route.maneuvers[0];
+    if (step) {
+      voiceAdapter.speak(`繼續導航，${step.instruction}`);
+    }
+  }, [phase, route, progress, voiceAdapter]);
+
   const startSimulatedNavigation = useCallback(() => {
     if (!route || route.coordinates.length < 2) return;
     if (simTimerRef.current) {
@@ -389,9 +549,8 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     const coords = route.coordinates;
     const cumDist = buildCumulativeDistances(coords);
     const profile = getVehicleProfile(route.vehicleType);
-    // 模擬速度略微加速 1.8x 讓長途測試更流暢，同時維持平滑不跳動
     const simSpeed = Math.max(profile.simSpeedMps * 1.8, 8);
-    const tickMs = 50; // 20 FPS
+    const tickMs = 50;
     const metersPerTick = simSpeed * (tickMs / 1000);
     let traveledMeters = 0;
 
@@ -407,7 +566,9 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     });
 
     voiceAdapter.speak(
-      `開始${profile.label}模擬導航，全程 ${route.distanceKm.toFixed(1)} 公里。${route.maneuvers[0]?.instruction || ''}`
+      `開始${profile.label}模擬導航，全程 ${route.distanceKm.toFixed(1)} 公里。${
+        route.maneuvers[0]?.instruction || ''
+      }`
     );
 
     simTimerRef.current = setInterval(() => {
@@ -442,6 +603,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     bgLocationAdapter.stop();
     setBgLocationActive(false);
     setProgress(null);
+    setRerouteOfflinePending(false);
     AsyncStorage.removeItem(ACTIVE_NAV_SESSION_KEY).catch(() => {});
     if (route) {
       setPhase('route_preview');
@@ -464,6 +626,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     setRoute(null);
     setDestination(null);
     setProgress(null);
+    setRerouteOfflinePending(false);
     setErrorMessage(null);
     setPhase('idle');
     setFollowMode('follow');
@@ -514,6 +677,8 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     setFollowMode,
     gpsPermission,
     gps: activeGps,
+    gpsWeakSignal,
+    gpsSignalLost,
     effectiveOrigin,
     destination,
     setDestination,
@@ -521,17 +686,28 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     progress,
     speedKmh,
     voiceEnabled,
+    voiceRate,
     toggleVoice,
+    cycleVoiceRate,
+    testVoiceGuidance,
     bgLocationActive,
     isSimulating,
     rerouteCount,
+    rerouteOfflinePending,
+    triggerOffRouteReroute,
     recoverableSession,
     resumeRecoveredSession,
     dismissRecoveredSession,
+    recentPlaces,
+    favoritePlaces,
+    handleToggleFavorite,
+    getDiagnostics: getNavDiagnostics,
     errorMessage,
     setErrorMessage,
     calculateRoute,
     startNavigation,
+    pauseNavigation,
+    resumeNavigation,
     startSimulatedNavigation,
     stopNavigation,
     clearRoute,
