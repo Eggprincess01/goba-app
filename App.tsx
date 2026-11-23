@@ -953,6 +953,7 @@ export default function App() {
             initialCenter={{ lat: region.lat, lon: region.lon }}
             embeddedInTab
             openFleetTrigger={openFleetTrigger}
+            weatherTemp={weather?.temp ?? null}
             onTabBarVisibilityChange={setMapTabBarVisible}
             onClose={() => setActiveTab('home')}
           />

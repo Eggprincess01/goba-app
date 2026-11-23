@@ -132,6 +132,7 @@ export interface NavigationScreenProps {
   initialDestination?: SearchPlace | null;
   embeddedInTab?: boolean;
   openFleetTrigger?: number;
+  weatherTemp?: number | null;
   onTabBarVisibilityChange?: (visible: boolean) => void;
   onClose: () => void;
 }
@@ -141,6 +142,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   initialDestination = null,
   embeddedInTab = false,
   openFleetTrigger = 0,
+  weatherTemp = null,
   onTabBarVisibilityChange,
   onClose,
 }) => {
@@ -2005,84 +2007,29 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
       {/* ==================== 頂部區塊（依四大狀態切換） ==================== */}
       <SafeAreaView style={styles.topOverlay} pointerEvents="box-none">
-        {/* 狀態 1：Browse（一般瀏覽地圖 — 僅顯示浮動搜尋列與分類捷徑，不混放車種列） */}
+        {/* 狀態 1：Browse（Apple Maps 極簡風格：頂部僅保留左上角氣溫膠囊，搜尋列移至底部卡片） */}
         {uiState === 'browse' && (
-          <>
-            <LiquidGlassSurface variant={isNight ? 'dark' : 'light'} interactive borderRadius={26}>
-              <View style={styles.searchCapsule}>
-                <TouchableOpacity
-                  style={[styles.searchTriggerArea, { paddingLeft: 10 }]}
-                  activeOpacity={0.85}
-                  onPress={() => handleOpenSearch()}
-                >
-                  <Ionicons name="search" size={18} color="#EC4899" />
-                  <Text
-                    style={[styles.searchPlaceholderText, isNight && { color: '#CBD5E1' }]}
-                    numberOfLines={1}
-                    maxFontSizeMultiplier={1.25}
-                  >
-                    {nav.inspectedPlace ? nav.inspectedPlace.name : '搜尋台灣地點、商店或門牌...'}
-                  </Text>
-                </TouchableOpacity>
-
-                {nav.inspectedPlace ? (
-                  <TouchableOpacity
-                    style={styles.capsuleClearBtn}
-                    onPress={() => {
-                      nav.setInspectedPlace(null);
-                      setSearchQuery('');
-                    }}
-                  >
-                    <Ionicons name="close-circle" size={19} color="#9CA3AF" />
-                  </TouchableOpacity>
-                ) : null}
-              </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <LiquidGlassSurface
+              variant={isNight ? 'dark' : 'light'}
+              interactive
+              borderRadius={16}
+              contentStyle={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 5,
+                paddingHorizontal: 10,
+                paddingVertical: 5,
+              }}
+            >
+              <Ionicons name="partly-sunny" size={14} color={isNight ? '#FBBF24' : '#64748B'} />
+              <Text style={{ fontSize: 13, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A' }}>
+                {weatherTemp != null ? `${Math.round(weatherTemp)}°` : '22°'}
+              </Text>
             </LiquidGlassSurface>
 
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.chipScrollRow}
-            >
-              {QUICK_POI_CATEGORIES.map((cat) => {
-                const selected = activePoiCat === cat.label;
-                return (
-                  <TouchableOpacity
-                    key={cat.label}
-                    activeOpacity={0.85}
-                    onPress={() =>
-                      handleQuickPoiCategory(cat.label, cat.query, cat.categoryId)
-                    }
-                  >
-                    <LiquidGlassSurface
-                      variant={selected ? 'dark' : isNight ? 'dark' : 'light'}
-                      interactive
-                      borderRadius={16}
-                      contentStyle={styles.poiGlassChip}
-                    >
-                      <Ionicons
-                        name={cat.icon as any}
-                        size={13}
-                        color={selected ? '#F472B6' : isNight ? '#E2E8F0' : '#4B5563'}
-                      />
-                      <Text
-                        style={[
-                          styles.poiGlassText,
-                          (selected || isNight) && { color: '#FFFFFF' },
-                        ]}
-                        maxFontSizeMultiplier={1.2}
-                      >
-                        {cat.label}
-                      </Text>
-                    </LiquidGlassSurface>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-            {/* 地圖移動後顯示「搜尋這個區域」浮動按鈕（Section 三.2 & 八） */}
             {showSearchAreaBtn && (
               <TouchableOpacity
-                style={{ alignSelf: 'center', marginTop: 2 }}
                 activeOpacity={0.9}
                 onPress={handleSearchThisArea}
               >
@@ -2095,17 +2042,17 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     alignItems: 'center',
                     gap: 6,
                     paddingHorizontal: 14,
-                    paddingVertical: 8,
+                    paddingVertical: 7,
                   }}
                 >
-                  <Ionicons name="refresh" size={14} color="#F472B6" />
+                  <Ionicons name="refresh" size={13} color="#F472B6" />
                   <Text style={{ fontSize: 12, fontWeight: '700', color: '#FFFFFF' }}>
                     搜尋這個區域
                   </Text>
                 </LiquidGlassSurface>
               </TouchableOpacity>
             )}
-          </>
+          </View>
         )}
 
         {/* 狀態 3：Route Preview（頂部顯示起訖點摘要膠囊） */}
@@ -2340,7 +2287,15 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
       {/* ==================== 右側控制列（導航時隱藏，改由右側垂直進度條與頂/底高德看板控制，絕不重疊） ==================== */}
       {uiState !== 'search' && uiState !== 'navigation' && (
-        <View style={styles.rightDockWrap}>
+        <View
+          style={[
+            styles.rightDockWrap,
+            uiState === 'browse' && {
+              top: undefined,
+              bottom: sheetCollapsed ? 175 : 325,
+            },
+          ]}
+        >
           {(
             /* Browse / Route Preview 時保留：定位、日間/夜間圖層與設定 */
             <LiquidGlassSurface
@@ -3931,80 +3886,219 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                       </View>
                     )}
 
-                    <View style={styles.browseHeaderRow}>
-                      <View>
+                    {/* Apple Maps 風格底部搜尋列＋頭像／設定鈕（收合時僅保留此列） */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => handleOpenSearch()}
+                        style={{
+                          flex: 1,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 8,
+                          backgroundColor: isNight ? 'rgba(255,255,255,0.10)' : 'rgba(15,23,42,0.06)',
+                          paddingHorizontal: 14,
+                          paddingVertical: 10,
+                          borderRadius: 20,
+                        }}
+                      >
+                        <Ionicons name="search" size={17} color={isNight ? '#CBD5E1' : '#64748B'} />
                         <Text
-                          style={[styles.idleTitle, isNight && { color: '#FFFFFF' }]}
-                          maxFontSizeMultiplier={1.2}
+                          style={{
+                            fontSize: 15,
+                            fontWeight: '600',
+                            color: isNight ? '#CBD5E1' : '#64748B',
+                            flex: 1,
+                          }}
+                          numberOfLines={1}
                         >
-                          鍋巴地圖 GOBA Maps
+                          搜尋 GOBA 地圖
                         </Text>
-                        <Text style={styles.idleDesc} maxFontSizeMultiplier={1.2}>
-                          點擊地圖任意地點查看詳情，或選擇常用目的地出發
-                        </Text>
-                      </View>
-                      <TouchableOpacity onPress={() => setSheetCollapsed((c) => !c)}>
-                        <Ionicons
-                          name={sheetCollapsed ? 'chevron-up' : 'chevron-down'}
-                          size={18}
-                          color="#9CA3AF"
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => setSheetCollapsed((c) => !c)}
+                        style={{
+                          width: 38,
+                          height: 38,
+                          borderRadius: 19,
+                          backgroundColor: isNight ? 'rgba(255,255,255,0.12)' : 'rgba(236,72,153,0.12)',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Image
+                          source={GOBA_MASCOT}
+                          style={{ width: 32, height: 32, borderRadius: 16 }}
                         />
                       </TouchableOpacity>
                     </View>
 
                     {!sheetCollapsed && (
-                      <View style={styles.commuteRow}>
-                        <TouchableOpacity
-                          style={[
-                            styles.commuteCard,
-                            isNight && { backgroundColor: 'rgba(255,255,255,0.08)' },
-                          ]}
-                          onPress={() =>
-                            nav.commuteAnchors.home
-                              ? nav.calculateRoute(nav.commuteAnchors.home)
-                              : handleOpenSearch('home')
-                          }
-                        >
-                          <View style={styles.commuteIconBox}>
-                            <Ionicons name="home" size={17} color="#EC4899" />
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={[styles.commuteTitle, isNight && { color: '#FFFFFF' }]}>
-                              回家
-                            </Text>
-                            <Text style={styles.commuteSub} numberOfLines={1}>
-                              {nav.commuteAnchors.home
-                                ? nav.commuteAnchors.home.name
-                                : '設定住家'}
-                            </Text>
-                          </View>
-                        </TouchableOpacity>
+                      <View style={{ gap: 14, marginTop: 4 }}>
+                        {/* GOBA 建議（停車位置或快速探索） */}
+                        <View style={{ gap: 6 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: isNight ? '#F8FAFC' : '#0F172A' }}>
+                            GOBA 建議
+                          </Text>
+                          {savedParking ? (
+                            <TouchableOpacity
+                              activeOpacity={0.8}
+                              onPress={() => {
+                                const p: SearchPlace = {
+                                  id: `parking-${savedParking.savedAt}`,
+                                  name: '我的愛車停車位',
+                                  address: `${savedParking.lat.toFixed(5)}, ${savedParking.lon.toFixed(5)}`,
+                                  lat: savedParking.lat,
+                                  lon: savedParking.lon,
+                                  navLat: savedParking.lat,
+                                  navLon: savedParking.lon,
+                                };
+                                nav.setInspectedPlace(p);
+                                nav.calculateRoute(p);
+                              }}
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 10,
+                                backgroundColor: isNight ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.05)',
+                                paddingHorizontal: 12,
+                                paddingVertical: 10,
+                                borderRadius: 14,
+                              }}
+                            >
+                              <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#2563EB', alignItems: 'center', justifyContent: 'center' }}>
+                                <Ionicons name="car" size={17} color="#FFFFFF" />
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text style={{ fontSize: 14, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A' }}>
+                                  停車位置
+                                </Text>
+                                <Text style={{ fontSize: 11, color: '#64748B' }}>
+                                  點擊立即導航回愛車
+                                </Text>
+                              </View>
+                              <Ionicons name="ellipsis-horizontal" size={16} color="#94A3B8" />
+                            </TouchableOpacity>
+                          ) : (
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                              {QUICK_POI_CATEGORIES.slice(0, 4).map((cat) => (
+                                <TouchableOpacity
+                                  key={cat.label}
+                                  activeOpacity={0.8}
+                                  onPress={() => handleQuickPoiCategory(cat.label, cat.query, cat.categoryId)}
+                                  style={{
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    gap: 5,
+                                    backgroundColor: isNight ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.05)',
+                                    paddingHorizontal: 12,
+                                    paddingVertical: 7,
+                                    borderRadius: 14,
+                                  }}
+                                >
+                                  <Ionicons name={cat.icon as any} size={13} color="#EC4899" />
+                                  <Text style={{ fontSize: 12, fontWeight: '700', color: isNight ? '#E2E8F0' : '#334155' }}>
+                                    {cat.label}
+                                  </Text>
+                                </TouchableOpacity>
+                              ))}
+                            </ScrollView>
+                          )}
+                        </View>
 
-                        <TouchableOpacity
-                          style={[
-                            styles.commuteCard,
-                            isNight && { backgroundColor: 'rgba(255,255,255,0.08)' },
-                          ]}
-                          onPress={() =>
-                            nav.commuteAnchors.work
-                              ? nav.calculateRoute(nav.commuteAnchors.work)
-                              : handleOpenSearch('work')
-                          }
-                        >
-                          <View style={[styles.commuteIconBox, { backgroundColor: '#EFF6FF' }]}>
-                            <Ionicons name="briefcase" size={16} color="#3B82F6" />
+                        {/* 地點（圓形大圖示：住家、公司、加入） */}
+                        <View style={{ gap: 8 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: isNight ? '#F8FAFC' : '#0F172A' }}>
+                            地點
+                          </Text>
+                          <View style={{ flexDirection: 'row', gap: 18 }}>
+                            <TouchableOpacity
+                              style={{ alignItems: 'center', width: 64 }}
+                              onPress={() =>
+                                nav.commuteAnchors.home
+                                  ? nav.calculateRoute(nav.commuteAnchors.home)
+                                  : handleOpenSearch('home')
+                              }
+                            >
+                              <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: '#0EA5E9', alignItems: 'center', justifyContent: 'center' }}>
+                                <Ionicons name="home" size={24} color="#FFFFFF" />
+                              </View>
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A', marginTop: 5 }}>
+                                住家
+                              </Text>
+                              <Text style={{ fontSize: 10, color: '#64748B' }} numberOfLines={1}>
+                                {nav.commuteAnchors.home ? nav.commuteAnchors.home.name : '點擊設定'}
+                              </Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              style={{ alignItems: 'center', width: 64 }}
+                              onPress={() =>
+                                nav.commuteAnchors.work
+                                  ? nav.calculateRoute(nav.commuteAnchors.work)
+                                  : handleOpenSearch('work')
+                              }
+                            >
+                              <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: '#78350F', alignItems: 'center', justifyContent: 'center' }}>
+                                <Ionicons name="briefcase" size={22} color="#FFFFFF" />
+                              </View>
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A', marginTop: 5 }}>
+                                公司
+                              </Text>
+                              <Text style={{ fontSize: 10, color: '#64748B' }} numberOfLines={1}>
+                                {nav.commuteAnchors.work ? nav.commuteAnchors.work.name : '點擊設定'}
+                              </Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              style={{ alignItems: 'center', width: 64 }}
+                              onPress={() => handleOpenSearch()}
+                            >
+                              <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: isNight ? 'rgba(255,255,255,0.10)' : 'rgba(148,163,184,0.22)', alignItems: 'center', justifyContent: 'center' }}>
+                                <Ionicons name="add" size={26} color="#2563EB" />
+                              </View>
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A', marginTop: 5 }}>
+                                加入
+                              </Text>
+                              <Text style={{ fontSize: 10, color: '#64748B' }}>搜尋地點</Text>
+                            </TouchableOpacity>
                           </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={[styles.commuteTitle, isNight && { color: '#FFFFFF' }]}>
-                              去公司
+                        </View>
+
+                        {/* 最近搜尋紀錄 */}
+                        {nav.recentPlaces.length > 0 && (
+                          <View style={{ gap: 6 }}>
+                            <Text style={{ fontSize: 13, fontWeight: '800', color: isNight ? '#F8FAFC' : '#0F172A' }}>
+                              搜尋紀錄
                             </Text>
-                            <Text style={styles.commuteSub} numberOfLines={1}>
-                              {nav.commuteAnchors.work
-                                ? nav.commuteAnchors.work.name
-                                : '設定公司'}
-                            </Text>
+                            {nav.recentPlaces.slice(0, 2).map((rp) => (
+                              <TouchableOpacity
+                                key={rp.id}
+                                onPress={() => handleInspectPlaceOnMap(rp)}
+                                style={{
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  gap: 10,
+                                  paddingVertical: 4,
+                                }}
+                              >
+                                <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: isNight ? 'rgba(255,255,255,0.1)' : '#E2E8F0', alignItems: 'center', justifyContent: 'center' }}>
+                                  <Ionicons name="time-outline" size={15} color="#64748B" />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={{ fontSize: 13, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A' }} numberOfLines={1}>
+                                    {rp.name}
+                                  </Text>
+                                  <Text style={{ fontSize: 11, color: '#64748B' }} numberOfLines={1}>
+                                    {rp.address}
+                                  </Text>
+                                </View>
+                              </TouchableOpacity>
+                            ))}
                           </View>
-                        </TouchableOpacity>
+                        )}
                       </View>
                     )}
                   </View>
