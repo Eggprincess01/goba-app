@@ -3,6 +3,7 @@ import {
   Coordinate,
   HdRoadsPayload,
   NavigationRoute,
+  RouteAlternative,
   RouteManeuver,
   SearchPlace,
   TrafficSignalNode,
@@ -410,14 +411,57 @@ export async function reverseGeocodeLocation(
 /**
  * 透過 GOBA 後端（Valhalla 路線引擎）規劃多運具路線（同步傳遞 destination_place_id 確保攔截歷史搬遷舊址）
  */
+function mapRawManeuvers(raw: any): RouteManeuver[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((m: any, idx: number) => ({
+    index: typeof m.index === 'number' ? m.index : idx,
+    type: Number(m.type || 0),
+    instruction: String(m.instruction || '沿路線行駛'),
+    rawInstruction: m.raw_instruction ? String(m.raw_instruction) : undefined,
+    streetNames: Array.isArray(m.street_names) ? m.street_names : [],
+    distanceKm: Number(m.distance_km || 0),
+    durationSec: Number(m.duration_sec || 0),
+    beginShapeIndex: Number(m.begin_shape_index || 0),
+    endShapeIndex:
+      typeof m.end_shape_index === 'number'
+        ? Number(m.end_shape_index)
+        : Number(m.begin_shape_index || 0),
+    coordinate:
+      Array.isArray(m.coordinate) && m.coordinate.length >= 2
+        ? [Number(m.coordinate[0]), Number(m.coordinate[1])]
+        : null,
+    verifiedLegalUTurn: Boolean(
+      m.verified_legal_uturn || Number(m.type) === 12 || Number(m.type) === 13
+    ),
+    hasTrafficSignal: Boolean(m.has_traffic_signal),
+    laneCount: typeof m.lane_count === 'number' ? Number(m.lane_count) : null,
+    speedLimitKmh: typeof m.speed_limit_kmh === 'number' ? Number(m.speed_limit_kmh) : null,
+    exitNumber: m.exit_number ? String(m.exit_number) : null,
+    signToward: m.sign_toward ? String(m.sign_toward) : null,
+  }));
+}
+
+function mapRawTrafficSignals(raw: any): TrafficSignalNode[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((s: any, idx: number) => ({
+    id: String(s.id || `route-sig-${idx}`),
+    lat: Number(s.lat),
+    lon: Number(s.lon),
+    shapeIndex: typeof s.shape_index === 'number' ? Number(s.shape_index) : undefined,
+    streetName: s.street_name ? String(s.street_name) : undefined,
+  }));
+}
+
 export async function fetchValhallaRoute(params: {
   origin: Coordinate;
   originHeadingDeg?: number | null;
+  waypoints?: Coordinate[];
   destination: Coordinate;
   destinationPlaceId?: string;
   vehicleType: VehicleClassId;
   avoidTolls?: boolean;
   avoidHighways?: boolean;
+  alternates?: number;
 }): Promise<NavigationRoute> {
   const originPayload: { lat: number; lon: number; heading?: number } = {
     lat: params.origin.lat,
@@ -432,10 +476,13 @@ export async function fetchValhallaRoute(params: {
     originPayload.heading = Math.round(params.originHeadingDeg) % 360;
   }
 
+  const waypoints = Array.isArray(params.waypoints) ? params.waypoints : [];
+  const altCount = typeof params.alternates === 'number' ? params.alternates : 2;
   const tReqStart = Date.now();
+  const wpSig = waypoints.map((w) => `${w.lat.toFixed(4)},${w.lon.toFixed(4)}`).join(';');
   const routeCacheKey =
     originPayload.heading == null
-      ? `${params.origin.lat.toFixed(4)},${params.origin.lon.toFixed(4)}|${params.destination.lat.toFixed(4)},${params.destination.lon.toFixed(4)}|${params.vehicleType}|${params.avoidTolls ? 1 : 0}|${params.avoidHighways ? 1 : 0}`
+      ? `${params.origin.lat.toFixed(4)},${params.origin.lon.toFixed(4)}|${params.destination.lat.toFixed(4)},${params.destination.lon.toFixed(4)}|${wpSig}|${altCount}|${params.vehicleType}|${params.avoidTolls ? 1 : 0}|${params.avoidHighways ? 1 : 0}`
       : null;
 
   if (routeCacheKey) {
@@ -467,11 +514,13 @@ export async function fetchValhallaRoute(params: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         origin: originPayload,
+        waypoints: waypoints.map((w) => ({ lat: w.lat, lon: w.lon })),
         destination: { lat: params.destination.lat, lon: params.destination.lon },
         destination_place_id: params.destinationPlaceId,
         vehicle_type: params.vehicleType,
         avoid_tolls: Boolean(params.avoidTolls),
         avoid_highways: Boolean(params.avoidHighways),
+        alternates: altCount,
       }),
     },
     14000
@@ -492,41 +541,28 @@ export async function fetchValhallaRoute(params: {
   mapApiPerfCounters.lastRouteValhallaMs = valhallaMs;
   mapApiPerfCounters.lastRouteNetworkMs = networkMs;
 
-  const maneuvers: RouteManeuver[] = Array.isArray(json.maneuvers)
-    ? json.maneuvers.map((m: any, idx: number) => ({
-        index: typeof m.index === 'number' ? m.index : idx,
-        type: Number(m.type || 0),
-        instruction: String(m.instruction || '沿路線行駛'),
-        rawInstruction: m.raw_instruction ? String(m.raw_instruction) : undefined,
-        streetNames: Array.isArray(m.street_names) ? m.street_names : [],
-        distanceKm: Number(m.distance_km || 0),
-        durationSec: Number(m.duration_sec || 0),
-        beginShapeIndex: Number(m.begin_shape_index || 0),
-        endShapeIndex:
-          typeof m.end_shape_index === 'number'
-            ? Number(m.end_shape_index)
-            : Number(m.begin_shape_index || 0),
-        coordinate:
-          Array.isArray(m.coordinate) && m.coordinate.length >= 2
-            ? [Number(m.coordinate[0]), Number(m.coordinate[1])]
-            : null,
-        verifiedLegalUTurn: Boolean(
-          m.verified_legal_uturn || Number(m.type) === 12 || Number(m.type) === 13
-        ),
-        hasTrafficSignal: Boolean(m.has_traffic_signal),
-        laneCount: typeof m.lane_count === 'number' ? Number(m.lane_count) : null,
-        exitNumber: m.exit_number ? String(m.exit_number) : null,
-        signToward: m.sign_toward ? String(m.sign_toward) : null,
-      }))
-    : [];
-
-  const trafficSignals: TrafficSignalNode[] = Array.isArray(json.traffic_signals)
-    ? json.traffic_signals.map((s: any, idx: number) => ({
-        id: String(s.id || `route-sig-${idx}`),
-        lat: Number(s.lat),
-        lon: Number(s.lon),
-        shapeIndex: typeof s.shape_index === 'number' ? Number(s.shape_index) : undefined,
-        streetName: s.street_name ? String(s.street_name) : undefined,
+  const maneuvers = mapRawManeuvers(json.maneuvers);
+  const trafficSignals = mapRawTrafficSignals(json.traffic_signals);
+  const alternatives: RouteAlternative[] = Array.isArray(json.alternatives)
+    ? json.alternatives.map((alt: any, idx: number) => ({
+        index: typeof alt.index === 'number' ? alt.index : idx + 1,
+        label: String(alt.label || `備選路線 ${idx + 1}`),
+        distanceKm: Number(alt.distance_km || 0),
+        durationSec: Number(alt.duration_sec || 0),
+        bbox:
+          Array.isArray(alt.bbox) && alt.bbox.length === 4
+            ? [Number(alt.bbox[0]), Number(alt.bbox[1]), Number(alt.bbox[2]), Number(alt.bbox[3])]
+            : [
+                Math.min(params.origin.lon, params.destination.lon),
+                Math.min(params.origin.lat, params.destination.lat),
+                Math.max(params.origin.lon, params.destination.lon),
+                Math.max(params.origin.lat, params.destination.lat),
+              ],
+        coordinates: Array.isArray(alt.coordinates) ? alt.coordinates : [],
+        maneuvers: mapRawManeuvers(alt.maneuvers),
+        trafficSignals: mapRawTrafficSignals(alt.traffic_signals),
+        trafficSignalCount:
+          typeof alt.traffic_signal_count === 'number' ? Number(alt.traffic_signal_count) : undefined,
       }))
     : [];
 
@@ -555,6 +591,7 @@ export async function fetchValhallaRoute(params: {
       typeof json.traffic_signal_count === 'number'
         ? Number(json.traffic_signal_count)
         : trafficSignals.length,
+    alternatives,
     timingMs: {
       valhallaMs,
       signalsMs,

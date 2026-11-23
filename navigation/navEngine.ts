@@ -4,6 +4,7 @@ import {
   NavigationRoute,
   RouteManeuver,
   TrafficSignalNode,
+  VoiceGuidanceMode,
 } from './types';
 
 const EARTH_RADIUS_M = 6371000;
@@ -585,9 +586,10 @@ export function pickVoiceAnnouncement(
   distanceMeters: number,
   speedMps: number | null,
   spokenKeys: Set<string>,
-  isStepTransition: boolean = false
+  isStepTransition: boolean = false,
+  voiceMode: VoiceGuidanceMode = 'detailed'
 ): VoiceAnnouncementDecision | null {
-  if (!maneuver) return null;
+  if (!maneuver || voiceMode === 'mute') return null;
 
   const isArrival = maneuver.type === 4 || maneuver.type === 5 || maneuver.type === 6;
   const isUTurn = maneuver.type === 12 || maneuver.type === 13;
@@ -637,8 +639,8 @@ export function pickVoiceAnnouncement(
     return null;
   }
 
-  // 2. 剛完成上一個轉彎或迴轉後（Transition）：立即告知下一個轉彎距離與路名（例如迴轉完成後立即播報「前方 310 公尺，右轉進入 文化二路二段。」）
-  if (isStepTransition && distanceMeters > thresholds.executeLeadMeters + 20) {
+  // 2. 剛完成上一個轉彎或迴轉後（Transition）：精簡模式下略過遠距離預告
+  if (voiceMode !== 'concise' && isStepTransition && distanceMeters > thresholds.executeLeadMeters + 20) {
     const transKey = `${maneuver.index}:transition`;
     if (!spokenKeys.has(transKey)) {
       const distLabel = formatDistanceMetersZh(distanceMeters);
@@ -706,8 +708,9 @@ export function pickVoiceAnnouncement(
     return null;
   }
 
-  // 4. 初次預告階段（Advance）：依車速對照表（0~30km/h: 150~250m, 30~60km/h: 300~500m, 60~90km/h: 600~900m, >90km/h: 1~1.5km）
+  // 4. 初次預告階段（Advance）：精簡模式不播報遠距離 Advance，僅保留 Approach / Execute
   if (
+    voiceMode !== 'concise' &&
     distanceMeters <= thresholds.advanceLeadMeters &&
     distanceMeters > thresholds.approachLeadMeters
   ) {

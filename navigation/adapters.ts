@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
 import * as TaskManager from 'expo-task-manager';
@@ -31,11 +32,41 @@ if (!TaskManager.isTaskDefined(GOBA_BG_LOCATION_TASK)) {
 }
 
 /**
- * 第二階段實作：iOS / Android 台灣繁體中文語音播報引擎（expo-speech）
+ * 導航語音播報音訊閃避（Audio Ducking）：
+ * 播報時降低背景音樂（Apple Music / Spotify）音量而不中斷播放；播報結束後恢復混音模式。
+ */
+async function setNavAudioDuckingAsync(ducking: boolean): Promise<void> {
+  try {
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: ducking,
+      interruptionModeIOS: ducking
+        ? InterruptionModeIOS.DuckOthers
+        : InterruptionModeIOS.MixWithOthers,
+      shouldDuckAndroid: true,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      playThroughEarpieceAndroid: false,
+    });
+  } catch {
+    // 模擬器或無原生音訊裝置時略過，不影響導航主流程
+  }
+}
+
+/**
+ * 第二階段實作：iOS / Android 台灣繁體中文語音播報引擎（expo-speech + Audio Ducking）
  */
 export function createExpoVoiceAdapter(initialEnabled = true): VoiceGuidanceAdapter {
   let enabled = initialEnabled;
   let speechRate = 1.0;
+  let speakSeq = 0;
+
+  const restoreAudio = (seq: number) => {
+    if (seq === speakSeq) {
+      void setNavAudioDuckingAsync(false);
+    }
+  };
+
   return {
     get isEnabled() {
       return enabled;
@@ -46,7 +77,9 @@ export function createExpoVoiceAdapter(initialEnabled = true): VoiceGuidanceAdap
     setEnabled(val: boolean) {
       enabled = val;
       if (!val) {
+        speakSeq += 1;
         Speech.stop();
+        void setNavAudioDuckingAsync(false);
       }
     },
     setRate(nextRate: number) {
@@ -54,23 +87,38 @@ export function createExpoVoiceAdapter(initialEnabled = true): VoiceGuidanceAdap
     },
     async speak(text: string) {
       if (!enabled || !text.trim()) return;
+      const mySeq = ++speakSeq;
       try {
         Speech.stop();
+        await setNavAudioDuckingAsync(true);
+        if (!enabled || mySeq !== speakSeq) {
+          void setNavAudioDuckingAsync(false);
+          return;
+        }
         Speech.speak(text.trim(), {
           language: 'zh-TW',
           pitch: 1.0,
           rate: speechRate,
+          onDone: () => restoreAudio(mySeq),
+          onStopped: () => restoreAudio(mySeq),
+          onError: () => {
+            restoreAudio(mySeq);
+            recordNavDiagnostic('speech_error', 'TTS_SPEAK_CALLBACK_ERROR');
+          },
         });
       } catch {
+        restoreAudio(mySeq);
         recordNavDiagnostic('speech_error', 'TTS_SPEAK_FAIL');
       }
     },
     stop() {
+      speakSeq += 1;
       try {
         Speech.stop();
       } catch {
         // ignore
       }
+      void setNavAudioDuckingAsync(false);
     },
   };
 }

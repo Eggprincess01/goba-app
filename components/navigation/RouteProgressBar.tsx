@@ -1,24 +1,31 @@
 import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 interface RouteProgressBarProps {
   /** 0 (剛出發) 到 1 (已抵達) */
   progressRatio: number;
   remainingTrafficSignalCount: number;
+  onPress?: () => void;
 }
 
 /**
- * 高德風格右側垂直路線進度條（顯示行程進度、剩餘路線、紅綠燈提示點與終點）
+ * 高德風格右側垂直路線進度條（顯示行程進度、剩餘路線、紅綠燈提示點與終點；點擊可切換總覽）
  */
 export const RouteProgressBar: React.FC<RouteProgressBarProps> = React.memo(
-  ({ progressRatio, remainingTrafficSignalCount }) => {
+  ({ progressRatio, remainingTrafficSignalCount, onPress }) => {
     const clamped = Math.max(0, Math.min(1, progressRatio));
     const remainingPct = Math.round((1 - clamped) * 100);
     const cursorBottomPct = Math.round(clamped * 86);
 
     return (
-      <View style={s.container} pointerEvents="none">
+      <TouchableOpacity
+        style={s.container}
+        onPress={onPress}
+        activeOpacity={onPress ? 0.78 : 1}
+        disabled={!onPress}
+        accessibilityLabel="路線進度總覽"
+      >
         {/* 終點旗幟 */}
         <View style={s.destDot}>
           <Ionicons name="flag" size={10} color="#FFFFFF" />
@@ -44,7 +51,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = React.memo(
         </View>
 
         <Text style={s.label}>剩餘</Text>
-      </View>
+      </TouchableOpacity>
     );
   }
 );

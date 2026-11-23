@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Appearance,
   Image,
   Keyboard,
   Linking,
@@ -37,7 +38,12 @@ import { RouteProgressBar } from '../components/navigation/RouteProgressBar';
 import { OpeningHoursPicker } from '../components/OpeningHoursPicker';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
 import type { ReplayScenarioResult } from '../navigation/gpsReplayTester';
-import { getEffectiveMapStyleUrl, MAP_STYLE_OPTIONS } from '../navigation/mapStyle';
+import {
+  getEffectiveMapStyleUrl,
+  MAP_STYLE_OPTIONS,
+  MapThemePreference,
+  resolveAutoMapTheme,
+} from '../navigation/mapStyle';
 import { formatDistanceMetersZh, splitRouteCoords } from '../navigation/navEngine';
 import {
   Coordinate,
@@ -124,8 +130,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     }
   }, [initialDestination]);
 
-  const [styleIdx, setStyleIdx] = useState(0);
+  const [themePref, setThemePref] = useState<MapThemePreference>('auto');
+  const [systemScheme, setSystemScheme] = useState<'light' | 'dark' | null>(
+    Appearance.getColorScheme() ?? 'light'
+  );
   const [useFallbackStyle, setUseFallbackStyle] = useState(false);
+  const [addingWaypointMode, setAddingWaypointMode] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [bindingAnchorSlot, setBindingAnchorSlot] = useState<'home' | 'work' | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -193,8 +203,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const lastMarkerTapTsRef = useRef(0);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const currentMapStyle = MAP_STYLE_OPTIONS[styleIdx] || MAP_STYLE_OPTIONS[0];
-  const isNight = Boolean(currentMapStyle.isNight);
+  useEffect(() => {
+    const sub = Appearance.addChangeListener(({ colorScheme }) => {
+      setSystemScheme(colorScheme ?? 'light');
+    });
+    return () => sub.remove();
+  }, []);
+
   const isActiveNav =
     nav.phase === 'navigating' ||
     nav.phase === 'paused' ||
@@ -216,9 +231,36 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     }
   }, [embeddedInTab, onTabBarVisibilityChange, uiState]);
 
+  const resolvedMapTheme = useMemo(
+    () =>
+      resolveAutoMapTheme({
+        preference: themePref,
+        isNavigating: uiState === 'navigation',
+        systemColorScheme: systemScheme,
+        lat: nav.effectiveOrigin.lat,
+        lon: nav.effectiveOrigin.lon,
+      }),
+    [themePref, uiState, systemScheme, nav.effectiveOrigin.lat, nav.effectiveOrigin.lon]
+  );
+
+  const currentMapStyle =
+    MAP_STYLE_OPTIONS.find((item) => item.id === resolvedMapTheme) || MAP_STYLE_OPTIONS[0];
+  const isNight = Boolean(currentMapStyle.isNight);
+  const isPinkTheme = resolvedMapTheme === 'pink';
+
+  const cycleThemePref = useCallback(() => {
+    const order: MapThemePreference[] = ['auto', 'day', 'night', 'pink'];
+    setThemePref((prev) => order[(order.indexOf(prev) + 1) % order.length]);
+  }, []);
+
+  const themePrefLabel =
+    themePref === 'auto'
+      ? `自動 (${currentMapStyle.label})`
+      : currentMapStyle.label;
+
   const effectiveStyleUrl = useMemo(
-    () => getEffectiveMapStyleUrl(styleIdx, uiState === 'navigation', useFallbackStyle),
-    [styleIdx, uiState, useFallbackStyle]
+    () => getEffectiveMapStyleUrl(resolvedMapTheme, uiState === 'navigation', useFallbackStyle),
+    [resolvedMapTheme, uiState, useFallbackStyle]
   );
 
   const activeProfile = getVehicleProfile(nav.vehicleType);
@@ -639,6 +681,15 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         return;
       }
 
+      if (addingWaypointMode) {
+        setAddingWaypointMode(false);
+        setIsSearchOpen(false);
+        setSearchResults([]);
+        setSearchQuery('');
+        await nav.addWaypoint(place);
+        return;
+      }
+
       if (bindingAnchorSlot) {
         await nav.handleSetCommuteAnchor(bindingAnchorSlot, place);
         setBindingAnchorSlot(null);
@@ -700,8 +751,10 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     [
       bindingAnchorSlot,
       editingOriginMode,
+      addingWaypointMode,
       nav.setErrorMessage,
       nav.setCustomOrigin,
+      nav.addWaypoint,
       nav.handleSetCommuteAnchor,
       nav.setInspectedPlace,
       nav.route,
@@ -1365,7 +1418,41 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </GeoJSONSource>
         )}
 
-        {/* 前方剩餘路線（外框 + 鍋巴粉／運具色主線） */}
+        {/* 備選路線預覽線（僅在路線預覽階段顯示未選中的替代路徑） */}
+        {uiState === 'route_preview' &&
+          (nav.primaryRoute?.alternatives || []).map((alt, idx) => {
+            const altIdx = idx + 1;
+            if (nav.selectedAltIndex === altIdx || alt.coordinates.length < 2) return null;
+            return (
+              <GeoJSONSource
+                key={`alt-route-${altIdx}`}
+                id={`goba-alt-route-source-${altIdx}`}
+                data={{
+                  type: 'FeatureCollection',
+                  features: [
+                    {
+                      type: 'Feature',
+                      properties: {},
+                      geometry: { type: 'LineString', coordinates: alt.coordinates },
+                    },
+                  ],
+                }}
+              >
+                <Layer
+                  id={`goba-alt-route-line-${altIdx}`}
+                  type="line"
+                  layout={{ 'line-cap': 'round', 'line-join': 'round' }}
+                  paint={{
+                    'line-color': isNight ? '#64748B' : '#94A3B8',
+                    'line-width': 6,
+                    'line-opacity': 0.55,
+                  }}
+                />
+              </GeoJSONSource>
+            );
+          })}
+
+        {/* 前方剩餘路線（一般/夜間地圖使用高對比綠色，GOBA 粉主題使用品牌粉紅色） */}
         {remainingGeoJSON && (
           <GeoJSONSource id="goba-route-source" data={remainingGeoJSON}>
             <Layer
@@ -1373,7 +1460,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               type="line"
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
-                'line-color': activeProfile.routeCasingColor,
+                'line-color': isPinkTheme ? '#9D174D' : '#14532D',
                 'line-width': uiState === 'navigation' ? 14 : 11,
                 'line-opacity': 0.92,
               }}
@@ -1383,7 +1470,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               type="line"
               layout={{ 'line-cap': 'round', 'line-join': 'round' }}
               paint={{
-                'line-color': activeProfile.routeColor,
+                'line-color': isPinkTheme ? '#EC4899' : '#16A34A',
                 'line-width': uiState === 'navigation' ? 9 : 6.5,
                 'line-opacity': 1,
               }}
@@ -1831,35 +1918,104 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   )}
                 </TouchableOpacity>
 
-                {/* 可點擊修改目的地 */}
-                <TouchableOpacity
-                  activeOpacity={0.75}
-                  onPress={() => {
-                    setEditingOriginMode(false);
-                    handleOpenSearch();
-                  }}
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: 6,
-                    backgroundColor: isNight ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.04)',
-                    paddingHorizontal: 10,
-                    paddingVertical: 5,
-                    borderRadius: 10,
-                  }}
-                >
-                  <Ionicons name="location" size={12} color="#DB2777" />
-                  <Text
-                    style={[
-                      styles.previewDestTitle,
-                      { fontSize: 13, flex: 1 },
-                      isNight && { color: '#FFFFFF' },
-                    ]}
-                    numberOfLines={1}
+                {/* 中途停靠點清單 + 新增停靠點 */}
+                {nav.waypoints.length > 0 && (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{ gap: 6, alignItems: 'center' }}
                   >
-                    {nav.destination?.name || '選取目的地'}
-                  </Text>
-                </TouchableOpacity>
+                    {nav.waypoints.map((wp, wpIdx) => (
+                      <View
+                        key={wp.id}
+                        style={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 4,
+                          backgroundColor: isNight ? 'rgba(236,72,153,0.18)' : 'rgba(236,72,153,0.10)',
+                          paddingHorizontal: 8,
+                          paddingVertical: 3,
+                          borderRadius: 8,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: '700',
+                            color: isNight ? '#F9A8D4' : '#9D174D',
+                            maxWidth: 110,
+                          }}
+                          numberOfLines={1}
+                        >
+                          停靠{wpIdx + 1}: {wp.name}
+                        </Text>
+                        <TouchableOpacity
+                          onPress={() => nav.removeWaypoint(wp.id)}
+                          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                        >
+                          <Ionicons name="close-circle" size={13} color="#EC4899" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+
+                {/* 可點擊修改目的地 */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <TouchableOpacity
+                    activeOpacity={0.75}
+                    onPress={() => {
+                      setEditingOriginMode(false);
+                      setAddingWaypointMode(false);
+                      handleOpenSearch();
+                    }}
+                    style={{
+                      flex: 1,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      backgroundColor: isNight ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.04)',
+                      paddingHorizontal: 10,
+                      paddingVertical: 5,
+                      borderRadius: 10,
+                    }}
+                  >
+                    <Ionicons name="location" size={12} color="#DB2777" />
+                    <Text
+                      style={[
+                        styles.previewDestTitle,
+                        { fontSize: 13, flex: 1 },
+                        isNight && { color: '#FFFFFF' },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {nav.destination?.name || '規劃目的地'}
+                    </Text>
+                  </TouchableOpacity>
+                  {nav.waypoints.length < 5 && (
+                    <TouchableOpacity
+                      onPress={() => {
+                        setEditingOriginMode(false);
+                        setAddingWaypointMode(true);
+                        handleOpenSearch();
+                      }}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 2,
+                        backgroundColor: isNight ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.06)',
+                        paddingHorizontal: 8,
+                        paddingVertical: 5,
+                        borderRadius: 10,
+                      }}
+                    >
+                      <Ionicons name="add" size={14} color={isNight ? '#F9A8D4' : '#DB2777'} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: isNight ? '#F9A8D4' : '#DB2777' }}>
+                        停靠點
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
 
               {/* 交換起點與終點按鈕 */}
@@ -1897,7 +2053,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             isSimulating={nav.isSimulating}
             bgLocationActive={nav.bgLocationActive}
             voiceEnabled={nav.voiceEnabled}
+            voiceMode={nav.voiceMode}
             onToggleVoice={nav.toggleVoice}
+            onCycleVoiceMode={nav.cycleVoiceMode}
             onRetryOfflineReroute={() => {
               if (nav.gps) {
                 nav.triggerOffRouteReroute({ lat: nav.gps.lat, lon: nav.gps.lon });
@@ -1954,13 +2112,21 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               <View style={styles.dockDivider} />
               <TouchableOpacity
                 style={styles.dockBtn}
-                onPress={() => setStyleIdx((prev) => (prev + 1) % MAP_STYLE_OPTIONS.length)}
+                onPress={cycleThemePref}
                 activeOpacity={0.7}
               >
                 <Ionicons
-                  name={isNight ? 'moon' : 'sunny-outline'}
+                  name={
+                    isPinkTheme
+                      ? 'color-palette'
+                      : isNight
+                      ? 'moon'
+                      : themePref === 'auto'
+                      ? 'contrast-outline'
+                      : 'sunny-outline'
+                  }
                   size={19}
-                  color={isNight ? '#F472B6' : '#1F2937'}
+                  color={isPinkTheme || isNight ? '#F472B6' : '#1F2937'}
                 />
               </TouchableOpacity>
               <View style={styles.dockDivider} />
@@ -2017,9 +2183,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.optChip}
-                onPress={() => setStyleIdx((prev) => (prev + 1) % MAP_STYLE_OPTIONS.length)}
+                onPress={cycleThemePref}
               >
-                <Text style={styles.optChipText}>底圖：{currentMapStyle.label}</Text>
+                <Text style={styles.optChipText}>底圖：{themePrefLabel}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.optChip, showTrafficSignals && { backgroundColor: '#1F2937' }]}
@@ -2621,6 +2787,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           remainingTrafficSignalCount={
             nav.progress?.remainingTrafficSignalCount ?? nav.route?.trafficSignalCount ?? 0
           }
+          onPress={() => {
+            if (nav.followMode === 'free') {
+              handleRecenterCockpit();
+            } else {
+              handleOverviewRoute();
+            }
+          }}
         />
       )}
 
@@ -3537,6 +3710,83 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                         );
                       })}
                     </ScrollView>
+
+                    {/* 多路線方案選擇列（主路線 + Valhalla 備選路線） */}
+                    {nav.primaryRoute &&
+                      Array.isArray(nav.primaryRoute.alternatives) &&
+                      nav.primaryRoute.alternatives.length > 0 && (
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 8, paddingBottom: 8 }}
+                        >
+                          {[
+                            {
+                              idx: 0,
+                              label: '推薦路線',
+                              durationSec: nav.primaryRoute.durationSec,
+                              distanceKm: nav.primaryRoute.distanceKm,
+                            },
+                            ...nav.primaryRoute.alternatives.map((alt, aIdx) => ({
+                              idx: aIdx + 1,
+                              label: alt.label || `備選 ${aIdx + 1}`,
+                              durationSec: alt.durationSec,
+                              distanceKm: alt.distanceKm,
+                            })),
+                          ].map((opt) => {
+                            const selected = nav.selectedAltIndex === opt.idx;
+                            const accentColor = isPinkTheme ? '#EC4899' : '#16A34A';
+                            return (
+                              <TouchableOpacity
+                                key={`route-opt-${opt.idx}`}
+                                activeOpacity={0.85}
+                                onPress={() => nav.selectAlternativeRoute(opt.idx)}
+                                style={{
+                                  paddingHorizontal: 12,
+                                  paddingVertical: 7,
+                                  borderRadius: 12,
+                                  borderWidth: 1.5,
+                                  borderColor: selected
+                                    ? accentColor
+                                    : isNight
+                                    ? 'rgba(255,255,255,0.14)'
+                                    : '#E2E8F0',
+                                  backgroundColor: selected
+                                    ? isPinkTheme
+                                      ? 'rgba(236,72,153,0.14)'
+                                      : 'rgba(22,163,74,0.12)'
+                                    : isNight
+                                    ? 'rgba(255,255,255,0.05)'
+                                    : '#F8FAFC',
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    fontSize: 12,
+                                    fontWeight: '800',
+                                    color: selected
+                                      ? accentColor
+                                      : isNight
+                                      ? '#E2E8F0'
+                                      : '#334155',
+                                  }}
+                                >
+                                  {opt.label} · {formatDurationZh(opt.durationSec)}
+                                </Text>
+                                <Text
+                                  style={{
+                                    fontSize: 11,
+                                    color: isNight ? '#94A3B8' : '#64748B',
+                                    marginTop: 1,
+                                  }}
+                                >
+                                  {opt.distanceKm.toFixed(1)} 公里
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </ScrollView>
+                      )}
 
                     <View style={styles.routeHeader}>
                       <View style={{ flex: 1 }}>

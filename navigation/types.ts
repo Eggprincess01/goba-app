@@ -148,6 +148,7 @@ export interface RouteManeuver {
   verifiedLegalUTurn?: boolean;
   hasTrafficSignal?: boolean;
   laneCount?: number | null;
+  speedLimitKmh?: number | null;
   exitNumber?: string | null;
   signToward?: string | null;
 }
@@ -159,6 +160,18 @@ export interface RouteTimingBreakdown {
   networkMs: number;
   totalMs: number;
   cached: boolean;
+}
+
+export interface RouteAlternative {
+  index: number;
+  label: string;
+  distanceKm: number;
+  durationSec: number;
+  bbox: [number, number, number, number];
+  coordinates: [number, number][];
+  maneuvers: RouteManeuver[];
+  trafficSignals?: TrafficSignalNode[];
+  trafficSignalCount?: number;
 }
 
 export interface NavigationRoute {
@@ -175,10 +188,13 @@ export interface NavigationRoute {
   maneuvers: RouteManeuver[];
   trafficSignals?: TrafficSignalNode[];
   trafficSignalCount?: number;
+  alternatives?: RouteAlternative[];
   timingMs?: RouteTimingBreakdown;
   fetchedAt: number;
   requestVersion?: number;
 }
+
+export type VoiceGuidanceMode = 'detailed' | 'concise' | 'mute';
 
 /**
  * Section 六：導航指令明確狀態機（7 大狀態）

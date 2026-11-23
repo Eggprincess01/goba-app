@@ -13,6 +13,7 @@ import {
   ReroutePerformanceEntry,
   SearchPlace,
   VehicleClassId,
+  VoiceGuidanceMode,
   VoiceLogEntry,
 } from './types';
 import {
@@ -67,12 +68,15 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
   const [gpsPermission, setGpsPermission] = useState<'unknown' | 'granted' | 'denied'>('unknown');
   const [gps, setGps] = useState<GpsSnapshot | null>(null);
   const [customOrigin, setCustomOriginState] = useState<SearchPlace | null>(null);
+  const [waypoints, setWaypoints] = useState<SearchPlace[]>([]);
   const [destination, setDestination] = useState<SearchPlace | null>(null);
   const [route, setRoute] = useState<NavigationRoute | null>(null);
+  const [selectedAltIndex, setSelectedAltIndex] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // 即時導航、語音、GPS 品質與中斷恢復狀態
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [voiceMode, setVoiceModeState] = useState<VoiceGuidanceMode>('detailed');
   const [voiceRate, setVoiceRate] = useState<number>(1.0);
   const [bgLocationActive, setBgLocationActive] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
@@ -225,16 +229,31 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     return () => clearInterval(timer);
   }, [phase, isSimulating]);
 
-  const toggleVoice = useCallback(() => {
-    setVoiceEnabled((prev) => {
-      const next = !prev;
-      voiceAdapter.setEnabled(next);
-      if (next) {
-        voiceAdapter.speak('已開啟語音導航');
+  const setVoiceMode = useCallback(
+    (nextMode: VoiceGuidanceMode) => {
+      setVoiceModeState(nextMode);
+      const isEn = nextMode !== 'mute';
+      setVoiceEnabled(isEn);
+      voiceAdapter.setEnabled(isEn);
+      if (nextMode === 'detailed') {
+        voiceAdapter.speak('已切換為完整語音導航');
+      } else if (nextMode === 'concise') {
+        voiceAdapter.speak('已切換為精簡提示');
       }
-      return next;
-    });
-  }, [voiceAdapter]);
+    },
+    [voiceAdapter]
+  );
+
+  const cycleVoiceMode = useCallback(() => {
+    const order: VoiceGuidanceMode[] = ['detailed', 'concise', 'mute'];
+    const idx = order.indexOf(voiceMode);
+    const next = order[(idx + 1) % order.length];
+    setVoiceMode(next);
+  }, [voiceMode, setVoiceMode]);
+
+  const toggleVoice = useCallback(() => {
+    setVoiceMode(voiceMode === 'mute' ? 'detailed' : 'mute');
+  }, [voiceMode, setVoiceMode]);
 
   const cycleVoiceRate = useCallback(() => {
     const order = [0.88, 1.0, 1.15];
@@ -389,6 +408,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         vehicleTypeOverride?: VehicleClassId;
         originOverride?: Coordinate;
         originHeadingDeg?: number | null;
+        waypointsOverride?: SearchPlace[];
         keepNavigating?: boolean;
       }
     ) => {
@@ -416,6 +436,10 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         const res = await fetchValhallaRoute({
           origin: usedOrigin,
           originHeadingDeg: usedHeading,
+          waypoints: (opts?.waypointsOverride ?? waypoints).map((w) => ({
+            lat: w.navLat ?? w.lat,
+            lon: w.navLon ?? w.lon,
+          })),
           destination: {
             lat: target.navLat ?? target.lat,
             lon: target.navLon ?? target.lon,
@@ -441,6 +465,7 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         wrongWayHitsRef.current = 0;
         offRouteFirstSeenTsRef.current = 0;
         setRerouteOfflinePending(false);
+        setSelectedAltIndex(0);
         setRoute(res);
         setProgress(null);
         setPhase(opts?.keepNavigating ? 'navigating' : 'route_preview');
@@ -463,8 +488,67 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
         return null;
       }
     },
-    [effectiveOrigin, activeGps, vehicleType, avoidTolls, avoidHighways, voiceAdapter]
+    [effectiveOrigin, activeGps, vehicleType, avoidTolls, avoidHighways, waypoints, voiceAdapter]
   );
+
+  const activeRoute = useMemo<NavigationRoute | null>(() => {
+    if (!route) return null;
+    if (selectedAltIndex > 0 && Array.isArray(route.alternatives)) {
+      const alt = route.alternatives[selectedAltIndex - 1];
+      if (alt) {
+        return {
+          ...route,
+          distanceKm: alt.distanceKm,
+          durationSec: alt.durationSec,
+          bbox: alt.bbox,
+          coordinates: alt.coordinates,
+          maneuvers: alt.maneuvers,
+          trafficSignals: alt.trafficSignals ?? route.trafficSignals,
+          trafficSignalCount: alt.trafficSignalCount ?? route.trafficSignalCount,
+        };
+      }
+    }
+    return route;
+  }, [route, selectedAltIndex]);
+
+  const selectAlternativeRoute = useCallback(
+    (index: number) => {
+      setSelectedAltIndex(index);
+      lastShapeIndexRef.current = 0;
+      lastActiveManeuverIdxRef.current = null;
+      spokenKeysRef.current.clear();
+    },
+    []
+  );
+
+  const addWaypoint = useCallback(
+    async (place: SearchPlace) => {
+      const nextWps = [...waypoints.filter((w) => w.id !== place.id), place].slice(0, 5);
+      setWaypoints(nextWps);
+      if (destination && phase !== 'navigating' && phase !== 'off_route_recalculating') {
+        await calculateRoute(destination, { waypointsOverride: nextWps });
+      }
+    },
+    [waypoints, destination, phase, calculateRoute]
+  );
+
+  const removeWaypoint = useCallback(
+    async (placeId: string) => {
+      const nextWps = waypoints.filter((w) => w.id !== placeId);
+      setWaypoints(nextWps);
+      if (destination && phase !== 'navigating' && phase !== 'off_route_recalculating') {
+        await calculateRoute(destination, { waypointsOverride: nextWps });
+      }
+    },
+    [waypoints, destination, phase, calculateRoute]
+  );
+
+  const clearWaypoints = useCallback(async () => {
+    setWaypoints([]);
+    if (destination && phase !== 'navigating' && phase !== 'off_route_recalculating') {
+      await calculateRoute(destination, { waypointsOverride: [] });
+    }
+  }, [destination, phase, calculateRoute]);
 
   const selectVehicleType = useCallback(
     async (nextType: VehicleClassId) => {
@@ -604,14 +688,14 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
 
   // 即時導航進度計算、7 態狀態機、速度感知語音觸發、獨立偏航／逆向／錯過路口偵測與抵達判定
   useEffect(() => {
-    if (phase !== 'navigating' || !activeGps || !route || route.coordinates.length < 2) {
+    if (phase !== 'navigating' || !activeGps || !activeRoute || activeRoute.coordinates.length < 2) {
       return;
     }
 
     const decisionHeading = activeGps.rawHeadingDeg ?? activeGps.headingDeg ?? null;
     const snap = computeNavigationProgress(
       { lat: activeGps.lat, lon: activeGps.lon },
-      route,
+      activeRoute,
       lastShapeIndexRef.current,
       decisionHeading,
       activeGps.speedMps,
@@ -749,14 +833,15 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
       return;
     }
 
-    // 3. 速度感知三階段語音與轉彎／迴轉完成後下一步立即播報
+    // 3. 速度感知三階段語音與轉彎／迴轉完成後下一步立即播報（支援完整／精簡／靜音三種模式）
     const announcement = pickVoiceAnnouncement(
       snap.nextManeuver,
       snap.thenManeuver,
       snap.distanceToNextTurnMeters,
       activeGps.speedMps,
       spokenKeysRef.current,
-      isStepTransition
+      isStepTransition,
+      voiceMode
     );
     if (announcement) {
       spokenKeysRef.current.add(announcement.key);
@@ -962,6 +1047,8 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     bgLocationAdapter.stop();
     setBgLocationActive(false);
     setRoute(null);
+    setSelectedAltIndex(0);
+    setWaypoints([]);
     setDestination(null);
     setInspectedPlace(null);
     setProgress(null);
@@ -1062,12 +1149,22 @@ export function useNavigationState(initialRegionCenter: Coordinate) {
     isCustomOrigin,
     setCustomOrigin,
     swapOriginAndDestination,
+    waypoints,
+    addWaypoint,
+    removeWaypoint,
+    clearWaypoints,
     destination,
     setDestination,
-    route,
+    route: activeRoute,
+    primaryRoute: route,
+    selectedAltIndex,
+    selectAlternativeRoute,
     progress,
     speedKmh,
     voiceEnabled,
+    voiceMode,
+    setVoiceMode,
+    cycleVoiceMode,
     voiceRate,
     toggleVoice,
     cycleVoiceRate,

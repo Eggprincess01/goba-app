@@ -7,7 +7,12 @@ import {
   ManeuverArrowIcon,
 } from '../ManeuverArrowIcon';
 import { formatDistanceMetersZh, getHighwayCruisePrompt } from '../../navigation/navEngine';
-import { NavCommandState, NavigationPhase, RouteManeuver } from '../../navigation/types';
+import {
+  NavCommandState,
+  NavigationPhase,
+  RouteManeuver,
+  VoiceGuidanceMode,
+} from '../../navigation/types';
 
 interface NavHudOverlayProps {
   nextManeuver: RouteManeuver | null;
@@ -28,7 +33,9 @@ interface NavHudOverlayProps {
   isSimulating: boolean;
   bgLocationActive: boolean;
   voiceEnabled: boolean;
+  voiceMode?: VoiceGuidanceMode;
   onToggleVoice: () => void;
+  onCycleVoiceMode?: () => void;
   onRetryOfflineReroute: () => void;
 }
 
@@ -55,11 +62,20 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
     isSimulating,
     bgLocationActive,
     voiceEnabled,
+    voiceMode,
     onToggleVoice,
+    onCycleVoiceMode,
     onRetryOfflineReroute,
   }) => {
     const activeManeuver = nextManeuver ?? fallbackFirstManeuver;
     const cruiseState = getHighwayCruisePrompt(activeManeuver, distanceToNextTurnMeters);
+    const effectiveVoiceMode: VoiceGuidanceMode = voiceMode ?? (voiceEnabled ? 'detailed' : 'mute');
+    const voiceModeShort = effectiveVoiceMode === 'detailed' ? '詳' : effectiveVoiceMode === 'concise' ? '簡' : '靜';
+    const verifiedSpeedLimit =
+      typeof activeManeuver?.speedLimitKmh === 'number' && activeManeuver.speedLimitKmh > 0
+        ? activeManeuver.speedLimitKmh
+        : null;
+    const isOverspeed = verifiedSpeedLimit !== null && speedKmh > verifiedSpeedLimit + 8;
     const showVoiceOrWarning =
       headingUnverified || gpsSignalLost || gpsWeakSignal || rerouteOfflinePending || isSimulating || bgLocationActive || phase === 'paused';
 
@@ -87,15 +103,24 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
 
             <TouchableOpacity
               style={s.voiceQuickBtn}
-              onPress={onToggleVoice}
+              onPress={onCycleVoiceMode ?? onToggleVoice}
               activeOpacity={0.75}
-              accessibilityLabel="切換語音播報"
+              accessibilityLabel="切換語音播報模式"
             >
               <Ionicons
-                name={voiceEnabled ? 'volume-high' : 'volume-mute'}
-                size={18}
-                color={voiceEnabled ? '#F9A8D4' : '#94A3B8'}
+                name={
+                  effectiveVoiceMode === 'mute'
+                    ? 'volume-mute'
+                    : effectiveVoiceMode === 'concise'
+                    ? 'volume-medium'
+                    : 'volume-high'
+                }
+                size={17}
+                color={effectiveVoiceMode === 'mute' ? '#94A3B8' : '#F9A8D4'}
               />
+              <Text style={{ fontSize: 9, fontWeight: '800', color: effectiveVoiceMode === 'mute' ? '#94A3B8' : '#F9A8D4', marginTop: -2 }}>
+                {voiceModeShort}
+              </Text>
             </TouchableOpacity>
           </View>
 
@@ -126,12 +151,36 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
             <ComplexJunctionCard maneuver={nextManeuver} distanceMeters={distanceToNextTurnMeters} />
           )}
 
-        {/* 左側獨立即時車速圓徽章 + 必要狀態提示（僅在異常或模擬/背景狀態時顯示，避免過多浮動標籤） */}
+        {/* 左側獨立即時車速圓徽章 + 真實速限牌（有圖資時才顯示） + 必要狀態提示 */}
         <View style={s.subHudRow}>
-          <View style={s.speedCircleBadge}>
-            <Text style={s.speedValueText}>{Math.max(0, Math.round(speedKmh))}</Text>
+          <View style={[s.speedCircleBadge, isOverspeed && { borderColor: '#EF4444' }]}>
+            <Text style={[s.speedValueText, isOverspeed && { color: '#FCA5A5' }]}>
+              {Math.max(0, Math.round(speedKmh))}
+            </Text>
             <Text style={s.speedUnitText}>km/h</Text>
           </View>
+          {verifiedSpeedLimit !== null && (
+            <View
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 22,
+                backgroundColor: '#FFFFFF',
+                borderWidth: 4,
+                borderColor: '#DC2626',
+                alignItems: 'center',
+                justifyContent: 'center',
+                shadowColor: '#000',
+                shadowOpacity: 0.25,
+                shadowRadius: 4,
+                elevation: 4,
+              }}
+            >
+              <Text style={{ fontSize: 15, fontWeight: '900', color: '#0F172A', includeFontPadding: false }}>
+                {verifiedSpeedLimit}
+              </Text>
+            </View>
+          )}
 
           {showVoiceOrWarning && (
             <View style={s.hudMetaRow}>
