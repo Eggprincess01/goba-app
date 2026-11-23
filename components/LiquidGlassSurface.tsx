@@ -32,10 +32,16 @@ export const LiquidGlassSurface: React.FC<LiquidGlassSurfaceProps> = ({
 
   if (IS_NATIVE_LIQUID_GLASS) {
     const tintColor = isDark
-      ? 'rgba(28, 12, 22, 0.72)'
+      ? 'rgba(28, 12, 22, 0.78)'
       : isSakura
-      ? 'rgba(255, 240, 247, 0.55)'
-      : 'rgba(255, 255, 255, 0.48)';
+      ? 'rgba(255, 240, 247, 0.72)'
+      : 'rgba(255, 255, 255, 0.72)';
+
+    const fallbackBg = isDark
+      ? 'rgba(18, 12, 22, 0.84)'
+      : isSakura
+      ? 'rgba(255, 242, 248, 0.84)'
+      : 'rgba(255, 255, 255, 0.86)';
 
     return (
       <GlassView
@@ -45,7 +51,7 @@ export const LiquidGlassSurface: React.FC<LiquidGlassSurfaceProps> = ({
         tintColor={tintColor}
         style={[
           styles.base,
-          { borderRadius },
+          { borderRadius, backgroundColor: fallbackBg },
           isDark ? styles.darkRim : styles.lightRim,
           style,
         ]}

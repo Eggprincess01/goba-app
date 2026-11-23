@@ -820,6 +820,68 @@ export async function fetchTransitStopsNear(
   }
 }
 
+export interface ViewportPoi {
+  place_id: string;
+  name: string;
+  category: string;
+  address: string;
+  city: string;
+  district: string;
+  lat: number;
+  lon: number;
+  phone?: string;
+  opening_hours?: string;
+}
+
+const viewportPoiClientCache = new Map<string, { ts: number; data: ViewportPoi[] }>();
+
+/**
+ * 查詢視口內 GOBA 自建台灣地標（GET /api/maps/pois-viewport）
+ */
+export async function fetchViewportPois(
+  center: Coordinate,
+  zoom: number
+): Promise<ViewportPoi[]> {
+  if (zoom < 13.8) return [];
+  const zBucket = zoom >= 16.0 ? 16 : zoom >= 15.0 ? 15 : 14;
+  const gridStep = zBucket >= 16 ? 0.008 : zBucket >= 15 ? 0.016 : 0.03;
+  const gLat = Math.round(center.lat / gridStep) * gridStep;
+  const gLon = Math.round(center.lon / gridStep) * gridStep;
+  const key = `${gLat.toFixed(3)},${gLon.toFixed(3)},z${zBucket}`;
+  const hit = viewportPoiClientCache.get(key);
+  if (hit && Date.now() - hit.ts < CLIENT_CACHE_TTL_MS * 3) {
+    mapApiPerfCounters.cacheHits += 1;
+    return hit.data;
+  }
+  const spanLat = zBucket >= 16 ? 0.012 : zBucket >= 15 ? 0.024 : 0.048;
+  const spanLon = spanLat * 1.15;
+  const minLat = gLat - spanLat;
+  const maxLat = gLat + spanLat;
+  const minLon = gLon - spanLon;
+  const maxLon = gLon + spanLon;
+  const limit = zBucket >= 16 ? 28 : zBucket >= 15 ? 22 : 16;
+  mapApiPerfCounters.apiRequests += 1;
+  try {
+    const res = await fetchWithTimeout(
+      `${API_BASE}/api/maps/pois-viewport?min_lat=${minLat.toFixed(5)}&min_lon=${minLon.toFixed(
+        5
+      )}&max_lat=${maxLat.toFixed(5)}&max_lon=${maxLon.toFixed(5)}&zoom=${zoom.toFixed(
+        1
+      )}&limit=${limit}`,
+      {},
+      6000
+    );
+    if (!res.ok) return [];
+    const json = await res.json();
+    const out: ViewportPoi[] = Array.isArray(json.pois) ? json.pois : [];
+    if (viewportPoiClientCache.size > 50) viewportPoiClientCache.clear();
+    viewportPoiClientCache.set(key, { ts: Date.now(), data: out });
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export type ManeuverArrowKind =
   | 'start'
   | 'arrive'

@@ -86,11 +86,13 @@ import {
 import { useNavigationState } from '../navigation/useNavigationState';
 import {
   type AddressGeocodeCandidate,
+  type ViewportPoi,
   fetchAdminFeedbackQueue,
   fetchHdRoadsNear,
   fetchPlaceDetailById,
   fetchTrafficSignalsNear,
   fetchTransitStopsNear,
+  fetchViewportPois,
   fetchYouBikeNear,
   formatDurationZh,
   formatEtaTime,
@@ -106,6 +108,25 @@ import { DISPLAY_VEHICLE_PROFILES, getVehicleProfile } from '../navigation/vehic
 import { haversineKm } from '../services/api';
 
 const GOBA_MASCOT = require('../assets/icon-small.png');
+
+const VIEWPORT_POI_STYLE: Record<string, { icon: string; color: string }> = {
+  attraction: { icon: 'star', color: '#EC4899' },
+  mall: { icon: 'bag-handle', color: '#A855F7' },
+  hospital: { icon: 'medkit', color: '#EF4444' },
+  pharmacy: { icon: 'medical', color: '#10B981' },
+  gas_station: { icon: 'flame', color: '#F97316' },
+  charging_station: { icon: 'flash', color: '#06B6D4' },
+  parking: { icon: 'car', color: '#3B82F6' },
+  convenience_store: { icon: 'storefront', color: '#14B8A6' },
+  supermarket: { icon: 'cart', color: '#16A34A' },
+  restaurant: { icon: 'restaurant', color: '#EA580C' },
+  cafe: { icon: 'cafe', color: '#92400E' },
+  school: { icon: 'school', color: '#6366F1' },
+  bank: { icon: 'cash', color: '#0EA5E9' },
+  park: { icon: 'leaf', color: '#22C55E' },
+  hotel: { icon: 'bed', color: '#8B5CF6' },
+  post_office: { icon: 'mail', color: '#059669' },
+};
 
 const QUICK_POI_CATEGORIES = [
   { label: '加油站', query: '加油站', categoryId: 'gas_station', icon: 'flame-outline' },
@@ -265,6 +286,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [selectedYouBike, setSelectedYouBike] = useState<YouBikeStation | null>(null);
   const [transitStops, setTransitStops] = useState<TransitBusStop[]>([]);
   const [selectedTransitStop, setSelectedTransitStop] = useState<TransitBusStop | null>(null);
+  const [viewportPois, setViewportPois] = useState<ViewportPoi[]>([]);
 
   useEffect(() => {
     if (!selectedTransitStop) {
@@ -652,6 +674,29 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       clearTimeout(timer);
     };
   }, [autoLoadYouBike, transitGridLat, transitGridLon]);
+
+  // Browse 模式下自動載入 GOBA 自建台灣 POI 地標（取代第三方底圖 POI，支援點擊查看詳情與導航）
+  const autoLoadViewportPois =
+    uiState === 'browse' && zoomLevel >= 13.8 && !categoryListOpen && !activePoiCat;
+  const poiGridStep = zoomLevel >= 16.0 ? 0.008 : zoomLevel >= 15.0 ? 0.016 : 0.03;
+  const poiGridLat = Math.round(signalQueryCenter.lat / poiGridStep) * poiGridStep;
+  const poiGridLon = Math.round(signalQueryCenter.lon / poiGridStep) * poiGridStep;
+  useEffect(() => {
+    if (!autoLoadViewportPois) {
+      if (uiState !== 'browse') setViewportPois([]);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      fetchViewportPois({ lat: poiGridLat, lon: poiGridLon }, zoomLevel).then((pois) => {
+        if (active) setViewportPois(pois);
+      });
+    }, 420);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [autoLoadViewportPois, poiGridLat, poiGridLon, zoomLevel, uiState]);
 
   const displayedYouBikeStations = useMemo(() => {
     if (uiState !== 'browse' || youBikeStations.length === 0) return [];
@@ -1997,6 +2042,89 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             );
           })}
 
+        {/* GOBA 自建台灣 POI 地標層（支援點擊查看詳情與一鍵導航） */}
+        {uiState === 'browse' &&
+          !activePoiCat &&
+          zoomLevel >= 13.8 &&
+          viewportPois.slice(0, 24).map((poi) => {
+            const st = VIEWPORT_POI_STYLE[poi.category] || { icon: 'location', color: '#EC4899' };
+            const isSel = nav.inspectedPlace?.id === poi.place_id || nav.inspectedPlace?.placeId === poi.place_id;
+            const shortName = poi.name.length > 9 ? `${poi.name.slice(0, 8)}…` : poi.name;
+            return (
+              <Marker
+                key={poi.place_id}
+                id={`goba-poi-${poi.place_id}`}
+                lngLat={[poi.lon, poi.lat]}
+                anchor="bottom"
+                onPress={() => {
+                  lastMarkerTapTsRef.current = Date.now();
+                  setSelectedTransitStop(null);
+                  setSelectedYouBike(null);
+                  setCategoryListOpen(false);
+                  nav.setInspectedPlace({
+                    id: poi.place_id,
+                    placeId: poi.place_id,
+                    name: poi.name,
+                    address: poi.address || `${poi.city}${poi.district}` || '台灣',
+                    city: poi.city || undefined,
+                    district: poi.district || undefined,
+                    lat: poi.lat,
+                    lon: poi.lon,
+                    category: poi.category,
+                    phone: poi.phone || undefined,
+                    openingHours: poi.opening_hours || undefined,
+                    source: 'goba_taiwan_pois',
+                  });
+                  setSheetCollapsed(false);
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 4,
+                    backgroundColor: isSel ? '#EC4899' : isNight ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.94)',
+                    paddingHorizontal: 6,
+                    paddingVertical: 3,
+                    borderRadius: 12,
+                    borderWidth: 1.5,
+                    borderColor: isSel ? '#FFFFFF' : st.color,
+                    shadowColor: '#000',
+                    shadowOpacity: 0.16,
+                    shadowRadius: 3,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 16,
+                      height: 16,
+                      borderRadius: 8,
+                      backgroundColor: isSel ? '#FFFFFF' : st.color,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Ionicons
+                      name={st.icon as any}
+                      size={10}
+                      color={isSel ? '#EC4899' : '#FFFFFF'}
+                    />
+                  </View>
+                  <Text
+                    style={{
+                      fontSize: 10.5,
+                      fontWeight: '700',
+                      color: isSel ? '#FFFFFF' : isNight ? '#F8FAFC' : '#1E293B',
+                    }}
+                    numberOfLines={1}
+                  >
+                    {shortName}
+                  </Text>
+                </View>
+              </Marker>
+            );
+          })}
+
         {/* 導航中下一個轉彎路口高亮點（Priority 1.6） */}
         {nextTurnCoord && (
           <Marker id="goba-next-turn-node" lngLat={nextTurnCoord} anchor="center">
@@ -2372,8 +2500,8 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           style={[
             styles.rightDockWrap,
             uiState === 'browse' && {
-              top: undefined,
-              bottom: sheetCollapsed ? 175 : 325,
+              top: Platform.OS === 'ios' ? 116 : 96,
+              bottom: undefined,
             },
           ]}
         >
@@ -3200,6 +3328,15 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           <LiquidGlassSurface
             variant={uiState === 'navigation' && nav.phase !== 'arrived' ? 'dark' : isNight ? 'dark' : 'light'}
             borderRadius={uiState === 'navigation' && nav.phase !== 'arrived' ? 24 : 28}
+            style={
+              uiState === 'navigation' && nav.phase !== 'arrived'
+                ? undefined
+                : {
+                    backgroundColor: isNight
+                      ? 'rgba(15, 23, 42, 0.93)'
+                      : 'rgba(255, 255, 255, 0.94)',
+                  }
+            }
             contentStyle={
               uiState === 'navigation' && nav.phase !== 'arrived'
                 ? { padding: 0 }
