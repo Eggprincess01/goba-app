@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
+import {
+  AudioModule,
+  createAudioPlayer,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+} from 'expo-audio';
 import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE, fetchWithTimeout } from '../services/api';
@@ -82,17 +88,12 @@ async function audioUriToBase64(uri: string): Promise<string> {
 
 async function setFleetAudioMode(mode: 'record' | 'duck_play' | 'mix'): Promise<void> {
   try {
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: mode === 'record',
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: mode !== 'mix',
-      interruptionModeIOS:
-        mode === 'duck_play'
-          ? InterruptionModeIOS.DuckOthers
-          : InterruptionModeIOS.MixWithOthers,
-      shouldDuckAndroid: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-      playThroughEarpieceAndroid: false,
+    await setAudioModeAsync({
+      allowsRecording: mode === 'record',
+      playsInSilentMode: true,
+      shouldPlayInBackground: mode !== 'mix',
+      interruptionMode: mode === 'duck_play' ? 'duckOthers' : 'mixWithOthers',
+      shouldRouteThroughEarpiece: false,
     });
   } catch {
     // ignore on unsupported devices
@@ -111,7 +112,7 @@ export function useFleetMode(options: {
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingRef = useRef<InstanceType<typeof AudioModule.AudioRecorder> | null>(null);
   const recordStartTsRef = useRef<number>(0);
   const lastMsgIdRef = useRef<number>(0);
   const playedIdsRef = useRef<Set<number>>(new Set());
@@ -161,16 +162,15 @@ export function useFleetMode(options: {
           try {
             await setFleetAudioMode('duck_play');
             const dataUri = `data:${msg.mime_type || 'audio/m4a'};base64,${msg.audio_b64}`;
-            const { sound } = await Audio.Sound.createAsync(
-              { uri: dataUri },
-              { shouldPlay: true }
-            );
-            sound.setOnPlaybackStatusUpdate((status) => {
-              if (status.isLoaded && status.didJustFinish) {
-                sound.unloadAsync().catch(() => {});
+            const player = createAudioPlayer({ uri: dataUri });
+            const sub = player.addListener('playbackStatusUpdate', (status) => {
+              if (status.didJustFinish) {
+                sub.remove();
+                player.remove();
                 void setFleetAudioMode('mix');
               }
             });
+            player.play();
           } catch {
             void setFleetAudioMode('mix');
           }
@@ -333,16 +333,16 @@ export function useFleetMode(options: {
     if (!fleet?.code || isRecordingPtt) return;
     setError(null);
     try {
-      const perm = await Audio.requestPermissionsAsync();
+      const perm = await requestRecordingPermissionsAsync();
       if (!perm.granted) {
         setError('請開啟麥克風權限才能使用按鍵對講');
         return;
       }
       await setFleetAudioMode('record');
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.LOW_QUALITY
-      );
-      recordingRef.current = recording;
+      const recorder = new AudioModule.AudioRecorder(RecordingPresets.LOW_QUALITY);
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      recordingRef.current = recorder;
       recordStartTsRef.current = Date.now();
       setIsRecordingPtt(true);
     } catch {
@@ -361,9 +361,9 @@ export function useFleetMode(options: {
       return;
     }
     try {
-      await rec.stopAndUnloadAsync();
+      await rec.stop();
       const durationMs = Math.max(300, Date.now() - recordStartTsRef.current);
-      const uri = rec.getURI();
+      const uri = rec.uri;
       await setFleetAudioMode('mix');
       if (!uri || durationMs < 350) return;
       const b64 = await audioUriToBase64(uri);

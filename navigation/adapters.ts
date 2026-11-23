@@ -1,5 +1,5 @@
 import { Platform } from 'react-native';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
+import { setAudioModeAsync } from 'expo-audio';
 import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
 import * as TaskManager from 'expo-task-manager';
@@ -37,16 +37,12 @@ if (!TaskManager.isTaskDefined(GOBA_BG_LOCATION_TASK)) {
  */
 async function setNavAudioDuckingAsync(ducking: boolean): Promise<void> {
   try {
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: ducking,
-      interruptionModeIOS: ducking
-        ? InterruptionModeIOS.DuckOthers
-        : InterruptionModeIOS.MixWithOthers,
-      shouldDuckAndroid: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-      playThroughEarpieceAndroid: false,
+    await setAudioModeAsync({
+      allowsRecording: false,
+      playsInSilentMode: true,
+      shouldPlayInBackground: ducking,
+      interruptionMode: ducking ? 'duckOthers' : 'mixWithOthers',
+      shouldRouteThroughEarpiece: false,
     });
   } catch {
     // 模擬器或無原生音訊裝置時略過，不影響導航主流程

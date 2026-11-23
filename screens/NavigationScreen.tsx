@@ -36,7 +36,33 @@ import { HdRoadLayers } from '../components/navigation/HdRoadLayers';
 import { NavHudOverlay } from '../components/navigation/NavHudOverlay';
 import { RouteProgressBar } from '../components/navigation/RouteProgressBar';
 import { FleetModal } from '../components/navigation/FleetModal';
+import { ExtrasModal } from '../components/navigation/ExtrasModal';
 import { useFleetMode } from '../navigation/fleet';
+import {
+  appendTripRecord,
+  clearParkingSpot,
+  CommunityCategory,
+  CommunityReport,
+  createTripShare,
+  fetchCommunityReports,
+  fetchSpeedCameras,
+  loadNavCursorSkin,
+  loadSavedParking,
+  loadTripHistory,
+  NAV_CURSOR_SKINS,
+  NavCursorSkin,
+  parseGobaVoiceCommand,
+  revokeTripShare,
+  SavedParkingSpot,
+  saveNavCursorSkin,
+  saveParkingSpot,
+  SpeedCameraNode,
+  submitCommunityReport,
+  TripRecord,
+  TripTrackPoint,
+  updateTripShare,
+  voteCommunityReport,
+} from '../navigation/extras';
 import { OpeningHoursPicker } from '../components/OpeningHoursPicker';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
 import type { ReplayScenarioResult } from '../navigation/gpsReplayTester';
@@ -123,6 +149,28 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const nav = useNavigationState(initialCenter);
   const fleetState = useFleetMode({ gps: nav.gps, vehicleType: nav.vehicleType });
   const [fleetModalOpen, setFleetModalOpen] = useState(false);
+  const [extrasModalOpen, setExtrasModalOpen] = useState(false);
+  const [cursorSkin, setCursorSkin] = useState<NavCursorSkin>('arrow');
+  const [savedParking, setSavedParking] = useState<SavedParkingSpot | null>(null);
+  const [tripHistory, setTripHistory] = useState<TripRecord[]>([]);
+  const [communityReports, setCommunityReports] = useState<CommunityReport[]>([]);
+  const [speedCameras, setSpeedCameras] = useState<SpeedCameraNode[]>([]);
+  const [tripShareToken, setTripShareToken] = useState<string | null>(null);
+  const [tripShareUrl, setTripShareUrl] = useState<string | null>(null);
+  const tripTrackRef = useRef<{
+    startedAt: number;
+    destName: string;
+    points: TripTrackPoint[];
+    movingSec: number;
+    stoppedSec: number;
+    lastTickTs: number;
+  } | null>(null);
+
+  useEffect(() => {
+    loadNavCursorSkin().then(setCursorSkin);
+    loadSavedParking().then(setSavedParking);
+    loadTripHistory().then(setTripHistory);
+  }, []);
 
   // 若從交通地圖分頁直接點擊某站點的「導航」，自動帶入該站點並進入路線預覽
   const initialDestAppliedRef = useRef(false);
@@ -361,6 +409,88 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       }, 120);
     }
   }, [nav.route?.fetchedAt, nav.phase]);
+
+  // 定期更新可視範圍社群交通回報與 OSM 測速照相點位
+  useEffect(() => {
+    let active = true;
+    const center = mapMovedCenter || nav.effectiveOrigin;
+    fetchCommunityReports(center.lat, center.lon).then((list) => {
+      if (active) setCommunityReports(list);
+    });
+    if (zoomLevel >= 12.5) {
+      const span = 0.05;
+      fetchSpeedCameras({
+        minLat: center.lat - span,
+        minLon: center.lon - span,
+        maxLat: center.lat + span,
+        maxLon: center.lon + span,
+      }).then((res) => {
+        if (active) setSpeedCameras(res.cameras);
+      });
+    }
+    return () => {
+      active = false;
+    };
+  }, [mapMovedCenter?.lat, mapMovedCenter?.lon, nav.effectiveOrigin.lat, nav.effectiveOrigin.lon, zoomLevel >= 12.5]);
+
+  // 導航中自動記錄 GPX 軌跡與統計移動/停止時間，結束時自動存檔；並同步旅程分享連結
+  useEffect(() => {
+    if (isActiveNav && nav.gps) {
+      const now = Date.now();
+      const speedKmh = nav.gps.speedMps != null ? Math.max(0, nav.gps.speedMps * 3.6) : 0;
+      if (!tripTrackRef.current) {
+        tripTrackRef.current = {
+          startedAt: now,
+          destName: nav.destination?.name || '目的地',
+          points: [{ lat: nav.gps.lat, lon: nav.gps.lon, ts: now, speedKmh }],
+          movingSec: 0,
+          stoppedSec: 0,
+          lastTickTs: now,
+        };
+      } else {
+        const dtSec = Math.max(0, Math.min(10, (now - tripTrackRef.current.lastTickTs) / 1000));
+        tripTrackRef.current.lastTickTs = now;
+        if (speedKmh >= 3) tripTrackRef.current.movingSec += dtSec;
+        else tripTrackRef.current.stoppedSec += dtSec;
+        const lastPt = tripTrackRef.current.points[tripTrackRef.current.points.length - 1];
+        if (!lastPt || Math.abs(lastPt.lat - nav.gps.lat) > 0.00015 || Math.abs(lastPt.lon - nav.gps.lon) > 0.00015) {
+          tripTrackRef.current.points.push({ lat: nav.gps.lat, lon: nav.gps.lon, ts: now, speedKmh });
+        }
+      }
+    } else if (!isActiveNav && tripTrackRef.current) {
+      const rec = tripTrackRef.current;
+      tripTrackRef.current = null;
+      if (rec.points.length >= 2) {
+        const distKm = nav.route?.distanceKm ?? 0.5;
+        appendTripRecord({
+          id: `trip-${rec.startedAt}`,
+          destName: rec.destName,
+          startedAt: rec.startedAt,
+          endedAt: Date.now(),
+          distanceKm: distKm,
+          movingSec: Math.round(rec.movingSec),
+          stoppedSec: Math.round(rec.stoppedSec),
+          points: rec.points,
+        }).then(setTripHistory);
+      }
+    }
+  }, [isActiveNav, nav.gps?.lat, nav.gps?.lon]);
+
+  useEffect(() => {
+    if (!tripShareToken || !nav.gps || !isActiveNav) return;
+    const timer = setInterval(() => {
+      if (nav.gps) {
+        void updateTripShare({
+          token: tripShareToken,
+          lat: nav.gps.lat,
+          lon: nav.gps.lon,
+          etaSec: Math.round(nav.progress?.remainingDurationSec ?? nav.route?.durationSec ?? 0),
+          remainingKm: Number(((nav.progress ? nav.progress.remainingDistanceMeters / 1000 : nav.route?.distanceKm) ?? 0).toFixed(2)),
+        });
+      }
+    }, 8000);
+    return () => clearInterval(timer);
+  }, [tripShareToken, isActiveNav, nav.gps, nav.progress, nav.route]);
 
   const vehicleDisplayCoord: [number, number] | null = useMemo(() => {
     if (!nav.gps) return null;
@@ -1520,6 +1650,46 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             </Marker>
           ))}
 
+        {/* 停車位置標記（第 34 項） */}
+        {savedParking && (
+          <Marker id="goba-saved-parking" lngLat={[savedParking.lon, savedParking.lat]} anchor="bottom">
+            <View style={{ backgroundColor: '#2563EB', paddingHorizontal: 7, paddingVertical: 4, borderRadius: 10, borderWidth: 2, borderColor: '#FFF' }}>
+              <Text style={{ color: '#FFF', fontSize: 11, fontWeight: '900' }}>P 愛車</Text>
+            </View>
+          </Marker>
+        )}
+
+        {/* OSM 測速照相點位（第 15/33 項） */}
+        {zoomLevel >= 13 &&
+          speedCameras.slice(0, 35).map((cam) => (
+            <Marker key={cam.id} id={cam.id} lngLat={[cam.lon, cam.lat]} anchor="center">
+              <View style={{ backgroundColor: '#DC2626', width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: '#FFF', alignItems: 'center', justifyContent: 'center' }}>
+                <Ionicons name="camera" size={12} color="#FFF" />
+              </View>
+            </Marker>
+          ))}
+
+        {/* 社群交通回報點位（第 16 項，點擊確認存在） */}
+        {communityReports.slice(0, 30).map((rep) => (
+          <Marker key={`rep-${rep.id}`} id={`rep-${rep.id}`} lngLat={[rep.lon, rep.lat]} anchor="bottom">
+            <TouchableOpacity
+              onPress={() => {
+                Alert.alert(
+                  `社群回報：${rep.road_name}`,
+                  `${rep.category}（${rep.age_min} 分鐘前 · ${rep.upvotes} 人確認）`,
+                  [
+                    { text: '已排除', onPress: () => voteCommunityReport(rep.id, 'dismiss') },
+                    { text: '仍在現場 (+1)', onPress: () => voteCommunityReport(rep.id, 'confirm') },
+                  ]
+                );
+              }}
+              style={{ backgroundColor: '#F59E0B', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 10, borderWidth: 1.5, borderColor: '#FFF' }}
+            >
+              <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '900' }}>! {rep.category === 'police' ? '臨檢' : rep.category === 'accident' ? '事故' : rep.category === 'speed_camera' ? '測速' : '路況'}</Text>
+            </TouchableOpacity>
+          </Marker>
+        ))}
+
         {/* 紅綠燈號誌路口標記（路線預覽自動切換小型防碰撞標記不遮擋路線，導航中僅顯示前方相關號誌並高亮下一個） */}
         {displayedTrafficSignals.map((sig) => (
           <Marker
@@ -1728,17 +1898,24 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             <View style={styles.vehiclePuckHalo}>
               <View style={[styles.vehiclePuckCore, { borderColor: activeProfile.routeColor }]}>
                 <Ionicons
-                  name="navigate"
+                  name={
+                    (NAV_CURSOR_SKINS.find((s) => s.id === cursorSkin)?.icon || 'navigate') as any
+                  }
                   size={20}
-                  color={activeProfile.routeColor}
+                  color={
+                    NAV_CURSOR_SKINS.find((s) => s.id === cursorSkin)?.color || activeProfile.routeColor
+                  }
                   style={{
                     transform: [
                       {
-                        rotate: `${
-                          nav.followMode === 'course'
-                            ? -45
-                            : Math.round((nav.gps?.headingDeg ?? 0) - 45)
-                        }deg`,
+                        rotate:
+                          cursorSkin === 'arrow'
+                            ? `${
+                                nav.followMode === 'course'
+                                  ? -45
+                                  : Math.round((nav.gps?.headingDeg ?? 0) - 45)
+                              }deg`
+                            : '0deg',
                       },
                     ],
                   }}
@@ -2202,6 +2379,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     </Text>
                   </View>
                 )}
+              </TouchableOpacity>
+              <View style={styles.dockDivider} />
+              <TouchableOpacity
+                style={styles.dockBtn}
+                onPress={() => setExtrasModalOpen(true)}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name="sparkles"
+                  size={19}
+                  color={tripShareUrl ? '#10B981' : isNight ? '#F8FAFC' : '#1F2937'}
+                />
               </TouchableOpacity>
               <View style={styles.dockDivider} />
               <TouchableOpacity
@@ -4606,6 +4795,108 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           };
           nav.setInspectedPlace(place);
           nav.calculateRoute(place);
+        }}
+      />
+      <ExtrasModal
+        visible={extrasModalOpen}
+        isNight={isNight}
+        onClose={() => setExtrasModalOpen(false)}
+        cursorSkin={cursorSkin}
+        onSelectCursorSkin={(skin) => {
+          setCursorSkin(skin);
+          void saveNavCursorSkin(skin);
+        }}
+        savedParking={savedParking}
+        onSaveParkingNow={() => {
+          const coord = nav.gps ?? nav.effectiveOrigin;
+          const spot: SavedParkingSpot = {
+            lat: coord.lat,
+            lon: coord.lon,
+            note: '愛車停放位置',
+            savedAt: Date.now(),
+          };
+          setSavedParking(spot);
+          void saveParkingSpot(spot);
+        }}
+        onNavigateToParking={(spot) => {
+          const p: SearchPlace = {
+            id: `parking-${spot.savedAt}`,
+            name: '我的愛車停車位',
+            address: `${spot.lat.toFixed(5)}, ${spot.lon.toFixed(5)}`,
+            lat: spot.lat,
+            lon: spot.lon,
+            navLat: spot.lat,
+            navLon: spot.lon,
+          };
+          nav.setInspectedPlace(p);
+          nav.calculateRoute(p);
+        }}
+        onClearParking={() => {
+          setSavedParking(null);
+          void clearParkingSpot();
+        }}
+        tripHistory={tripHistory}
+        onSubmitReport={async (cat: CommunityCategory) => {
+          const coord = nav.gps ?? nav.effectiveOrigin;
+          const ok = await submitCommunityReport({
+            category: cat,
+            lat: coord.lat,
+            lon: coord.lon,
+            roadName: nav.progress?.nextManeuver?.streetNames?.[0] || '目前路段',
+          });
+          if (ok) {
+            fetchCommunityReports(coord.lat, coord.lon).then(setCommunityReports);
+          }
+        }}
+        onRunVoiceCommand={async (txt) => {
+          const parsed = parseGobaVoiceCommand(txt);
+          if (parsed.type === 'save_parking') {
+            const coord = nav.gps ?? nav.effectiveOrigin;
+            const spot: SavedParkingSpot = {
+              lat: coord.lat,
+              lon: coord.lon,
+              note: '語音記錄車位',
+              savedAt: Date.now(),
+            };
+            setSavedParking(spot);
+            void saveParkingSpot(spot);
+          } else if (parsed.type === 'fleet_alert') {
+            await fleetState.sendTextAlert(parsed.text);
+          } else if (parsed.type === 'nearby') {
+            setIsSearchOpen(true);
+            handleQueryChange(parsed.category);
+          } else {
+            setIsSearchOpen(true);
+            handleQueryChange(parsed.query);
+          }
+        }}
+        activeShareUrl={tripShareUrl}
+        onToggleTripShare={async () => {
+          if (tripShareToken) {
+            await revokeTripShare(tripShareToken);
+            setTripShareToken(null);
+            setTripShareUrl(null);
+            return;
+          }
+          const dest = nav.destination;
+          const coord = nav.gps ?? nav.effectiveOrigin;
+          const created = await createTripShare({
+            nickname: fleetState.nickname || '鍋巴車友',
+            destName: dest?.name || '目的地',
+            destLat: dest?.lat ?? coord.lat,
+            destLon: dest?.lon ?? coord.lon,
+            lat: coord.lat,
+            lon: coord.lon,
+            etaSec: Math.round(nav.progress?.remainingDurationSec ?? nav.route?.durationSec ?? 0),
+            remainingKm: Number(((nav.progress ? nav.progress.remainingDistanceMeters / 1000 : nav.route?.distanceKm) ?? 0).toFixed(2)),
+          });
+          if (created) {
+            setTripShareToken(created.token);
+            setTripShareUrl(created.shareUrl);
+            Share.share({
+              message: `我正在使用 GOBA Maps 前往「${dest?.name || '目的地'}」，點此查看即時位置與 ETA：\n${created.shareUrl}`,
+            }).catch(() => {});
+          }
         }}
       />
     </View>

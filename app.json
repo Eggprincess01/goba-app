@@ -14,6 +14,7 @@
         "CFBundleDisplayName": "鍋巴 GOBA",
         "NSLocationWhenInUseUsageDescription": "鍋巴 GOBA 需要取用您的位置，以提供即時導航、所在地區天氣與附近加油站／停車場資訊。",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "鍋巴 GOBA 在導航進行中需要背景位置權限，以確保切換畫面或鎖屏時仍能持續提供語音轉彎指引與偏航重算。",
+        "NSMicrophoneUsageDescription": "鍋巴 GOBA 需要使用麥克風，以支援車隊按鍵語音對講（PTT）與語音指令。",
         "UIBackgroundModes": [
           "location",
           "audio"
@@ -43,7 +44,8 @@
       "expo-font",
       "expo-web-browser",
       "expo-secure-store",
-      "@maplibre/maplibre-react-native"
+      "@maplibre/maplibre-react-native",
+      "expo-audio"
     ]
   }
 }
