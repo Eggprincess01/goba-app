@@ -74,7 +74,7 @@ export const HdRoadLayers: React.FC<HdRoadLayersProps> = React.memo(
               minzoom={16.5}
               layout={{ 'line-cap': 'butt' }}
               paint={{
-                'line-color': isNight ? 'rgba(226,232,240,0.75)' : 'rgba(148,163,184,0.65)',
+                'line-color': isNight ? 'rgba(226,232,240,0.75)' : 'rgba(255,255,255,0.88)',
                 'line-width': 1.3,
                 'line-dasharray': [5, 5],
               }}
@@ -92,7 +92,7 @@ export const HdRoadLayers: React.FC<HdRoadLayersProps> = React.memo(
                 minzoom={16.5}
                 layout={{ 'line-cap': 'butt' }}
                 paint={{
-                  'line-color': isNight ? 'rgba(226,232,240,0.78)' : 'rgba(148,163,184,0.68)',
+                  'line-color': isNight ? 'rgba(226,232,240,0.78)' : 'rgba(255,255,255,0.88)',
                   'line-width': 1.3,
                   'line-dasharray': [5, 5],
                 }}
@@ -108,7 +108,7 @@ export const HdRoadLayers: React.FC<HdRoadLayersProps> = React.memo(
               minzoom={16.8}
               layout={{ 'line-cap': 'butt' }}
               paint={{
-                'line-color': isNight ? 'rgba(241,245,249,0.72)' : 'rgba(148,163,184,0.72)',
+                'line-color': isNight ? 'rgba(241,245,249,0.72)' : 'rgba(255,255,255,0.92)',
                 'line-width': 2.0,
               }}
             />
@@ -123,7 +123,7 @@ export const HdRoadLayers: React.FC<HdRoadLayersProps> = React.memo(
               minzoom={16.8}
               layout={{ 'line-cap': 'butt' }}
               paint={{
-                'line-color': isNight ? 'rgba(248,250,252,0.82)' : 'rgba(100,116,139,0.75)',
+                'line-color': isNight ? 'rgba(248,250,252,0.82)' : 'rgba(255,255,255,0.95)',
                 'line-width': 2.2,
               }}
             />

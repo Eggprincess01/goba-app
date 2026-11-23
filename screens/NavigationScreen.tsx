@@ -615,8 +615,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         nav.setErrorMessage(`找不到「${q}」，請嘗試輸入完整路名、品牌或點此回報缺少地點`);
       }
     } catch (err: any) {
-      if (err?.name !== 'AbortError') {
-        nav.setErrorMessage(err?.message || '搜尋失敗，請稍後再試');
+      const msg = String(err?.message || '');
+      if (err?.name !== 'AbortError' && !/abort|cancel/i.test(msg)) {
+        nav.setErrorMessage(msg || '搜尋失敗，請稍後再試');
       }
     } finally {
       setSearching(false);
@@ -905,8 +906,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         }
       } catch (err: any) {
         if (reqSeq !== categoryReqSeqRef.current) return;
-        if (err?.name !== 'AbortError') {
-          nav.setErrorMessage(err?.message || '附近景點搜尋失敗');
+        const msg = String(err?.message || '');
+        if (err?.name !== 'AbortError' && !/abort|cancel/i.test(msg)) {
+          nav.setErrorMessage(msg || '附近景點搜尋失敗');
         }
       } finally {
         if (reqSeq === categoryReqSeqRef.current) {
@@ -1922,36 +1924,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         )}
       </SafeAreaView>
 
-      {/* ==================== 右側控制列（導航時隱藏非必要按鈕，Priority 2.4 & 2.7） ==================== */}
-      {uiState !== 'search' && (
+      {/* ==================== 右側控制列（導航時隱藏，改由右側垂直進度條與頂/底高德看板控制，絕不重疊） ==================== */}
+      {uiState !== 'search' && uiState !== 'navigation' && (
         <View style={styles.rightDockWrap}>
-          {uiState === 'navigation' ? (
-            /* 正式導航時僅保留：語音開關 + 全覽路線切換 */
-            <LiquidGlassSurface variant="dark" interactive borderRadius={22}>
-              <TouchableOpacity style={styles.dockBtn} onPress={nav.toggleVoice} activeOpacity={0.7}>
-                <Ionicons
-                  name={nav.voiceEnabled ? 'volume-high' : 'volume-mute'}
-                  size={19}
-                  color={nav.voiceEnabled ? '#FFFFFF' : '#94A3B8'}
-                />
-              </TouchableOpacity>
-              <View style={[styles.dockDivider, { backgroundColor: 'rgba(255,255,255,0.16)' }]} />
-              <TouchableOpacity
-                style={styles.dockBtn}
-                onPress={
-                  nav.followMode === 'course' ? handleOverviewRoute : handleRecenterCockpit
-                }
-                activeOpacity={0.7}
-              >
-                <Ionicons
-                  name={nav.followMode === 'course' ? 'map-outline' : 'navigate'}
-                  size={18}
-                  color="#F472B6"
-                />
-              </TouchableOpacity>
-            </LiquidGlassSurface>
-          ) : (
-            /* Browse / Route Preview 時保留：定位、日間/夜間圖層、2D/3D 視角與設定 */
+          {(
+            /* Browse / Route Preview 時保留：定位、日間/夜間圖層與設定 */
             <LiquidGlassSurface
               variant={isNight ? 'dark' : 'light'}
               interactive
@@ -2247,36 +2224,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         </View>
       )}
 
-      {/* 導航中左下角車速球與回到車頭視角 */}
-      {uiState === 'navigation' && isActiveNav && (
-        <>
-          <View style={styles.speedWrap}>
-            <LiquidGlassSurface variant="dark" borderRadius={31} contentStyle={styles.speedInner}>
-              <Text style={styles.speedValue} maxFontSizeMultiplier={1.15}>
-                {nav.speedKmh}
-              </Text>
-              <Text style={styles.speedUnit}>km/h</Text>
-            </LiquidGlassSurface>
-          </View>
-
-          {nav.followMode !== 'course' && (
-            <TouchableOpacity
-              style={styles.recenterWrap}
-              onPress={handleRecenterCockpit}
-              activeOpacity={0.85}
-            >
-              <LiquidGlassSurface
-                variant="dark"
-                interactive
-                borderRadius={22}
-                contentStyle={styles.recenterInner}
-              >
-                <Ionicons name="navigate" size={15} color="#F472B6" />
-                <Text style={styles.recenterText}>回到車頭視角</Text>
-              </LiquidGlassSurface>
-            </TouchableOpacity>
-          )}
-        </>
+      {/* 導航中手勢拖曳後顯示「回到車頭視角」按鈕（車速已移至左上角高德圓徽章，不重複顯示） */}
+      {uiState === 'navigation' && isActiveNav && nav.followMode !== 'course' && (
+        <TouchableOpacity
+          style={[styles.recenterWrap, { bottom: 108 }]}
+          onPress={handleRecenterCockpit}
+          activeOpacity={0.85}
+        >
+          <LiquidGlassSurface
+            variant="dark"
+            interactive
+            borderRadius={22}
+            contentStyle={styles.recenterInner}
+          >
+            <Ionicons name="navigate" size={15} color="#F472B6" />
+            <Text style={styles.recenterText}>回到車頭視角</Text>
+          </LiquidGlassSurface>
+        </TouchableOpacity>
       )}
 
       {/* ==================== 狀態 2：Search（全螢幕 Liquid Glass 搜尋專頁） ==================== */}
@@ -2669,23 +2633,29 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           ]}
         >
           <LiquidGlassSurface
-            variant={isNight ? 'dark' : 'light'}
-            borderRadius={28}
-            contentStyle={styles.bottomSheetInner}
+            variant={uiState === 'navigation' && nav.phase !== 'arrived' ? 'dark' : isNight ? 'dark' : 'light'}
+            borderRadius={uiState === 'navigation' && nav.phase !== 'arrived' ? 24 : 28}
+            contentStyle={
+              uiState === 'navigation' && nav.phase !== 'arrived'
+                ? { padding: 0 }
+                : styles.bottomSheetInner
+            }
           >
-            {/* 可收合拖曳把（點擊可收合／展開底部卡片） */}
-            <TouchableOpacity
-              style={styles.grabHandleHitBox}
-              onPress={() => setSheetCollapsed((c) => !c)}
-              activeOpacity={0.7}
-            >
-              <View
-                style={[
-                  styles.grabHandle,
-                  isNight && { backgroundColor: 'rgba(255,255,255,0.24)' },
-                ]}
-              />
-            </TouchableOpacity>
+            {/* 可收合拖曳把（導航模式不顯示外層拖曳條，保持一體成形高德底卡） */}
+            {!(uiState === 'navigation' && nav.phase !== 'arrived') && (
+              <TouchableOpacity
+                style={styles.grabHandleHitBox}
+                onPress={() => setSheetCollapsed((c) => !c)}
+                activeOpacity={0.7}
+              >
+                <View
+                  style={[
+                    styles.grabHandle,
+                    isNight && { backgroundColor: 'rgba(255,255,255,0.24)' },
+                  ]}
+                />
+              </TouchableOpacity>
+            )}
 
             {/* ---------- 狀態 A：Browse（公車站牌 / YouBike / 地點詳情 / 分類多筆結果清單 / 快捷通勤） ---------- */}
             {uiState === 'browse' && (
