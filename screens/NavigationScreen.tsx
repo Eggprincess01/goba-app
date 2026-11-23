@@ -5,8 +5,10 @@ import {
   Appearance,
   Image,
   Keyboard,
+  LayoutAnimation,
   Linking,
   Modal,
+  PanResponder,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -613,13 +615,31 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     };
   }, [showInteractiveTransitStops, transitGridLat, transitGridLon, isTransitFocus]);
 
-  // Browse 地圖放大至社區層級 (>=14.5) 時自動載入周邊 YouBike 2.0 / 2.0E 即時可借／可停數量
-  const autoLoadYouBike = uiState === 'browse' && zoomLevel >= 14.5 && !categoryListOpen;
+  const sheetPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gesture) =>
+          Math.abs(gesture.dy) > 10 && Math.abs(gesture.dy) > Math.abs(gesture.dx) * 1.4,
+        onPanResponderRelease: (_, gesture) => {
+          if (gesture.dy > 24) {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setSheetCollapsed(true);
+          } else if (gesture.dy < -24) {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setSheetCollapsed(false);
+          }
+        },
+      }),
+    []
+  );
+
+  // Browse 地圖放大至社區層級 (>=15.2) 時自動載入周邊 YouBike 2.0 / 2.0E，並依縮放層級控制顯示密度與精簡/完整樣式
+  const autoLoadYouBike = uiState === 'browse' && zoomLevel >= 15.2 && !categoryListOpen;
   useEffect(() => {
     if (!autoLoadYouBike) return;
     let active = true;
     const timer = setTimeout(() => {
-      fetchYouBikeNear({ lat: transitGridLat, lon: transitGridLon }, 1200).then((yb) => {
+      fetchYouBikeNear({ lat: transitGridLat, lon: transitGridLon }, 900).then((yb) => {
         if (active && yb.stations.length > 0) {
           setYouBikeStations(yb.stations);
           setYouBikeLiveAvailable(yb.liveAvailable);
@@ -632,6 +652,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       clearTimeout(timer);
     };
   }, [autoLoadYouBike, transitGridLat, transitGridLon]);
+
+  const displayedYouBikeStations = useMemo(() => {
+    if (uiState !== 'browse' || youBikeStations.length === 0) return [];
+    if (activePoiCat === 'YouBike') return youBikeStations.slice(0, 22);
+    if (zoomLevel < 15.2) return [];
+    const minSpacingKm = zoomLevel < 16.0 ? 0.25 : 0.12;
+    const maxCount = zoomLevel < 16.0 ? 6 : 10;
+    const kept: YouBikeStation[] = [];
+    for (const st of youBikeStations) {
+      if (kept.length >= maxCount && selectedYouBike?.id !== st.id) continue;
+      const tooClose = kept.some(
+        (k) => k.id !== selectedYouBike?.id && haversineKm(k.lat, k.lon, st.lat, st.lon) < minSpacingKm
+      );
+      if (!tooClose || selectedYouBike?.id === st.id) kept.push(st);
+    }
+    return kept;
+  }, [uiState, youBikeStations, activePoiCat, zoomLevel, selectedYouBike?.id]);
 
   const displayedTransitStops = useMemo(() => {
     if (!showInteractiveTransitStops || transitStops.length === 0) return [];
@@ -1905,11 +1942,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           );
         })}
 
-        {/* P2 #11：YouBike 2.0 / 2.0E 即時站點標記（顯示即時可借車輛數，絕不使用假數字） */}
+        {/* P2 #11：YouBike 2.0 / 2.0E 即時站點標記（依縮放層級自適應密度：中距顯示精簡圓點、放大顯示完整可借可停） */}
         {uiState === 'browse' &&
-          youBikeStations.slice(0, 22).map((st) => {
+          displayedYouBikeStations.map((st) => {
             const isSel = selectedYouBike?.id === st.id;
             const hasBikes = typeof st.availableBikes === 'number' && st.availableBikes > 0;
+            const showFullDetail = isSel || activePoiCat === 'YouBike' || zoomLevel >= 16.0;
             return (
               <Marker
                 key={st.id}
@@ -1948,8 +1986,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 >
                   <Ionicons name="bicycle" size={12} color="#FFFFFF" />
                   <Text style={{ fontSize: 10.5, fontWeight: '900', color: '#FFFFFF' }}>
-                    借{typeof st.availableBikes === 'number' ? st.availableBikes : '--'} 停
-                    {typeof st.availableReturnDocks === 'number' ? st.availableReturnDocks : '--'}
+                    {showFullDetail
+                      ? `借${typeof st.availableBikes === 'number' ? st.availableBikes : '--'} 停${
+                          typeof st.availableReturnDocks === 'number' ? st.availableReturnDocks : '--'
+                        }`
+                      : `${typeof st.availableBikes === 'number' ? st.availableBikes : '--'}`}
                   </Text>
                 </View>
               </Marker>
@@ -3150,6 +3191,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       {/* ==================== 底部可收合動態資訊卡（Priority 2.5：依 Browse / Route Preview / Navigation 切換） ==================== */}
       {uiState !== 'search' && (
         <View
+          {...sheetPanResponder.panHandlers}
           style={[
             styles.bottomSheetOuter,
             embeddedInTab && uiState === 'browse' && { bottom: 92 },
