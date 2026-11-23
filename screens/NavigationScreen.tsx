@@ -3041,36 +3041,73 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         </View>
       )}
 
-      {/* 導航中若已加入車隊：左側提供一鍵按住對講（PTT）與車隊狀態鈕 */}
+      {/* 導航中若已加入車隊：左側提供自由通話靜音鈕或按住對講（PTT）與車隊狀態鈕 */}
       {uiState === 'navigation' && isActiveNav && fleetState.fleet && (
         <View style={{ position: 'absolute', left: 12, top: 245, gap: 8, zIndex: 25 }}>
-          <TouchableOpacity
-            activeOpacity={0.85}
-            onPressIn={fleetState.startPttRecording}
-            onPressOut={fleetState.stopAndSendPtt}
-            style={{
-              backgroundColor: fleetState.isRecordingPtt
-                ? '#DC2626'
-                : 'rgba(15, 23, 42, 0.90)',
-              borderRadius: 22,
-              paddingHorizontal: 12,
-              paddingVertical: 10,
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 6,
-              borderWidth: 1.5,
-              borderColor: fleetState.isRecordingPtt ? '#FCA5A5' : '#EC4899',
-            }}
-          >
-            <Ionicons
-              name={fleetState.isRecordingPtt ? 'mic' : 'mic-outline'}
-              size={18}
-              color="#FFFFFF"
-            />
-            <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>
-              {fleetState.isRecordingPtt ? '說話中…' : '按住對講'}
-            </Text>
-          </TouchableOpacity>
+          {fleetState.fleet.voice_mode === 'open' ? (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => fleetState.setOpenMicMuted((m) => !m)}
+              style={{
+                backgroundColor: fleetState.openMicMuted
+                  ? 'rgba(100, 116, 139, 0.90)'
+                  : 'rgba(22, 163, 74, 0.92)',
+                borderRadius: 22,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+                borderWidth: 1.5,
+                borderColor: '#FFFFFF',
+              }}
+            >
+              <Ionicons
+                name={fleetState.openMicMuted ? 'mic-off' : 'mic'}
+                size={18}
+                color="#FFFFFF"
+              />
+              <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>
+                {fleetState.openMicMuted ? '已靜音' : '自由通話中'}
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              disabled={fleetState.fleet.voice_mode === 'leader_only' && !fleetState.isLeader}
+              onPressIn={fleetState.startPttRecording}
+              onPressOut={fleetState.stopAndSendPtt}
+              style={{
+                backgroundColor:
+                  fleetState.fleet.voice_mode === 'leader_only' && !fleetState.isLeader
+                    ? 'rgba(100, 116, 139, 0.85)'
+                    : fleetState.isRecordingPtt
+                    ? '#DC2626'
+                    : 'rgba(15, 23, 42, 0.90)',
+                borderRadius: 22,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+                borderWidth: 1.5,
+                borderColor: fleetState.isRecordingPtt ? '#FCA5A5' : '#EC4899',
+              }}
+            >
+              <Ionicons
+                name={fleetState.isRecordingPtt ? 'mic' : 'mic-outline'}
+                size={18}
+                color="#FFFFFF"
+              />
+              <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>
+                {fleetState.fleet.voice_mode === 'leader_only' && !fleetState.isLeader
+                  ? '僅隊長發言'
+                  : fleetState.isRecordingPtt
+                  ? '說話中…'
+                  : '按住對講'}
+              </Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity
             onPress={() => setFleetModalOpen(true)}
             style={{
@@ -4756,10 +4793,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         nickname={fleetState.nickname}
         setNickname={fleetState.setNickname}
         fleet={fleetState.fleet}
+        savedRooms={fleetState.savedRooms}
         isLeader={fleetState.isLeader}
         shareLocation={fleetState.shareLocation}
         setShareLocation={fleetState.setShareLocation}
         isRecordingPtt={fleetState.isRecordingPtt}
+        openMicMuted={fleetState.openMicMuted}
+        onToggleOpenMicMute={() => fleetState.setOpenMicMuted((m) => !m)}
         busy={fleetState.busy}
         error={fleetState.error}
         currentDestination={
@@ -4786,6 +4826,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           )
         }
         onJoinFleet={(code, nick) => fleetState.joinFleet(code, nick)}
+        onDisconnectFleet={() => fleetState.disconnectFleet()}
         onLeaveFleet={() => fleetState.leaveFleet()}
         onStartPtt={() => fleetState.startPttRecording()}
         onStopPtt={() => fleetState.stopAndSendPtt()}

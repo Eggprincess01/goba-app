@@ -15,7 +15,7 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { FleetRoomState, FleetVoiceMode } from '../../navigation/fleet';
+import { FleetRoomState, FleetVoiceMode, SavedFleetRoom } from '../../navigation/fleet';
 
 interface FleetModalProps {
   visible: boolean;
@@ -25,15 +25,19 @@ interface FleetModalProps {
   nickname: string;
   setNickname: (v: string) => void;
   fleet: FleetRoomState | null;
+  savedRooms: SavedFleetRoom[];
   isLeader: boolean;
   shareLocation: boolean;
   setShareLocation: (v: boolean) => void;
   isRecordingPtt: boolean;
+  openMicMuted: boolean;
+  onToggleOpenMicMute: () => void;
   busy: boolean;
   error: string | null;
   currentDestination: { name: string; address: string; lat: number; lon: number } | null;
   onCreateFleet: (nick: string) => void;
   onJoinFleet: (code: string, nick: string) => void;
+  onDisconnectFleet: () => void;
   onLeaveFleet: () => void;
   onStartPtt: () => void;
   onStopPtt: () => void;
@@ -51,15 +55,19 @@ export const FleetModal: React.FC<FleetModalProps> = ({
   nickname,
   setNickname,
   fleet,
+  savedRooms,
   isLeader,
   shareLocation,
   setShareLocation,
   isRecordingPtt,
+  openMicMuted,
+  onToggleOpenMicMute,
   busy,
   error,
   currentDestination,
   onCreateFleet,
   onJoinFleet,
+  onDisconnectFleet,
   onLeaveFleet,
   onStartPtt,
   onStopPtt,
@@ -105,8 +113,46 @@ export const FleetModal: React.FC<FleetModalProps> = ({
 
           {!fleet ? (
             <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ gap: 14, paddingBottom: 24 }}>
+              {/* 我的永久車隊對講群（退出連線後依然保留，下次出遊直接點選進入） */}
+              {savedRooms.length > 0 && (
+                <View style={[s.card, { backgroundColor: cardBg }]}>
+                  <Text style={[s.label, { color: textMain }]}>我的車隊對講群</Text>
+                  {savedRooms.map((room) => (
+                    <TouchableOpacity
+                      key={room.code}
+                      activeOpacity={0.8}
+                      onPress={() => onJoinFleet(room.code, nickname)}
+                      style={[
+                        s.memberRow,
+                        {
+                          justifyContent: 'space-between',
+                          paddingVertical: 10,
+                        },
+                      ]}
+                    >
+                      <View style={{ flex: 1, gap: 2 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={{ fontSize: 15, fontWeight: '800', color: textMain }}>
+                            {room.name}
+                          </Text>
+                          <View style={[s.leaderTag, { backgroundColor: room.voice_mode === 'open' ? '#16A34A' : '#334155' }]}>
+                            <Text style={{ fontSize: 10, fontWeight: '800', color: '#FFF' }}>
+                              {room.voice_mode === 'open' ? '自由模式' : room.voice_mode === 'leader_only' ? '僅隊長' : '按鍵說'}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={{ fontSize: 11, color: textSub }} numberOfLines={1}>
+                          邀請碼 {room.code} · {room.member_count} 人（{room.member_names.join('、')}）
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color="#EC4899" />
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+
               <Text style={{ fontSize: 13, color: textSub, lineHeight: 19 }}>
-                建立或加入車隊後，隊友可依各自車種合法導航至同一目的地，並支援同意制即時位置與按鍵語音對講（PTT）。
+                建立或加入車隊後，房間將永久保留在「我的車隊對講群」，下次出遊點選即可直接重聚。
               </Text>
 
               <View style={[s.card, { backgroundColor: cardBg }]}>
@@ -318,16 +364,17 @@ export const FleetModal: React.FC<FleetModalProps> = ({
                 {curVoiceMode === 'open' ? (
                   <TouchableOpacity
                     activeOpacity={0.85}
-                    disabled={!canSpeak}
-                    onPress={() => (isRecordingPtt ? onStopPtt() : onStartPtt())}
+                    onPress={onToggleOpenMicMute}
                     style={[
                       s.pttBtn,
-                      { backgroundColor: isRecordingPtt ? '#DC2626' : '#16A34A' },
+                      { backgroundColor: openMicMuted ? '#64748B' : '#16A34A' },
                     ]}
                   >
-                    <Ionicons name={isRecordingPtt ? 'mic' : 'mic-outline'} size={20} color="#FFF" />
+                    <Ionicons name={openMicMuted ? 'mic-off' : 'mic'} size={20} color="#FFF" />
                     <Text style={s.primaryBtnText}>
-                      {isRecordingPtt ? '自由發言中（點一下停止並送出）' : '點擊開始直接發言'}
+                      {openMicMuted
+                        ? '麥克風已靜音（點一下恢復自由發言）'
+                        : '自由通話中・直接說話即可（點此靜音）'}
                     </Text>
                   </TouchableOpacity>
                 ) : (
@@ -417,11 +464,21 @@ export const FleetModal: React.FC<FleetModalProps> = ({
               </View>
 
               <TouchableOpacity
+                style={[s.secondaryBtn, { borderColor: '#EC4899' }]}
+                onPress={onDisconnectFleet}
+              >
+                <Ionicons name="pause-circle-outline" size={18} color="#EC4899" />
+                <Text style={[s.secondaryBtnText, { color: '#EC4899' }]}>
+                  暫時退出通話（保留車隊群組）
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
                 style={[s.secondaryBtn, { borderColor: '#DC2626' }]}
                 onPress={onLeaveFleet}
               >
                 <Ionicons name="exit-outline" size={18} color="#DC2626" />
-                <Text style={[s.secondaryBtnText, { color: '#DC2626' }]}>離開車隊</Text>
+                <Text style={[s.secondaryBtnText, { color: '#DC2626' }]}>徹底移出此車隊群組</Text>
               </TouchableOpacity>
             </ScrollView>
           )}

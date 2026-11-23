@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AudioModule,
   createAudioPlayer,
   RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
+  useAudioRecorder,
 } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -16,6 +16,16 @@ const FLEET_ACTIVE_CODE_KEY = 'goba_fleet_active_code_v1';
 const FLEET_NICKNAME_KEY = 'goba_fleet_nickname_v1';
 
 export type FleetVoiceMode = 'open' | 'ptt' | 'leader_only';
+
+export interface SavedFleetRoom {
+  code: string;
+  name: string;
+  is_leader: boolean;
+  voice_mode: FleetVoiceMode;
+  member_count: number;
+  member_names: string[];
+  updated_at: number;
+}
 
 export interface FleetMember {
   member_id: string;
@@ -96,7 +106,7 @@ async function setFleetAudioMode(mode: 'record' | 'duck_play' | 'mix'): Promise<
     await setAudioModeAsync({
       allowsRecording: mode === 'record',
       playsInSilentMode: true,
-      shouldPlayInBackground: mode !== 'mix',
+      shouldPlayInBackground: true,
       interruptionMode: mode === 'duck_play' ? 'duckOthers' : 'mixWithOthers',
       shouldRouteThroughEarpiece: false,
     });
@@ -112,12 +122,15 @@ export function useFleetMode(options: {
   const [memberId, setMemberId] = useState<string>('');
   const [nickname, setNickname] = useState<string>('鍋巴車友');
   const [fleet, setFleet] = useState<FleetRoomState | null>(null);
+  const [savedRooms, setSavedRooms] = useState<SavedFleetRoom[]>([]);
   const [shareLocation, setShareLocation] = useState<boolean>(true);
   const [isRecordingPtt, setIsRecordingPtt] = useState<boolean>(false);
+  const [openMicMuted, setOpenMicMuted] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  const recordingRef = useRef<InstanceType<typeof AudioModule.AudioRecorder> | null>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.LOW_QUALITY);
+  const isRecActiveRef = useRef<boolean>(false);
   const recordStartTsRef = useRef<number>(0);
   const lastMsgIdRef = useRef<number>(0);
   const playedIdsRef = useRef<Set<number>>(new Set());
@@ -127,6 +140,23 @@ export function useFleetMode(options: {
   vehicleRef.current = options.vehicleType;
   const shareRef = useRef<boolean>(shareLocation);
   shareRef.current = shareLocation;
+
+  const refreshSavedRooms = useCallback(async (uid: string) => {
+    if (!uid) return;
+    try {
+      const res = await fetchWithTimeout(
+        `${API_BASE}/api/maps/fleet/my-rooms?member_id=${encodeURIComponent(uid)}`,
+        undefined,
+        7000
+      );
+      const data = await res.json().catch(() => null);
+      if (res.ok && Array.isArray(data?.rooms)) {
+        setSavedRooms(data.rooms);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -142,6 +172,8 @@ export function useFleetMode(options: {
         setMemberId(uid);
         const nick = savedNick || '鍋巴車友';
         if (savedNick) setNickname(savedNick);
+        void refreshSavedRooms(uid);
+
         if (savedCode) {
           try {
             const rejoined = await postFleetJson<FleetRoomState>('/api/maps/fleet/join', {
@@ -156,7 +188,6 @@ export function useFleetMode(options: {
             }
             setFleet(rejoined);
           } catch {
-            // 若房間已不存在才清除快取
             AsyncStorage.removeItem(FLEET_ACTIVE_CODE_KEY).catch(() => {});
           }
         }
@@ -164,7 +195,7 @@ export function useFleetMode(options: {
       .catch(() => {
         setMemberId(`gb-${Math.random().toString(36).slice(2, 10)}`);
       });
-  }, []);
+  }, [refreshSavedRooms]);
 
   const playIncomingMessages = useCallback(
     async (msgs: FleetVoiceMessage[], myId: string) => {
@@ -181,9 +212,9 @@ export function useFleetMode(options: {
           await setFleetAudioMode('duck_play');
           Speech.speak(`車隊通知：${msg.sender_name}說，${msg.text}`, {
             language: 'zh-TW',
-            onDone: () => void setFleetAudioMode('mix'),
-            onStopped: () => void setFleetAudioMode('mix'),
-            onError: () => void setFleetAudioMode('mix'),
+            onDone: () => void setFleetAudioMode(fleet?.voice_mode === 'open' ? 'record' : 'mix'),
+            onStopped: () => void setFleetAudioMode(fleet?.voice_mode === 'open' ? 'record' : 'mix'),
+            onError: () => void setFleetAudioMode(fleet?.voice_mode === 'open' ? 'record' : 'mix'),
           });
         } else if (msg.audio_b64) {
           try {
@@ -194,20 +225,20 @@ export function useFleetMode(options: {
               if (status.didJustFinish) {
                 sub.remove();
                 player.remove();
-                void setFleetAudioMode('mix');
+                void setFleetAudioMode(fleet?.voice_mode === 'open' ? 'record' : 'mix');
               }
             });
             player.play();
           } catch {
-            void setFleetAudioMode('mix');
+            void setFleetAudioMode(fleet?.voice_mode === 'open' ? 'record' : 'mix');
           }
         }
       }
     },
-    []
+    [fleet?.voice_mode]
   );
 
-  // 每 3.5 秒同步一次車隊位置與 PTT 語音訊息
+  // 每 2.5 秒同步一次車隊位置與語音訊息
   useEffect(() => {
     if (!fleet?.code || !memberId) return;
     const timer = setInterval(async () => {
@@ -239,9 +270,90 @@ export function useFleetMode(options: {
       } catch {
         // 網路短暫波動時略過，下次心跳自動重連
       }
-    }, 3500);
+    }, 2500);
     return () => clearInterval(timer);
   }, [fleet?.code, memberId, playIncomingMessages]);
+
+  const sendRecordedAudio = useCallback(
+    async (uri: string | null, durationMs: number) => {
+      if (!uri || !fleet?.code || !memberId || durationMs < 350) return;
+      try {
+        const b64 = await audioUriToBase64(uri);
+        await postFleetJson<FleetRoomState>('/api/maps/fleet/ptt', {
+          code: fleet.code,
+          member_id: memberId,
+          sender_name: nickname,
+          msg_type: 'ptt',
+          audio_b64: b64,
+          mime_type: 'audio/m4a',
+          duration_ms: durationMs,
+        });
+      } catch {
+        // ignore transient send errors in hands-free stream
+      }
+    },
+    [fleet?.code, memberId, nickname]
+  );
+
+  // 自由發言（open）模式：免按鍵自動連續收音與分段即時傳送（如同 Discord/IG 群組語音）
+  useEffect(() => {
+    if (!fleet?.code || fleet.voice_mode !== 'open' || openMicMuted || !memberId) {
+      if (isRecActiveRef.current && fleet?.voice_mode !== 'open') {
+        isRecActiveRef.current = false;
+        setIsRecordingPtt(false);
+        audioRecorder.stop().catch(() => {});
+      }
+      return;
+    }
+
+    let cancelled = false;
+    const runOpenLoop = async () => {
+      const perm = await requestRecordingPermissionsAsync();
+      if (!perm.granted) {
+        if (!cancelled) setError('請於 iOS 設定允許「鍋巴 GOBA」使用麥克風');
+        return;
+      }
+      while (!cancelled) {
+        try {
+          await setFleetAudioMode('record');
+          await audioRecorder.prepareToRecordAsync();
+          if (cancelled) break;
+          audioRecorder.record();
+          isRecActiveRef.current = true;
+          recordStartTsRef.current = Date.now();
+          setIsRecordingPtt(true);
+
+          await new Promise((res) => setTimeout(res, 3500));
+          if (cancelled) break;
+
+          await audioRecorder.stop();
+          isRecActiveRef.current = false;
+          const dur = Math.max(350, Date.now() - recordStartTsRef.current);
+          const uri = audioRecorder.uri;
+          void sendRecordedAudio(uri, dur);
+        } catch (err: any) {
+          isRecActiveRef.current = false;
+          setIsRecordingPtt(false);
+          if (!cancelled) {
+            setError(`麥克風異常：${err?.message || '請確認權限'}`);
+          }
+          break;
+        }
+      }
+      setIsRecordingPtt(false);
+      await setFleetAudioMode('mix');
+    };
+
+    void runOpenLoop();
+    return () => {
+      cancelled = true;
+      if (isRecActiveRef.current) {
+        isRecActiveRef.current = false;
+        audioRecorder.stop().catch(() => {});
+      }
+      setIsRecordingPtt(false);
+    };
+  }, [fleet?.code, fleet?.voice_mode, openMicMuted, memberId, audioRecorder, sendRecordedAudio]);
 
   const createFleet = useCallback(
     async (
@@ -268,6 +380,7 @@ export function useFleetMode(options: {
         });
         AsyncStorage.setItem(FLEET_ACTIVE_CODE_KEY, created.code).catch(() => {});
         setFleet(created);
+        void refreshSavedRooms(memberId);
         return created;
       } catch (e: any) {
         setError(e?.message || '建立車隊失敗');
@@ -276,7 +389,7 @@ export function useFleetMode(options: {
         setBusy(false);
       }
     },
-    [memberId, nickname]
+    [memberId, nickname, refreshSavedRooms]
   );
 
   const joinFleet = useCallback(
@@ -302,6 +415,7 @@ export function useFleetMode(options: {
         }
         AsyncStorage.setItem(FLEET_ACTIVE_CODE_KEY, joined.code).catch(() => {});
         setFleet(joined);
+        void refreshSavedRooms(memberId);
         return joined;
       } catch (e: any) {
         setError(e?.message || '加入車隊失敗');
@@ -310,7 +424,7 @@ export function useFleetMode(options: {
         setBusy(false);
       }
     },
-    [memberId, nickname]
+    [memberId, nickname, refreshSavedRooms]
   );
 
   const updateRallyOrDest = useCallback(
@@ -363,58 +477,63 @@ export function useFleetMode(options: {
   );
 
   const startPttRecording = useCallback(async () => {
-    if (!fleet?.code || isRecordingPtt) return;
+    if (!fleet?.code || isRecActiveRef.current) return;
     setError(null);
     try {
       const perm = await requestRecordingPermissionsAsync();
       if (!perm.granted) {
-        setError('請開啟麥克風權限才能使用按鍵對講');
+        setError('請於 iOS 設定允許「鍋巴 GOBA」使用麥克風');
         return;
       }
       await setFleetAudioMode('record');
-      const recorder = new AudioModule.AudioRecorder(RecordingPresets.LOW_QUALITY);
-      await recorder.prepareToRecordAsync();
-      recorder.record();
-      recordingRef.current = recorder;
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      isRecActiveRef.current = true;
       recordStartTsRef.current = Date.now();
       setIsRecordingPtt(true);
-    } catch {
+    } catch (err: any) {
+      isRecActiveRef.current = false;
       setIsRecordingPtt(false);
       await setFleetAudioMode('mix');
-      setError('無法啟動麥克風錄音');
+      setError(`無法啟動麥克風：${err?.message || '請檢查權限'}`);
     }
-  }, [fleet?.code, isRecordingPtt]);
+  }, [fleet?.code, audioRecorder]);
 
   const stopAndSendPtt = useCallback(async () => {
-    const rec = recordingRef.current;
-    recordingRef.current = null;
-    setIsRecordingPtt(false);
-    if (!rec || !fleet?.code || !memberId) {
-      await setFleetAudioMode('mix');
+    if (!isRecActiveRef.current) {
+      setIsRecordingPtt(false);
       return;
     }
+    isRecActiveRef.current = false;
+    setIsRecordingPtt(false);
     try {
-      await rec.stop();
+      await audioRecorder.stop();
       const durationMs = Math.max(300, Date.now() - recordStartTsRef.current);
-      const uri = rec.uri;
+      const uri = audioRecorder.uri;
       await setFleetAudioMode('mix');
-      if (!uri || durationMs < 350) return;
-      const b64 = await audioUriToBase64(uri);
-      const updated = await postFleetJson<FleetRoomState>('/api/maps/fleet/ptt', {
-        code: fleet.code,
-        member_id: memberId,
-        sender_name: nickname,
-        msg_type: 'ptt',
-        audio_b64: b64,
-        mime_type: 'audio/m4a',
-        duration_ms: durationMs,
-      });
-      setFleet(updated);
+      await sendRecordedAudio(uri, durationMs);
     } catch (e: any) {
       await setFleetAudioMode('mix');
       setError(e?.message || '語音送出失敗');
     }
-  }, [fleet?.code, memberId, nickname]);
+  }, [audioRecorder, sendRecordedAudio]);
+
+  // 暫時離開目前連線，但永久保留房間於「我的車隊對講群」供下次點選進入
+  const disconnectFleet = useCallback(async () => {
+    const code = fleet?.code;
+    setFleet(null);
+    lastMsgIdRef.current = 0;
+    playedIdsRef.current.clear();
+    AsyncStorage.removeItem(FLEET_ACTIVE_CODE_KEY).catch(() => {});
+    if (code && memberId) {
+      try {
+        await postFleetJson('/api/maps/fleet/disconnect', { code, member_id: memberId });
+        void refreshSavedRooms(memberId);
+      } catch {
+        // ignore
+      }
+    }
+  }, [fleet?.code, memberId, refreshSavedRooms]);
 
   const leaveFleet = useCallback(async () => {
     const code = fleet?.code;
@@ -425,11 +544,12 @@ export function useFleetMode(options: {
     if (code && memberId) {
       try {
         await postFleetJson('/api/maps/fleet/leave', { code, member_id: memberId });
+        void refreshSavedRooms(memberId);
       } catch {
         // ignore
       }
     }
-  }, [fleet?.code, memberId]);
+  }, [fleet?.code, memberId, refreshSavedRooms]);
 
   const isLeader = Boolean(fleet && memberId && fleet.leader_id === memberId);
 
@@ -438,10 +558,14 @@ export function useFleetMode(options: {
     nickname,
     setNickname,
     fleet,
+    savedRooms,
+    refreshSavedRooms: () => void refreshSavedRooms(memberId),
     isLeader,
     shareLocation,
     setShareLocation,
     isRecordingPtt,
+    openMicMuted,
+    setOpenMicMuted,
     busy,
     error,
     setError,
@@ -451,6 +575,7 @@ export function useFleetMode(options: {
     sendTextAlert,
     startPttRecording,
     stopAndSendPtt,
+    disconnectFleet,
     leaveFleet,
   };
 }
