@@ -33,6 +33,7 @@ import { LiquidGlassSurface } from '../components/LiquidGlassSurface';
 import { ManeuverArrowIcon } from '../components/ManeuverArrowIcon';
 import { HdRoadLayers } from '../components/navigation/HdRoadLayers';
 import { NavHudOverlay } from '../components/navigation/NavHudOverlay';
+import { RouteProgressBar } from '../components/navigation/RouteProgressBar';
 import { OpeningHoursPicker } from '../components/OpeningHoursPicker';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
 import type { ReplayScenarioResult } from '../navigation/gpsReplayTester';
@@ -1871,13 +1872,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </LiquidGlassSurface>
         )}
 
-        {/* 狀態 4：Navigation（頂部 Turn-by-Turn 看板 + 複雜路口放大指引，已元件化隔離） */}
+        {/* 狀態 4：Navigation（高德風格深色轉向看板 + 左側車速圓徽章 + 複雜路口放大指引） */}
         {uiState === 'navigation' && isActiveNav && (
           <NavHudOverlay
             nextManeuver={nav.progress?.nextManeuver ?? null}
             thenManeuver={nav.progress?.thenManeuver ?? null}
             fallbackFirstManeuver={nav.route?.maneuvers[0] ?? null}
             distanceToNextTurnMeters={nav.progress?.distanceToNextTurnMeters ?? 0}
+            speedKmh={nav.speedKmh}
             phase={nav.phase}
             commandState={nav.commandState}
             remainingTrafficSignalCount={nav.progress?.remainingTrafficSignalCount ?? null}
@@ -1892,6 +1894,8 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             rerouteOfflinePending={nav.rerouteOfflinePending}
             isSimulating={nav.isSimulating}
             bgLocationActive={nav.bgLocationActive}
+            voiceEnabled={nav.voiceEnabled}
+            onToggleVoice={nav.toggleVoice}
             onRetryOfflineReroute={() => {
               if (nav.gps) {
                 nav.triggerOffRouteReroute({ lat: nav.gps.lat, lon: nav.gps.lon });
@@ -2637,6 +2641,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             </SafeAreaView>
           </LiquidGlassSurface>
         </View>
+      )}
+
+      {/* 高德風格右側垂直路線進度條（僅在正式導航時顯示） */}
+      {uiState === 'navigation' && isActiveNav && (
+        <RouteProgressBar
+          progressRatio={
+            (nav.route?.distanceKm ?? 0) > 0
+              ? Math.max(
+                  0,
+                  Math.min(1, 1 - remainingDistKm / Math.max(0.01, nav.route?.distanceKm ?? 1))
+                )
+              : 0
+          }
+          remainingTrafficSignalCount={
+            nav.progress?.remainingTrafficSignalCount ?? nav.route?.trafficSignalCount ?? 0
+          }
+        />
       )}
 
       {/* ==================== 底部可收合動態資訊卡（Priority 2.5：依 Browse / Route Preview / Navigation 切換） ==================== */}
@@ -3791,81 +3812,102 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   </View>
                 ) : (
                   <>
-                    <View style={styles.routeHeader}>
-                      <View style={{ flex: 1 }}>
-                        <View style={styles.etaRow}>
-                          <Text
-                            style={[styles.etaDuration, isNight && { color: '#FFFFFF' }]}
-                            maxFontSizeMultiplier={1.2}
-                          >
+                  <View
+                    style={{
+                      backgroundColor: 'rgba(15, 23, 42, 0.94)',
+                      borderRadius: 22,
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      borderWidth: 1,
+                      borderColor: 'rgba(255, 255, 255, 0.14)',
+                    }}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      {/* 左側：高德風格 × 結束導航按鈕 */}
+                      <TouchableOpacity
+                        onPress={nav.stopNavigation}
+                        activeOpacity={0.8}
+                        accessibilityLabel="結束導航"
+                        style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: 20,
+                          backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                          borderWidth: 1,
+                          borderColor: 'rgba(239, 68, 68, 0.45)',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Ionicons name="close" size={22} color="#FCA5A5" />
+                      </TouchableOpacity>
+
+                      {/* 中央：剩餘時間 / 剩餘距離 / 紅綠燈數 / 預計抵達時間 */}
+                      <TouchableOpacity
+                        style={{ flex: 1, alignItems: 'center' }}
+                        activeOpacity={0.8}
+                        onPress={() => setShowManeuvers((v) => !v)}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={{ fontSize: 17, fontWeight: '900', color: '#FFFFFF' }}>
                             {formatDurationZh(remainingSec)}
                           </Text>
-                          <Text style={styles.etaDot}>•</Text>
-                          <Text
-                            style={[styles.etaDistance, isNight && { color: '#CBD5E1' }]}
-                            maxFontSizeMultiplier={1.2}
-                          >
+                          <Text style={{ fontSize: 13, color: '#64748B' }}>•</Text>
+                          <Text style={{ fontSize: 16, fontWeight: '800', color: '#E2E8F0' }}>
                             {remainingDistKm.toFixed(1)} 公里
                           </Text>
+                          {(nav.progress?.remainingTrafficSignalCount ??
+                            nav.route?.trafficSignalCount ??
+                            0) > 0 && (
+                            <View
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 3,
+                                backgroundColor: 'rgba(255,255,255,0.1)',
+                                paddingHorizontal: 6,
+                                paddingVertical: 2,
+                                borderRadius: 8,
+                              }}
+                            >
+                              <View
+                                style={{
+                                  width: 6,
+                                  height: 6,
+                                  borderRadius: 3,
+                                  backgroundColor: '#22C55E',
+                                }}
+                              />
+                              <Text style={{ fontSize: 12, fontWeight: '800', color: '#FDE68A' }}>
+                                {nav.progress?.remainingTrafficSignalCount ??
+                                  nav.route?.trafficSignalCount}
+                              </Text>
+                            </View>
+                          )}
                         </View>
-                        <Text style={styles.etaSub} numberOfLines={1}>
-                          預計 {formatEtaTime(remainingSec)} 抵達 •{' '}
-                          {typeof nav.route?.trafficSignalCount === 'number' &&
-                          nav.route.trafficSignalCount > 0
-                            ? `剩餘 ${
-                                nav.progress?.remainingTrafficSignalCount ??
-                                nav.route.trafficSignalCount
-                              } 個紅綠燈 • `
-                            : ''}
-                          {nav.destination?.name || '目的地'}
+                        <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 2 }}>
+                          {formatEtaTime(remainingSec)} 到達 • {nav.destination?.name || '目的地'}
                         </Text>
-                      </View>
+                      </TouchableOpacity>
+
+                      {/* 右側：路線總覽 / 暫停切換 */}
+                      <TouchableOpacity
+                        onPress={handleOverviewRoute}
+                        activeOpacity={0.8}
+                        accessibilityLabel="路線總覽"
+                        style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: 20,
+                          backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Ionicons name="map-outline" size={19} color="#F9A8D4" />
+                      </TouchableOpacity>
                     </View>
-
-                    {!sheetCollapsed && (
-                      <View style={styles.actionRow}>
-                        <TouchableOpacity
-                          style={styles.iconActionBtn}
-                          onPress={() => setShowManeuvers((v) => !v)}
-                        >
-                          <Ionicons
-                            name={showManeuvers ? 'chevron-down' : 'list'}
-                            size={18}
-                            color="#1F2937"
-                          />
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          style={styles.secondaryBtn}
-                          onPress={
-                            nav.phase === 'paused' ? nav.resumeNavigation : nav.pauseNavigation
-                          }
-                        >
-                          <Ionicons
-                            name={nav.phase === 'paused' ? 'play' : 'pause'}
-                            size={16}
-                            color="#1F2937"
-                          />
-                          <Text style={styles.secondaryBtnText}>
-                            {nav.phase === 'paused' ? '繼續' : '暫停'}
-                          </Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          style={{ flex: 1.25 }}
-                          activeOpacity={0.9}
-                          onPress={nav.stopNavigation}
-                        >
-                          <LinearGradient
-                            colors={['#EF4444', '#DC2626']}
-                            style={styles.primaryGradBtn}
-                          >
-                            <Ionicons name="stop-circle" size={17} color="#FFFFFF" />
-                            <Text style={styles.primaryBtnText}>結束導航</Text>
-                          </LinearGradient>
-                        </TouchableOpacity>
-                      </View>
-                    )}
+                  </View>
 
                     {!sheetCollapsed && showManeuvers && nav.route && (
                       <ScrollView style={styles.maneuverList} nestedScrollEnabled>

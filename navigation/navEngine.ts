@@ -739,3 +739,45 @@ export function pickVoiceAnnouncement(
 
   return null;
 }
+
+export interface CruiseHeadlineState {
+  isCruise: boolean;
+  arrowType: number;
+  headline: string;
+  targetRoadName: string;
+}
+
+/**
+ * V3 第六節 6.1：國道／長距離巡航提示時機控制
+ * 距離下一個轉彎／交流道出口 >= 2500 公尺時，不直接顯示「靠右／下交流道」誤導駕駛，
+ * 而是明確顯示「沿目前道路繼續行駛 XX 公里」，待進入預告範圍後再切換為轉向／分流指引。
+ */
+export function getHighwayCruisePrompt(
+  maneuver: RouteManeuver | null | undefined,
+  distanceMeters: number
+): CruiseHeadlineState {
+  if (!maneuver) {
+    return {
+      isCruise: false,
+      arrowType: 8,
+      headline: '沿路線前進',
+      targetRoadName: '前方道路',
+    };
+  }
+  const roadLabel = maneuver.streetNames?.[0] || maneuver.signToward || '';
+  if (distanceMeters >= 2500 && maneuver.type !== 4 && maneuver.type !== 5 && maneuver.type !== 6) {
+    const isExpressway = /國道|快速|高架|省道|環東|建國|新生|洲美|台6|台7|台8/.test(roadLabel);
+    return {
+      isCruise: true,
+      arrowType: 8, // 直行箭頭
+      headline: isExpressway ? '沿國道／快速道路繼續行駛' : '沿目前道路繼續行駛',
+      targetRoadName: roadLabel ? `前方 ${formatDistanceMetersZh(distanceMeters)} 後${getShortManeuverActionZh(maneuver)}` : '直行',
+    };
+  }
+  return {
+    isCruise: false,
+    arrowType: maneuver.type,
+    headline: maneuver.instruction || '沿路線前進',
+    targetRoadName: roadLabel || maneuver.instruction || '前方路口',
+  };
+}
