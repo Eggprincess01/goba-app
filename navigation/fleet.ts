@@ -12,6 +12,10 @@ import { API_BASE, fetchWithTimeout } from '../services/api';
 import { GpsSnapshot, VehicleClassId } from './types';
 
 const FLEET_MEMBER_ID_KEY = 'goba_fleet_member_id_v1';
+const FLEET_ACTIVE_CODE_KEY = 'goba_fleet_active_code_v1';
+const FLEET_NICKNAME_KEY = 'goba_fleet_nickname_v1';
+
+export type FleetVoiceMode = 'open' | 'ptt' | 'leader_only';
 
 export interface FleetMember {
   member_id: string;
@@ -46,6 +50,7 @@ export interface FleetRoomState {
   code: string;
   name: string;
   leader_id: string;
+  voice_mode: FleetVoiceMode;
   join_url: string;
   destination: { name: string; address: string; lat: number; lon: number } | null;
   rally_point: { name: string; lat: number; lon: number } | null;
@@ -124,14 +129,36 @@ export function useFleetMode(options: {
   shareRef.current = shareLocation;
 
   useEffect(() => {
-    AsyncStorage.getItem(FLEET_MEMBER_ID_KEY)
-      .then((saved) => {
-        if (saved) {
-          setMemberId(saved);
-        } else {
-          const generated = `gb-${Math.random().toString(36).slice(2, 10)}`;
-          setMemberId(generated);
-          AsyncStorage.setItem(FLEET_MEMBER_ID_KEY, generated).catch(() => {});
+    Promise.all([
+      AsyncStorage.getItem(FLEET_MEMBER_ID_KEY),
+      AsyncStorage.getItem(FLEET_NICKNAME_KEY),
+      AsyncStorage.getItem(FLEET_ACTIVE_CODE_KEY),
+    ])
+      .then(async ([savedId, savedNick, savedCode]) => {
+        const uid = savedId || `gb-${Math.random().toString(36).slice(2, 10)}`;
+        if (!savedId) {
+          AsyncStorage.setItem(FLEET_MEMBER_ID_KEY, uid).catch(() => {});
+        }
+        setMemberId(uid);
+        const nick = savedNick || '鍋巴車友';
+        if (savedNick) setNickname(savedNick);
+        if (savedCode) {
+          try {
+            const rejoined = await postFleetJson<FleetRoomState>('/api/maps/fleet/join', {
+              code: savedCode,
+              member_id: uid,
+              nickname: nick,
+              vehicle_type: vehicleRef.current,
+            });
+            for (const m of rejoined.voice_messages || []) {
+              playedIdsRef.current.add(m.id);
+              if (m.id > lastMsgIdRef.current) lastMsgIdRef.current = m.id;
+            }
+            setFleet(rejoined);
+          } catch {
+            // 若房間已不存在才清除快取
+            AsyncStorage.removeItem(FLEET_ACTIVE_CODE_KEY).catch(() => {});
+          }
         }
       })
       .catch(() => {
@@ -227,6 +254,7 @@ export function useFleetMode(options: {
       try {
         const nick = (customNickname || nickname).trim() || '隊長';
         setNickname(nick);
+        AsyncStorage.setItem(FLEET_NICKNAME_KEY, nick).catch(() => {});
         lastMsgIdRef.current = 0;
         playedIdsRef.current.clear();
         const created = await postFleetJson<FleetRoomState>('/api/maps/fleet/create', {
@@ -238,6 +266,7 @@ export function useFleetMode(options: {
           dest_lat: dest?.lat,
           dest_lon: dest?.lon,
         });
+        AsyncStorage.setItem(FLEET_ACTIVE_CODE_KEY, created.code).catch(() => {});
         setFleet(created);
         return created;
       } catch (e: any) {
@@ -258,6 +287,7 @@ export function useFleetMode(options: {
       try {
         const nick = (customNickname || nickname).trim() || '隊友';
         setNickname(nick);
+        AsyncStorage.setItem(FLEET_NICKNAME_KEY, nick).catch(() => {});
         lastMsgIdRef.current = 0;
         playedIdsRef.current.clear();
         const joined = await postFleetJson<FleetRoomState>('/api/maps/fleet/join', {
@@ -270,6 +300,7 @@ export function useFleetMode(options: {
           playedIdsRef.current.add(m.id);
           if (m.id > lastMsgIdRef.current) lastMsgIdRef.current = m.id;
         }
+        AsyncStorage.setItem(FLEET_ACTIVE_CODE_KEY, joined.code).catch(() => {});
         setFleet(joined);
         return joined;
       } catch (e: any) {
@@ -286,6 +317,7 @@ export function useFleetMode(options: {
     async (params: {
       dest?: { name: string; address: string; lat: number; lon: number };
       rally?: { name: string; lat: number; lon: number };
+      voiceMode?: FleetVoiceMode;
     }) => {
       if (!fleet?.code || !memberId) return null;
       try {
@@ -299,11 +331,12 @@ export function useFleetMode(options: {
           rally_name: params.rally?.name,
           rally_lat: params.rally?.lat,
           rally_lon: params.rally?.lon,
+          voice_mode: params.voiceMode,
         });
         setFleet(updated);
         return updated;
       } catch (e: any) {
-        setError(e?.message || '更新集合點失敗');
+        setError(e?.message || '更新車隊設定失敗');
         return null;
       }
     },
@@ -388,6 +421,7 @@ export function useFleetMode(options: {
     setFleet(null);
     lastMsgIdRef.current = 0;
     playedIdsRef.current.clear();
+    AsyncStorage.removeItem(FLEET_ACTIVE_CODE_KEY).catch(() => {});
     if (code && memberId) {
       try {
         await postFleetJson('/api/maps/fleet/leave', { code, member_id: memberId });

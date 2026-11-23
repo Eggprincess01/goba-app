@@ -96,6 +96,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('home');
   const [region, setRegion] = useState<RegionInfo>(TAIWAN_REGIONS[3]);
   const [refreshing, setRefreshing] = useState(false);
+  const [openFleetTrigger, setOpenFleetTrigger] = useState(0);
 
   // 即時真實資料 + 錯誤狀態 (P1 #4)
   const [weather, setWeather] = useState<LiveWeather | null>(null);
@@ -910,6 +911,7 @@ export default function App() {
           <NavigationScreen
             initialCenter={{ lat: region.lat, lon: region.lon }}
             embeddedInTab
+            openFleetTrigger={openFleetTrigger}
             onTabBarVisibilityChange={setMapTabBarVisible}
             onClose={() => setActiveTab('home')}
           />
@@ -1046,11 +1048,11 @@ export default function App() {
                 aqi={aqi}
                 onOpenExamModal={openExamRadarModal}
                 onOpenPlateModal={openPlateSearchModal}
-                onOpenMapWithCategory={() => {
+                onOpenFleetModal={() => {
                   setActiveTab('map');
+                  setOpenFleetTrigger((c) => c + 1);
                 }}
                 onSelectTab={setActiveTab}
-                onOpenRegionModal={() => setRegionModalVisible(true)}
               />
             )}
 

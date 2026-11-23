@@ -131,6 +131,7 @@ export interface NavigationScreenProps {
   initialCenter: Coordinate;
   initialDestination?: SearchPlace | null;
   embeddedInTab?: boolean;
+  openFleetTrigger?: number;
   onTabBarVisibilityChange?: (visible: boolean) => void;
   onClose: () => void;
 }
@@ -139,6 +140,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   initialCenter,
   initialDestination = null,
   embeddedInTab = false,
+  openFleetTrigger = 0,
   onTabBarVisibilityChange,
   onClose,
 }) => {
@@ -149,6 +151,17 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const nav = useNavigationState(initialCenter);
   const fleetState = useFleetMode({ gps: nav.gps, vehicleType: nav.vehicleType });
   const [fleetModalOpen, setFleetModalOpen] = useState(false);
+  const [liveTransitEta, setLiveTransitEta] = useState<{
+    liveAvailable: boolean;
+    source: string;
+    routes: { route_name: string; direction: string; eta_text: string }[];
+  } | null>(null);
+
+  useEffect(() => {
+    if (openFleetTrigger > 0) {
+      setFleetModalOpen(true);
+    }
+  }, [openFleetTrigger]);
   const [extrasModalOpen, setExtrasModalOpen] = useState(false);
   const [cursorSkin, setCursorSkin] = useState<NavCursorSkin>('arrow');
   const [savedParking, setSavedParking] = useState<SavedParkingSpot | null>(null);
@@ -248,6 +261,30 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [selectedYouBike, setSelectedYouBike] = useState<YouBikeStation | null>(null);
   const [transitStops, setTransitStops] = useState<TransitBusStop[]>([]);
   const [selectedTransitStop, setSelectedTransitStop] = useState<TransitBusStop | null>(null);
+
+  useEffect(() => {
+    if (!selectedTransitStop) {
+      setLiveTransitEta(null);
+      return;
+    }
+    let active = true;
+    const url = `https://mmlovenn.com/api/maps/transit-stop-eta?lat=${selectedTransitStop.lat}&lon=${selectedTransitStop.lon}&name=${encodeURIComponent(selectedTransitStop.name)}`;
+    fetch(url)
+      .then((r) => r.json())
+      .then((json) => {
+        if (active && json?.status === 'ok') {
+          setLiveTransitEta({
+            liveAvailable: Boolean(json.live_available),
+            source: String(json.source || ''),
+            routes: Array.isArray(json.routes) ? json.routes : [],
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [selectedTransitStop?.id]);
 
   const mapMountTsRef = useRef(Date.now());
   const categoryReqSeqRef = useRef(0);
@@ -2351,38 +2388,6 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               <View style={styles.dockDivider} />
               <TouchableOpacity
                 style={styles.dockBtn}
-                onPress={() => setFleetModalOpen(true)}
-                activeOpacity={0.7}
-              >
-                <Ionicons
-                  name="people"
-                  size={19}
-                  color={fleetState.fleet ? '#EC4899' : isNight ? '#F8FAFC' : '#1F2937'}
-                />
-                {fleetState.fleet && (
-                  <View
-                    style={{
-                      position: 'absolute',
-                      top: 4,
-                      right: 4,
-                      minWidth: 14,
-                      height: 14,
-                      borderRadius: 7,
-                      backgroundColor: '#16A34A',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      paddingHorizontal: 3,
-                    }}
-                  >
-                    <Text style={{ color: '#FFF', fontSize: 9, fontWeight: '900' }}>
-                      {fleetState.fleet.members.length}
-                    </Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-              <View style={styles.dockDivider} />
-              <TouchableOpacity
-                style={styles.dockBtn}
                 onPress={() => setExtrasModalOpen(true)}
                 activeOpacity={0.7}
               >
@@ -3183,15 +3188,29 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     {!sheetCollapsed && (
                       <>
                         <Text style={{ fontSize: 12, fontWeight: '800', color: isNight ? '#E2E8F0' : '#374151' }}>
-                          停靠公車路線（{selectedTransitStop.routes.length}）
+                          停靠公車路線（
+                          {liveTransitEta?.liveAvailable
+                            ? liveTransitEta.routes.length
+                            : selectedTransitStop.routes.length}
+                          ）{liveTransitEta?.liveAvailable ? ' · 台北市即時動態' : ''}
                         </Text>
-                        {selectedTransitStop.routes.length === 0 ? (
+                        {(liveTransitEta?.liveAvailable
+                          ? liveTransitEta.routes
+                          : selectedTransitStop.routes
+                        ).length === 0 ? (
                           <Text style={styles.metaMicroText}>
-                            此站牌尚無停靠路線明細（即時到站資訊暫時無法取得）
+                            {liveTransitEta?.source || '此站牌尚無停靠路線明細（即時到站資訊暫時無法取得）'}
                           </Text>
                         ) : (
                           <ScrollView style={{ maxHeight: 160 }} contentContainerStyle={{ gap: 6 }}>
-                            {selectedTransitStop.routes.map((rt, rIdx) => (
+                            {(liveTransitEta?.liveAvailable
+                              ? liveTransitEta.routes.map((r) => ({
+                                  routeName: r.route_name,
+                                  direction: r.direction,
+                                  etaText: r.eta_text,
+                                }))
+                              : selectedTransitStop.routes
+                            ).map((rt, rIdx) => (
                               <View
                                 key={`${rt.routeName}-${rIdx}`}
                                 style={{
@@ -4770,6 +4789,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         onLeaveFleet={() => fleetState.leaveFleet()}
         onStartPtt={() => fleetState.startPttRecording()}
         onStopPtt={() => fleetState.stopAndSendPtt()}
+        onChangeVoiceMode={(mode) => fleetState.updateRallyOrDest({ voiceMode: mode })}
         onSendAlert={(txt) => fleetState.sendTextAlert(txt)}
         onSyncCurrentDestToFleet={() => {
           if (nav.destination) {

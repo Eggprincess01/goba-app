@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import {
   ActivityIndicator,
   Image,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   ScrollView,
   Share,
   StyleSheet,
@@ -13,7 +15,7 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { FleetRoomState } from '../../navigation/fleet';
+import { FleetRoomState, FleetVoiceMode } from '../../navigation/fleet';
 
 interface FleetModalProps {
   visible: boolean;
@@ -35,6 +37,7 @@ interface FleetModalProps {
   onLeaveFleet: () => void;
   onStartPtt: () => void;
   onStopPtt: () => void;
+  onChangeVoiceMode?: (mode: FleetVoiceMode) => void;
   onSendAlert: (text: string) => void;
   onSyncCurrentDestToFleet: () => void;
   onNavigateToFleetDest: (dest: { name: string; address: string; lat: number; lon: number }) => void;
@@ -60,6 +63,7 @@ export const FleetModal: React.FC<FleetModalProps> = ({
   onLeaveFleet,
   onStartPtt,
   onStopPtt,
+  onChangeVoiceMode,
   onSendAlert,
   onSyncCurrentDestToFleet,
   onNavigateToFleetDest,
@@ -71,16 +75,21 @@ export const FleetModal: React.FC<FleetModalProps> = ({
   const cardBg = isNight ? '#1E293B' : '#F8FAFC';
   const textMain = isNight ? '#F8FAFC' : '#0F172A';
   const textSub = isNight ? '#94A3B8' : '#64748B';
+  const curVoiceMode: FleetVoiceMode = fleet?.voice_mode || 'ptt';
+  const canSpeak = curVoiceMode !== 'leader_only' || isLeader;
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={s.backdrop}>
+      <KeyboardAvoidingView
+        style={s.backdrop}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
         <View style={[s.sheet, { backgroundColor: bg }]}>
           <View style={s.header}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Ionicons name="people" size={22} color="#EC4899" />
               <Text style={[s.title, { color: textMain }]}>
-                {fleet ? `${fleet.name}` : 'GOBA 車隊模式（方案 A）'}
+                {fleet ? `${fleet.name}` : 'GOBA 車隊模式'}
               </Text>
             </View>
             <TouchableOpacity onPress={onClose}>
@@ -95,7 +104,7 @@ export const FleetModal: React.FC<FleetModalProps> = ({
           )}
 
           {!fleet ? (
-            <ScrollView contentContainerStyle={{ gap: 14, paddingBottom: 24 }}>
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ gap: 14, paddingBottom: 24 }}>
               <Text style={{ fontSize: 13, color: textSub, lineHeight: 19 }}>
                 建立或加入車隊後，隊友可依各自車種合法導航至同一目的地，並支援同意制即時位置與按鍵語音對講（PTT）。
               </Text>
@@ -147,7 +156,7 @@ export const FleetModal: React.FC<FleetModalProps> = ({
               </View>
             </ScrollView>
           ) : (
-            <ScrollView contentContainerStyle={{ gap: 12, paddingBottom: 24 }}>
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ gap: 12, paddingBottom: 24 }}>
               {/* 邀請碼與 QR */}
               <View style={[s.card, { backgroundColor: cardBg }]}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -249,20 +258,105 @@ export const FleetModal: React.FC<FleetModalProps> = ({
                   />
                 </View>
 
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  onPressIn={onStartPtt}
-                  onPressOut={onStopPtt}
-                  style={[
-                    s.pttBtn,
-                    { backgroundColor: isRecordingPtt ? '#DC2626' : '#0F172A' },
-                  ]}
-                >
-                  <Ionicons name={isRecordingPtt ? 'mic' : 'mic-outline'} size={20} color="#FFF" />
-                  <Text style={s.primaryBtnText}>
-                    {isRecordingPtt ? '錄音中…放開立即送出對講' : '按住說話（車隊 PTT 對講）'}
+                {/* 隊長可切換發言模式：自由發言 / 按鍵說話 / 僅隊長發言 */}
+                {isLeader && onChangeVoiceMode ? (
+                  <View style={{ gap: 6 }}>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: textSub }}>
+                      隊長語音模式控制
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 6 }}>
+                      {(
+                        [
+                          { id: 'open', label: '自由發言' },
+                          { id: 'ptt', label: '按鍵說話' },
+                          { id: 'leader_only', label: '僅隊長說' },
+                        ] as { id: FleetVoiceMode; label: string }[]
+                      ).map((opt) => {
+                        const active = curVoiceMode === opt.id;
+                        return (
+                          <TouchableOpacity
+                            key={opt.id}
+                            onPress={() => onChangeVoiceMode(opt.id)}
+                            style={[
+                              s.smallPill,
+                              {
+                                flex: 1,
+                                justifyContent: 'center',
+                                backgroundColor: active
+                                  ? '#EC4899'
+                                  : isNight
+                                  ? '#334155'
+                                  : '#E2E8F0',
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 12,
+                                fontWeight: '800',
+                                color: active ? '#FFF' : textMain,
+                              }}
+                            >
+                              {opt.label}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : (
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#EC4899' }}>
+                    目前語音模式：
+                    {curVoiceMode === 'open'
+                      ? '大家皆可自由發言'
+                      : curVoiceMode === 'leader_only'
+                      ? '僅隊長可發言'
+                      : '按鍵說話（PTT）'}
                   </Text>
-                </TouchableOpacity>
+                )}
+
+                {curVoiceMode === 'open' ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    disabled={!canSpeak}
+                    onPress={() => (isRecordingPtt ? onStopPtt() : onStartPtt())}
+                    style={[
+                      s.pttBtn,
+                      { backgroundColor: isRecordingPtt ? '#DC2626' : '#16A34A' },
+                    ]}
+                  >
+                    <Ionicons name={isRecordingPtt ? 'mic' : 'mic-outline'} size={20} color="#FFF" />
+                    <Text style={s.primaryBtnText}>
+                      {isRecordingPtt ? '自由發言中（點一下停止並送出）' : '點擊開始直接發言'}
+                    </Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    disabled={!canSpeak}
+                    onPressIn={onStartPtt}
+                    onPressOut={onStopPtt}
+                    style={[
+                      s.pttBtn,
+                      {
+                        backgroundColor: !canSpeak
+                          ? '#64748B'
+                          : isRecordingPtt
+                          ? '#DC2626'
+                          : '#0F172A',
+                      },
+                    ]}
+                  >
+                    <Ionicons name={isRecordingPtt ? 'mic' : 'mic-outline'} size={20} color="#FFF" />
+                    <Text style={s.primaryBtnText}>
+                      {!canSpeak
+                        ? '目前為僅隊長發言模式'
+                        : isRecordingPtt
+                        ? '錄音中…放開立即送出對講'
+                        : '按住說話（車隊 PTT 對講）'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
 
                 {isLeader && (
                   <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -332,7 +426,7 @@ export const FleetModal: React.FC<FleetModalProps> = ({
             </ScrollView>
           )}
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 };
