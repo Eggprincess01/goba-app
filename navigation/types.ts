@@ -125,6 +125,7 @@ export interface TransitBusRouteInfo {
 export interface TransitBusStop {
   id: string;
   osmId?: number;
+  stopType?: 'bus' | 'mrt' | 'rail';
   name: string;
   directionLabel: string;
   lat: number;

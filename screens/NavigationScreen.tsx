@@ -613,6 +613,26 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     };
   }, [showInteractiveTransitStops, transitGridLat, transitGridLon, isTransitFocus]);
 
+  // Browse 地圖放大至社區層級 (>=14.5) 時自動載入周邊 YouBike 2.0 / 2.0E 即時可借／可停數量
+  const autoLoadYouBike = uiState === 'browse' && zoomLevel >= 14.5 && !categoryListOpen;
+  useEffect(() => {
+    if (!autoLoadYouBike) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      fetchYouBikeNear({ lat: transitGridLat, lon: transitGridLon }, 1200).then((yb) => {
+        if (active && yb.stations.length > 0) {
+          setYouBikeStations(yb.stations);
+          setYouBikeLiveAvailable(yb.liveAvailable);
+          setYouBikeStatusMsg(yb.statusMessage || null);
+        }
+      });
+    }, 450);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [autoLoadYouBike, transitGridLat, transitGridLon]);
+
   const displayedTransitStops = useMemo(() => {
     if (!showInteractiveTransitStops || transitStops.length === 0) return [];
     const sorted = [...transitStops].sort((a, b) => {
@@ -1824,12 +1844,22 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                       width: 18,
                       height: 18,
                       borderRadius: 9,
-                      backgroundColor: isSel ? 'rgba(255,255,255,0.22)' : '#2563EB',
+                      backgroundColor: isSel
+                        ? 'rgba(255,255,255,0.22)'
+                        : stop.stopType === 'mrt'
+                        ? '#7C3AED'
+                        : stop.stopType === 'rail'
+                        ? '#0F172A'
+                        : '#2563EB',
                       alignItems: 'center',
                       justifyContent: 'center',
                     }}
                   >
-                    <Ionicons name="bus" size={10} color="#FFFFFF" />
+                    <Ionicons
+                      name={stop.stopType === 'mrt' || stop.stopType === 'rail' ? 'train' : 'bus'}
+                      size={10}
+                      color="#FFFFFF"
+                    />
                   </View>
                   <Text
                     style={{
@@ -1839,7 +1869,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     }}
                     numberOfLines={1}
                   >
-                    {stop.name}
+                    {stop.stopType === 'mrt' ? `捷運 ${stop.name}` : stop.name}
                   </Text>
                 </View>
               ) : (
@@ -1848,7 +1878,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     width: 20,
                     height: 20,
                     borderRadius: 10,
-                    backgroundColor: '#2563EB',
+                    backgroundColor:
+                      stop.stopType === 'mrt'
+                        ? '#7C3AED'
+                        : stop.stopType === 'rail'
+                        ? '#0F172A'
+                        : '#2563EB',
                     borderWidth: 2,
                     borderColor: '#FFFFFF',
                     alignItems: 'center',
@@ -1859,7 +1894,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     elevation: 2,
                   }}
                 >
-                  <Ionicons name="bus" size={10} color="#FFFFFF" />
+                  <Ionicons
+                    name={stop.stopType === 'mrt' || stop.stopType === 'rail' ? 'train' : 'bus'}
+                    size={10}
+                    color="#FFFFFF"
+                  />
                 </View>
               )}
             </Marker>
@@ -1907,9 +1946,10 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     shadowRadius: 4,
                   }}
                 >
-                  <Ionicons name="bicycle" size={13} color="#FFFFFF" />
-                  <Text style={{ fontSize: 11, fontWeight: '900', color: '#FFFFFF' }}>
-                    {typeof st.availableBikes === 'number' ? st.availableBikes : '--'}
+                  <Ionicons name="bicycle" size={12} color="#FFFFFF" />
+                  <Text style={{ fontSize: 10.5, fontWeight: '900', color: '#FFFFFF' }}>
+                    借{typeof st.availableBikes === 'number' ? st.availableBikes : '--'} 停
+                    {typeof st.availableReturnDocks === 'number' ? st.availableReturnDocks : '--'}
                   </Text>
                 </View>
               </Marker>

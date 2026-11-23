@@ -793,6 +793,10 @@ export async function fetchTransitStopsNear(
       ? json.stops.map((s: any) => ({
           id: String(s.id),
           osmId: typeof s.osm_id === 'number' ? s.osm_id : undefined,
+          stopType: (s.stop_type === 'mrt' || s.stop_type === 'rail' ? s.stop_type : 'bus') as
+            | 'bus'
+            | 'mrt'
+            | 'rail',
           name: String(s.name || '公車站'),
           directionLabel: String(s.direction_label || '公車站牌'),
           lat: Number(s.lat),
