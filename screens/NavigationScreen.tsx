@@ -35,6 +35,8 @@ import { ManeuverArrowIcon } from '../components/ManeuverArrowIcon';
 import { HdRoadLayers } from '../components/navigation/HdRoadLayers';
 import { NavHudOverlay } from '../components/navigation/NavHudOverlay';
 import { RouteProgressBar } from '../components/navigation/RouteProgressBar';
+import { FleetModal } from '../components/navigation/FleetModal';
+import { useFleetMode } from '../navigation/fleet';
 import { OpeningHoursPicker } from '../components/OpeningHoursPicker';
 import { recordNavDiagnostic } from '../navigation/diagnostics';
 import type { ReplayScenarioResult } from '../navigation/gpsReplayTester';
@@ -119,6 +121,8 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const searchInputRef = useRef<any>(null);
 
   const nav = useNavigationState(initialCenter);
+  const fleetState = useFleetMode({ gps: nav.gps, vehicleType: nav.vehicleType });
+  const [fleetModalOpen, setFleetModalOpen] = useState(false);
 
   // 若從交通地圖分頁直接點擊某站點的「導航」，自動帶入該站點並進入路線預覽
   const initialDestAppliedRef = useRef(false);
@@ -1478,6 +1482,44 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </GeoJSONSource>
         )}
 
+        {/* 車隊隊友即時位置標記（僅顯示已開啟位置共享的成員） */}
+        {(fleetState.fleet?.members || [])
+          .filter(
+            (m) =>
+              m.member_id !== fleetState.memberId &&
+              m.share_location &&
+              m.lat !== null &&
+              m.lon !== null
+          )
+          .map((m) => (
+            <Marker
+              key={`fleet-member-${m.member_id}`}
+              id={`fleet-member-${m.member_id}`}
+              lngLat={[m.lon!, m.lat!]}
+              anchor="bottom"
+            >
+              <View style={{ alignItems: 'center' }}>
+                <View
+                  style={{
+                    backgroundColor: m.is_lagging ? '#DC2626' : m.is_leader ? '#EC4899' : '#0EA5E9',
+                    paddingHorizontal: 8,
+                    paddingVertical: 4,
+                    borderRadius: 12,
+                    borderWidth: 2,
+                    borderColor: '#FFFFFF',
+                    shadowColor: '#000',
+                    shadowOpacity: 0.3,
+                    shadowRadius: 4,
+                  }}
+                >
+                  <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '800' }}>
+                    {m.nickname} · {m.speed_kmh ?? 0}km/h
+                  </Text>
+                </View>
+              </View>
+            </Marker>
+          ))}
+
         {/* 紅綠燈號誌路口標記（路線預覽自動切換小型防碰撞標記不遮擋路線，導航中僅顯示前方相關號誌並高亮下一個） */}
         {displayedTrafficSignals.map((sig) => (
           <Marker
@@ -2132,6 +2174,38 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               <View style={styles.dockDivider} />
               <TouchableOpacity
                 style={styles.dockBtn}
+                onPress={() => setFleetModalOpen(true)}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name="people"
+                  size={19}
+                  color={fleetState.fleet ? '#EC4899' : isNight ? '#F8FAFC' : '#1F2937'}
+                />
+                {fleetState.fleet && (
+                  <View
+                    style={{
+                      position: 'absolute',
+                      top: 4,
+                      right: 4,
+                      minWidth: 14,
+                      height: 14,
+                      borderRadius: 7,
+                      backgroundColor: '#16A34A',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      paddingHorizontal: 3,
+                    }}
+                  >
+                    <Text style={{ color: '#FFF', fontSize: 9, fontWeight: '900' }}>
+                      {fleetState.fleet.members.length}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              <View style={styles.dockDivider} />
+              <TouchableOpacity
+                style={styles.dockBtn}
                 onPress={() => {
                   const next = !showSettingsPanel;
                   setShowSettingsPanel(next);
@@ -2770,6 +2844,56 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               </ScrollView>
             </SafeAreaView>
           </LiquidGlassSurface>
+        </View>
+      )}
+
+      {/* 導航中若已加入車隊：左側提供一鍵按住對講（PTT）與車隊狀態鈕 */}
+      {uiState === 'navigation' && isActiveNav && fleetState.fleet && (
+        <View style={{ position: 'absolute', left: 12, top: 245, gap: 8, zIndex: 25 }}>
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPressIn={fleetState.startPttRecording}
+            onPressOut={fleetState.stopAndSendPtt}
+            style={{
+              backgroundColor: fleetState.isRecordingPtt
+                ? '#DC2626'
+                : 'rgba(15, 23, 42, 0.90)',
+              borderRadius: 22,
+              paddingHorizontal: 12,
+              paddingVertical: 10,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              borderWidth: 1.5,
+              borderColor: fleetState.isRecordingPtt ? '#FCA5A5' : '#EC4899',
+            }}
+          >
+            <Ionicons
+              name={fleetState.isRecordingPtt ? 'mic' : 'mic-outline'}
+              size={18}
+              color="#FFFFFF"
+            />
+            <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>
+              {fleetState.isRecordingPtt ? '說話中…' : '按住對講'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setFleetModalOpen(true)}
+            style={{
+              backgroundColor: 'rgba(15, 23, 42, 0.84)',
+              borderRadius: 16,
+              paddingHorizontal: 10,
+              paddingVertical: 6,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 4,
+            }}
+          >
+            <Ionicons name="people" size={14} color="#F9A8D4" />
+            <Text style={{ color: '#F9A8D4', fontSize: 11, fontWeight: '700' }}>
+              車隊 {fleetState.fleet.members.length}人
+            </Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -4415,6 +4539,75 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </LiquidGlassSurface>
         </View>
       </Modal>
+
+      <FleetModal
+        visible={fleetModalOpen}
+        isNight={isNight}
+        onClose={() => setFleetModalOpen(false)}
+        memberId={fleetState.memberId}
+        nickname={fleetState.nickname}
+        setNickname={fleetState.setNickname}
+        fleet={fleetState.fleet}
+        isLeader={fleetState.isLeader}
+        shareLocation={fleetState.shareLocation}
+        setShareLocation={fleetState.setShareLocation}
+        isRecordingPtt={fleetState.isRecordingPtt}
+        busy={fleetState.busy}
+        error={fleetState.error}
+        currentDestination={
+          nav.destination
+            ? {
+                name: nav.destination.name,
+                address: nav.destination.address,
+                lat: nav.destination.navLat ?? nav.destination.lat,
+                lon: nav.destination.navLon ?? nav.destination.lon,
+              }
+            : null
+        }
+        onCreateFleet={(nick) =>
+          fleetState.createFleet(
+            nick,
+            nav.destination
+              ? {
+                  name: nav.destination.name,
+                  address: nav.destination.address,
+                  lat: nav.destination.navLat ?? nav.destination.lat,
+                  lon: nav.destination.navLon ?? nav.destination.lon,
+                }
+              : null
+          )
+        }
+        onJoinFleet={(code, nick) => fleetState.joinFleet(code, nick)}
+        onLeaveFleet={() => fleetState.leaveFleet()}
+        onStartPtt={() => fleetState.startPttRecording()}
+        onStopPtt={() => fleetState.stopAndSendPtt()}
+        onSendAlert={(txt) => fleetState.sendTextAlert(txt)}
+        onSyncCurrentDestToFleet={() => {
+          if (nav.destination) {
+            fleetState.updateRallyOrDest({
+              dest: {
+                name: nav.destination.name,
+                address: nav.destination.address,
+                lat: nav.destination.navLat ?? nav.destination.lat,
+                lon: nav.destination.navLon ?? nav.destination.lon,
+              },
+            });
+          }
+        }}
+        onNavigateToFleetDest={(dest) => {
+          const place: SearchPlace = {
+            id: `fleet-dest-${dest.lat.toFixed(4)}-${dest.lon.toFixed(4)}`,
+            name: dest.name,
+            address: dest.address || '車隊共同目的地',
+            lat: dest.lat,
+            lon: dest.lon,
+            navLat: dest.lat,
+            navLon: dest.lon,
+          };
+          nav.setInspectedPlace(place);
+          nav.calculateRoute(place);
+        }}
+      />
     </View>
   );
 };
