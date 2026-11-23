@@ -101,9 +101,33 @@ export async function loadLocalState(): Promise<LocalBootstrapState> {
       AsyncStorage.getItem(STORAGE_KEYS.UPDATED_AT),
     ]);
 
-  const region: RegionInfo = savedRegion ? JSON.parse(savedRegion) : TAIWAN_REGIONS[3];
-  const prefs: AccountPrefs = savedPrefs ? { ...DEFAULT_PREFS, ...JSON.parse(savedPrefs) } : DEFAULT_PREFS;
-  const user: UserProfile | null = savedUser ? JSON.parse(savedUser) : null;
+  let region: RegionInfo = TAIWAN_REGIONS[3];
+  if (savedRegion) {
+    try {
+      const parsed = JSON.parse(savedRegion);
+      if (parsed && typeof parsed.lat === 'number') region = parsed;
+    } catch {
+      region = TAIWAN_REGIONS[3];
+    }
+  }
+
+  let prefs: AccountPrefs = DEFAULT_PREFS;
+  if (savedPrefs) {
+    try {
+      prefs = { ...DEFAULT_PREFS, ...JSON.parse(savedPrefs) };
+    } catch {
+      prefs = DEFAULT_PREFS;
+    }
+  }
+
+  let user: UserProfile | null = null;
+  if (savedUser) {
+    try {
+      user = JSON.parse(savedUser);
+    } catch {
+      user = null;
+    }
+  }
 
   let vehicles: VehicleItem[] = [];
   const rawV = savedV1 || savedV2;

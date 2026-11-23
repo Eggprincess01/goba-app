@@ -25,6 +25,7 @@ interface ProfileTabProps {
   isSyncingCloud: boolean;
   onGoogleLogin: () => void;
   onLogout: () => void;
+  onDeleteAccount: () => void;
   onOpenAccountSettings: () => void;
   onOpenRegionModal: () => void;
   onManualCloudSync: () => void;
@@ -42,6 +43,7 @@ export function ProfileTab({
   isSyncingCloud,
   onGoogleLogin,
   onLogout,
+  onDeleteAccount,
   onOpenAccountSettings,
   onOpenRegionModal,
   onManualCloudSync,
@@ -192,6 +194,29 @@ export function ProfileTab({
           </View>
           <Ionicons name="chevron-forward" size={16} color="#9CA3AF" />
         </TouchableOpacity>
+
+        <View style={styles.softDivider} />
+
+        <TouchableOpacity style={styles.settingItem} onPress={() => Linking.openURL('https://mmlovenn.com/privacy')}>
+          <View style={styles.settingLeft}>
+            <Ionicons name="shield-checkmark-outline" size={20} color="#2563EB" />
+            <Text style={styles.settingText}>隱私權政策</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color="#9CA3AF" />
+        </TouchableOpacity>
+
+        {user && (
+          <>
+            <View style={styles.softDivider} />
+            <TouchableOpacity style={styles.settingItem} onPress={onDeleteAccount}>
+              <View style={styles.settingLeft}>
+                <Ionicons name="trash-outline" size={20} color="#DC2626" />
+                <Text style={[styles.settingText, { color: '#DC2626' }]}>刪除帳號與雲端資料</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color="#DC2626" />
+            </TouchableOpacity>
+          </>
+        )}
 
         <View style={styles.softDivider} />
 

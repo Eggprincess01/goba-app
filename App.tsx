@@ -57,6 +57,7 @@ import {
   fetchLiveOilPrices,
   fetchAuthMe,
   logoutAuth,
+  deleteAccount,
   searchLivePlates,
   fetchExamSlots,
   fetchUserTasks,
@@ -405,26 +406,37 @@ export default function App() {
     bootstrap();
   }, [loadLiveData, syncBackendAccount]);
 
-  // -------------------- Deep Link 登入回調 --------------------
+  // -------------------- Deep Link 登入回調（#1 先向後端驗證 token 再存儲，#2 去重防重複彈窗） --------------------
+  const handledAuthUrlsRef = useRef<Set<string>>(new Set());
   const handleAuthCallbackUrl = useCallback(
     async (url: string) => {
       if (!url || !url.startsWith('goba://')) return;
+      if (handledAuthUrlsRef.current.has(url)) return;
+      handledAuthUrlsRef.current.add(url);
+
       const tokenMatch = url.match(/[?&]token=([^&]+)/);
       const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : '';
-      if (token) {
-        await setSecureToken(token);
-        const profile = await syncBackendAccount(
-          token,
-          vehicles,
-          refuelLogs,
-          maintLogs,
-          prefs,
-          region,
-          localUpdatedAtRef.current
-        );
-        if (profile) {
-          Alert.alert('登入成功 🎉', `歡迎回來，${profile.name}！`);
-        }
+      if (!token) return;
+
+      // 先向後端驗證 token 有效性，絕不直接寫入未驗證的外部 token
+      const verifiedUser = await fetchAuthMe(token).catch(() => null);
+      if (!verifiedUser) {
+        Alert.alert('登入驗證失敗', '授權憑證無效或已過期，請重新登入。');
+        return;
+      }
+
+      await setSecureToken(token);
+      const profile = await syncBackendAccount(
+        token,
+        vehicles,
+        refuelLogs,
+        maintLogs,
+        prefs,
+        region,
+        localUpdatedAtRef.current
+      );
+      if (profile) {
+        Alert.alert('登入成功 🎉', `歡迎回來，${profile.name}！`);
       }
     },
     [syncBackendAccount, vehicles, refuelLogs, maintLogs, prefs, region]
@@ -512,6 +524,35 @@ export default function App() {
         },
       },
     ]);
+  };
+
+  const handleDeleteAccount = () => {
+    if (!sessionToken) return;
+    Alert.alert(
+      '刪除帳號確認',
+      '此動作將永久刪除您的帳號、車庫雲端紀錄、車牌任務與收藏資料且無法復原，確定要刪除嗎？',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '永久刪除',
+          style: 'destructive',
+          onPress: async () => {
+            const ok = await deleteAccount(sessionToken).catch(() => false);
+            if (!ok) {
+              Alert.alert('刪除失敗', '請檢查網路連線後重試。');
+              return;
+            }
+            await deleteSecureToken();
+            setSessionToken(null);
+            setUser(null);
+            setUserTasks([]);
+            setUserFavorites([]);
+            setCloudSyncStatus('');
+            Alert.alert('已刪除帳號', '您的帳號與雲端資料已永久移除。');
+          },
+        },
+      ]
+    );
   };
 
   const saveAccountPrefsAndSync = async (next: AccountPrefs) => {
@@ -1069,6 +1110,7 @@ export default function App() {
                 isSyncingCloud={isSyncingCloud}
                 onGoogleLogin={handleGoogleLogin}
                 onLogout={handleLogout}
+                onDeleteAccount={handleDeleteAccount}
                 onOpenAccountSettings={() => {
                   setDraftNickname(prefs.customNickname || user?.name || '');
                   setAccountSettingsVisible(true);

@@ -596,7 +596,25 @@ export async function fetchExamSlots(licenseType: string = '3'): Promise<{
   };
 }
 
-export async function fetchUserTasks(token: string): Promise<any[]> {
+export interface UserTaskItem {
+  id: string;
+  plate_pattern?: string;
+  vehicle_type?: string;
+  station_name?: string;
+  status?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface UserFavoriteItem {
+  id?: string | number;
+  plate_no?: string;
+  station_name?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export async function fetchUserTasks(token: string): Promise<UserTaskItem[]> {
   const res = await fetchWithTimeout(`${API_BASE}/api/tasks`, {
     headers: { Authorization: `Bearer ${token}` },
   }, 8000);
@@ -605,13 +623,25 @@ export async function fetchUserTasks(token: string): Promise<any[]> {
   return Array.isArray(data.tasks) ? data.tasks : Array.isArray(data) ? data : [];
 }
 
-export async function fetchUserFavorites(token: string): Promise<any[]> {
+export async function fetchUserFavorites(token: string): Promise<UserFavoriteItem[]> {
   const res = await fetchWithTimeout(`${API_BASE}/api/favorites`, {
     headers: { Authorization: `Bearer ${token}` },
   }, 8000);
   if (!res.ok) return [];
   const data = await res.json();
   return Array.isArray(data.favorites) ? data.favorites : Array.isArray(data) ? data : [];
+}
+
+export async function deleteAccount(token: string): Promise<boolean> {
+  const res = await fetchWithTimeout(
+    `${API_BASE}/api/auth/delete-account`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    10000
+  );
+  return res.ok;
 }
 
 export async function addUserFavorite(
