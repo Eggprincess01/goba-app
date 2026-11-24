@@ -111,8 +111,10 @@ const GOBA_MASCOT = require('../assets/icon-small.png');
 
 const VIEWPORT_POI_STYLE: Record<string, { icon: string; color: string }> = {
   attraction: { icon: 'star', color: '#EC4899' },
+  scenic: { icon: 'image', color: '#10B981' },
   mall: { icon: 'bag-handle', color: '#A855F7' },
   hospital: { icon: 'medkit', color: '#EF4444' },
+  clinic: { icon: 'medkit', color: '#F43F5E' },
   pharmacy: { icon: 'medical', color: '#10B981' },
   gas_station: { icon: 'flame', color: '#F97316' },
   charging_station: { icon: 'flash', color: '#06B6D4' },
@@ -120,12 +122,24 @@ const VIEWPORT_POI_STYLE: Record<string, { icon: string; color: string }> = {
   convenience_store: { icon: 'storefront', color: '#14B8A6' },
   supermarket: { icon: 'cart', color: '#16A34A' },
   restaurant: { icon: 'restaurant', color: '#EA580C' },
+  beverage: { icon: 'wine', color: '#EC4899' },
   cafe: { icon: 'cafe', color: '#92400E' },
   school: { icon: 'school', color: '#6366F1' },
+  library: { icon: 'book', color: '#4F46E5' },
   bank: { icon: 'cash', color: '#0EA5E9' },
+  atm: { icon: 'card', color: '#0284C7' },
   park: { icon: 'leaf', color: '#22C55E' },
   hotel: { icon: 'bed', color: '#8B5CF6' },
   post_office: { icon: 'mail', color: '#059669' },
+  temple: { icon: 'sparkles', color: '#D97706' },
+  government: { icon: 'business', color: '#475569' },
+  police: { icon: 'shield-checkmark', color: '#1D4ED8' },
+  market: { icon: 'basket', color: '#F59E0B' },
+  sports: { icon: 'fitness', color: '#0D9488' },
+  transit: { icon: 'train', color: '#2563EB' },
+  car_service: { icon: 'build', color: '#64748B' },
+  shop: { icon: 'pricetag', color: '#DB2777' },
+  entertainment: { icon: 'film', color: '#9333EA' },
 };
 
 const QUICK_POI_CATEGORIES = [
