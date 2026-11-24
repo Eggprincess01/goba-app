@@ -2480,6 +2480,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             bgLocationActive={nav.bgLocationActive}
             voiceEnabled={nav.voiceEnabled}
             voiceMode={nav.voiceMode}
+            isNight={isNight}
             onToggleVoice={nav.toggleVoice}
             onCycleVoiceMode={nav.cycleVoiceMode}
             onRetryOfflineReroute={() => {
@@ -2844,13 +2845,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           activeOpacity={0.85}
         >
           <LiquidGlassSurface
-            variant="dark"
+            variant={isNight ? 'dark' : 'light'}
             interactive
             borderRadius={22}
             contentStyle={styles.recenterInner}
           >
-            <Ionicons name="navigate" size={15} color="#F472B6" />
-            <Text style={styles.recenterText}>回到車頭視角</Text>
+            <Ionicons name="navigate" size={15} color={isNight ? '#F472B6' : '#DB2777'} />
+            <Text style={[styles.recenterText, !isNight && { color: '#0F172A' }]}>回到車頭視角</Text>
           </LiquidGlassSurface>
         </TouchableOpacity>
       )}
@@ -3340,7 +3341,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           ]}
         >
           <LiquidGlassSurface
-            variant={uiState === 'navigation' && nav.phase !== 'arrived' ? 'dark' : isNight ? 'dark' : 'light'}
+            variant={isNight ? 'dark' : 'light'}
             borderRadius={uiState === 'navigation' && nav.phase !== 'arrived' ? 24 : 28}
             style={
               uiState === 'navigation' && nav.phase !== 'arrived'
@@ -4730,12 +4731,16 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   <>
                   <View
                     style={{
-                      backgroundColor: 'rgba(15, 23, 42, 0.94)',
+                      backgroundColor: isNight
+                        ? 'rgba(15, 23, 42, 0.94)'
+                        : 'rgba(255, 255, 255, 0.95)',
                       borderRadius: 22,
                       paddingHorizontal: 12,
                       paddingVertical: 10,
                       borderWidth: 1,
-                      borderColor: 'rgba(255, 255, 255, 0.14)',
+                      borderColor: isNight
+                        ? 'rgba(255, 255, 255, 0.14)'
+                        : 'rgba(15, 23, 42, 0.08)',
                     }}
                   >
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
@@ -4748,14 +4753,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                           width: 40,
                           height: 40,
                           borderRadius: 20,
-                          backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                          backgroundColor: isNight
+                            ? 'rgba(239, 68, 68, 0.2)'
+                            : 'rgba(239, 68, 68, 0.12)',
                           borderWidth: 1,
-                          borderColor: 'rgba(239, 68, 68, 0.45)',
+                          borderColor: isNight
+                            ? 'rgba(239, 68, 68, 0.45)'
+                            : 'rgba(239, 68, 68, 0.30)',
                           alignItems: 'center',
                           justifyContent: 'center',
                         }}
                       >
-                        <Ionicons name="close" size={22} color="#FCA5A5" />
+                        <Ionicons name="close" size={22} color={isNight ? '#FCA5A5' : '#DC2626'} />
                       </TouchableOpacity>
 
                       {/* 中央：剩餘時間 / 剩餘距離 / 紅綠燈數 / 預計抵達時間 */}
@@ -4765,11 +4774,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                         onPress={() => setShowManeuvers((v) => !v)}
                       >
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                          <Text style={{ fontSize: 17, fontWeight: '900', color: '#FFFFFF' }}>
+                          <Text style={{ fontSize: 17, fontWeight: '900', color: isNight ? '#FFFFFF' : '#0F172A' }}>
                             {formatDurationZh(remainingSec)}
                           </Text>
-                          <Text style={{ fontSize: 13, color: '#64748B' }}>•</Text>
-                          <Text style={{ fontSize: 16, fontWeight: '800', color: '#E2E8F0' }}>
+                          <Text style={{ fontSize: 13, color: isNight ? '#64748B' : '#94A3B8' }}>•</Text>
+                          <Text style={{ fontSize: 16, fontWeight: '800', color: isNight ? '#E2E8F0' : '#1E293B' }}>
                             {remainingDistKm.toFixed(1)} 公里
                           </Text>
                           {(nav.progress?.remainingTrafficSignalCount ??
@@ -4780,7 +4789,9 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                                 flexDirection: 'row',
                                 alignItems: 'center',
                                 gap: 3,
-                                backgroundColor: 'rgba(255,255,255,0.1)',
+                                backgroundColor: isNight
+                                  ? 'rgba(255,255,255,0.1)'
+                                  : 'rgba(15, 23, 42, 0.06)',
                                 paddingHorizontal: 6,
                                 paddingVertical: 2,
                                 borderRadius: 8,
@@ -4794,14 +4805,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                                   backgroundColor: '#22C55E',
                                 }}
                               />
-                              <Text style={{ fontSize: 12, fontWeight: '800', color: '#FDE68A' }}>
+                              <Text style={{ fontSize: 12, fontWeight: '800', color: isNight ? '#FDE68A' : '#15803D' }}>
                                 {nav.progress?.remainingTrafficSignalCount ??
                                   nav.route?.trafficSignalCount}
                               </Text>
                             </View>
                           )}
                         </View>
-                        <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 2 }}>
+                        <Text style={{ fontSize: 12, color: isNight ? '#94A3B8' : '#64748B', marginTop: 2 }}>
                           {formatEtaTime(remainingSec)} 到達 • {nav.destination?.name || '目的地'}
                         </Text>
                       </TouchableOpacity>
@@ -4815,12 +4826,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                           width: 40,
                           height: 40,
                           borderRadius: 20,
-                          backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                          backgroundColor: isNight
+                            ? 'rgba(255, 255, 255, 0.1)'
+                            : 'rgba(236, 72, 153, 0.10)',
                           alignItems: 'center',
                           justifyContent: 'center',
                         }}
                       >
-                        <Ionicons name="map-outline" size={19} color="#F9A8D4" />
+                        <Ionicons name="map-outline" size={19} color={isNight ? '#F9A8D4' : '#DB2777'} />
                       </TouchableOpacity>
                     </View>
                   </View>

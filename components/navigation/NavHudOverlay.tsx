@@ -34,6 +34,7 @@ interface NavHudOverlayProps {
   bgLocationActive: boolean;
   voiceEnabled: boolean;
   voiceMode?: VoiceGuidanceMode;
+  isNight?: boolean;
   onToggleVoice: () => void;
   onCycleVoiceMode?: () => void;
   onRetryOfflineReroute: () => void;
@@ -63,6 +64,7 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
     bgLocationActive,
     voiceEnabled,
     voiceMode,
+    isNight = false,
     onToggleVoice,
     onCycleVoiceMode,
     onRetryOfflineReroute,
@@ -79,30 +81,33 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
     const showVoiceOrWarning =
       headingUnverified || gpsSignalLost || gpsWeakSignal || rerouteOfflinePending || isSimulating || bgLocationActive || phase === 'paused';
 
+    const pillStyle = [s.hudPill, !isNight && s.hudPillLight];
+    const tagTextStyle = [s.hudTagText, !isNight && s.hudTagTextLight];
+
     return (
       <View style={{ gap: 8 }}>
-        {/* 頂部大型深色轉向提示卡片（對齊高德導航結構） */}
-        <View style={s.amapTopCard}>
+        {/* 頂部大型轉向提示卡片（對齊高德導航結構，支援日間白/夜間黑雙色） */}
+        <View style={[s.amapTopCard, !isNight && s.amapTopCardLight]}>
           <View style={s.navHudMain}>
             <View style={s.arrowContainer}>
               <ManeuverArrowIcon type={cruiseState.arrowType} size={40} color="#FFFFFF" />
             </View>
             <View style={{ flex: 1 }}>
               <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-                <Text style={s.navHudDistance} maxFontSizeMultiplier={1.15}>
+                <Text style={[s.navHudDistance, !isNight && { color: '#0F172A' }]} maxFontSizeMultiplier={1.15}>
                   {formatDistanceMetersZh(distanceToNextTurnMeters)}
                 </Text>
-                <Text style={s.navHudRoadName} numberOfLines={1} maxFontSizeMultiplier={1.2}>
+                <Text style={[s.navHudRoadName, !isNight && { color: '#1E293B' }]} numberOfLines={1} maxFontSizeMultiplier={1.2}>
                   {cruiseState.targetRoadName}
                 </Text>
               </View>
-              <Text style={s.navHudInstruction} numberOfLines={1} maxFontSizeMultiplier={1.2}>
+              <Text style={[s.navHudInstruction, !isNight && { color: '#475569' }]} numberOfLines={1} maxFontSizeMultiplier={1.2}>
                 {cruiseState.headline}
               </Text>
             </View>
 
             <TouchableOpacity
-              style={s.voiceQuickBtn}
+              style={[s.voiceQuickBtn, !isNight && { backgroundColor: 'rgba(236, 72, 153, 0.12)' }]}
               onPress={onCycleVoiceMode ?? onToggleVoice}
               activeOpacity={0.75}
               accessibilityLabel="切換語音播報模式"
@@ -116,9 +121,16 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
                     : 'volume-high'
                 }
                 size={17}
-                color={effectiveVoiceMode === 'mute' ? '#94A3B8' : '#F9A8D4'}
+                color={effectiveVoiceMode === 'mute' ? '#94A3B8' : isNight ? '#F9A8D4' : '#DB2777'}
               />
-              <Text style={{ fontSize: 9, fontWeight: '800', color: effectiveVoiceMode === 'mute' ? '#94A3B8' : '#F9A8D4', marginTop: -2 }}>
+              <Text
+                style={{
+                  fontSize: 9,
+                  fontWeight: '800',
+                  color: effectiveVoiceMode === 'mute' ? '#94A3B8' : isNight ? '#F9A8D4' : '#DB2777',
+                  marginTop: -2,
+                }}
+              >
                 {voiceModeShort}
               </Text>
             </TouchableOpacity>
@@ -132,12 +144,12 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
               </Text>
             </View>
           ) : !cruiseState.isCruise && thenManeuver ? (
-            <View style={s.thenStrip}>
-              <Text style={s.thenLabel} maxFontSizeMultiplier={1.2}>
+            <View style={[s.thenStrip, !isNight && { backgroundColor: 'rgba(241, 245, 249, 0.92)' }]}>
+              <Text style={[s.thenLabel, !isNight && { color: '#DB2777' }]} maxFontSizeMultiplier={1.2}>
                 接著
               </Text>
-              <ManeuverArrowIcon type={thenManeuver.type} size={15} color="#F472B6" />
-              <Text style={s.thenText} numberOfLines={1} maxFontSizeMultiplier={1.2}>
+              <ManeuverArrowIcon type={thenManeuver.type} size={15} color={isNight ? '#F472B6' : '#DB2777'} />
+              <Text style={[s.thenText, !isNight && { color: '#334155' }]} numberOfLines={1} maxFontSizeMultiplier={1.2}>
                 {thenManeuver.instruction}
               </Text>
             </View>
@@ -153,11 +165,23 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
 
         {/* 左側獨立即時車速圓徽章 + 真實速限牌（有圖資時才顯示） + 必要狀態提示 */}
         <View style={s.subHudRow}>
-          <View style={[s.speedCircleBadge, isOverspeed && { borderColor: '#EF4444' }]}>
-            <Text style={[s.speedValueText, isOverspeed && { color: '#FCA5A5' }]}>
+          <View
+            style={[
+              s.speedCircleBadge,
+              !isNight && s.speedCircleBadgeLight,
+              isOverspeed && { borderColor: '#EF4444' },
+            ]}
+          >
+            <Text
+              style={[
+                s.speedValueText,
+                !isNight && { color: '#0F172A' },
+                isOverspeed && { color: isNight ? '#FCA5A5' : '#DC2626' },
+              ]}
+            >
               {Math.max(0, Math.round(speedKmh))}
             </Text>
-            <Text style={s.speedUnitText}>km/h</Text>
+            <Text style={[s.speedUnitText, !isNight && { color: '#64748B' }]}>km/h</Text>
           </View>
           {verifiedSpeedLimit !== null && (
             <View
@@ -185,47 +209,47 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
           {showVoiceOrWarning && (
             <View style={s.hudMetaRow}>
               {headingUnverified && (
-                <View style={s.hudPill}>
-                  <Ionicons name="warning" size={12} color="#FBBF24" />
-                  <Text style={s.hudTagText}>迴轉限制資料不足，請依現場標誌行駛</Text>
+                <View style={pillStyle}>
+                  <Ionicons name="warning" size={12} color="#F59E0B" />
+                  <Text style={tagTextStyle}>迴轉限制資料不足，請依現場標誌行駛</Text>
                 </View>
               )}
               {phase === 'paused' && (
-                <View style={s.hudPill}>
+                <View style={pillStyle}>
                   <View style={[s.statusDot, { backgroundColor: '#F59E0B' }]} />
-                  <Text style={s.hudTagText}>導航已暫停</Text>
+                  <Text style={tagTextStyle}>導航已暫停</Text>
                 </View>
               )}
               {gpsSignalLost && (
-                <View style={s.hudPill}>
+                <View style={pillStyle}>
                   <View style={[s.statusDot, { backgroundColor: '#EF4444' }]} />
-                  <Text style={s.hudTagText}>GPS 訊號中斷，等待恢復...</Text>
+                  <Text style={tagTextStyle}>GPS 訊號中斷，等待恢復...</Text>
                 </View>
               )}
               {!gpsSignalLost && gpsWeakSignal && (
-                <View style={s.hudPill}>
+                <View style={pillStyle}>
                   <View style={[s.statusDot, { backgroundColor: '#F59E0B' }]} />
-                  <Text style={s.hudTagText}>
+                  <Text style={tagTextStyle}>
                     GPS 精度較弱 (±{Math.round(gpsAccuracyMeters ?? 50)}m)
                   </Text>
                 </View>
               )}
               {rerouteOfflinePending && (
-                <TouchableOpacity style={s.hudPill} onPress={onRetryOfflineReroute}>
-                  <Ionicons name="refresh" size={12} color="#FBBF24" />
-                  <Text style={s.hudTagText}>網路恢復後點此重算</Text>
+                <TouchableOpacity style={pillStyle} onPress={onRetryOfflineReroute}>
+                  <Ionicons name="refresh" size={12} color="#F59E0B" />
+                  <Text style={tagTextStyle}>網路恢復後點此重算</Text>
                 </TouchableOpacity>
               )}
               {isSimulating && (
-                <View style={s.hudPill}>
+                <View style={pillStyle}>
                   <View style={[s.statusDot, { backgroundColor: '#EC4899' }]} />
-                  <Text style={s.hudTagText}>模擬導航 ({commandState})</Text>
+                  <Text style={tagTextStyle}>模擬導航 ({commandState})</Text>
                 </View>
               )}
               {!isSimulating && bgLocationActive && (
-                <View style={s.hudPill}>
-                  <View style={[s.statusDot, { backgroundColor: '#34D399' }]} />
-                  <Text style={s.hudTagText}>背景導航運作中</Text>
+                <View style={pillStyle}>
+                  <View style={[s.statusDot, { backgroundColor: '#10B981' }]} />
+                  <Text style={tagTextStyle}>背景導航運作中</Text>
                 </View>
               )}
             </View>
@@ -247,6 +271,11 @@ const s = StyleSheet.create({
     shadowRadius: 14,
     elevation: 10,
     overflow: 'hidden',
+  },
+  amapTopCardLight: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderColor: 'rgba(15, 23, 42, 0.10)',
+    shadowOpacity: 0.14,
   },
   navHudMain: {
     flexDirection: 'row',
@@ -341,6 +370,11 @@ const s = StyleSheet.create({
     shadowRadius: 8,
     elevation: 6,
   },
+  speedCircleBadgeLight: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderColor: 'rgba(15, 23, 42, 0.12)',
+    shadowOpacity: 0.14,
+  },
   speedValueText: {
     fontSize: 22,
     fontWeight: '900',
@@ -371,6 +405,14 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
   },
+  hudPillLight: {
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderColor: 'rgba(15, 23, 42, 0.10)',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
   statusDot: {
     width: 7,
     height: 7,
@@ -380,5 +422,8 @@ const s = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#F9FAFB',
+  },
+  hudTagTextLight: {
+    color: '#1E293B',
   },
 });
