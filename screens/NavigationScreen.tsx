@@ -1883,16 +1883,17 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </Marker>
         ))}
 
-        {/* GOBA 自訂現代化可互動公車站牌標記（取代底圖舊式藍底方塊公車圖示） */}
+        {/* GOBA 公車站牌（高德風格迷你綠牌站牌，捷運/鐵路為簡潔圓標） */}
         {displayedTransitStops.map((stop) => {
           const isSel = selectedTransitStop?.id === stop.id;
-          const showLabel = isSel || zoomLevel >= 15.8 || isTransitFocus;
+          const isRailOrMrt = stop.stopType === 'mrt' || stop.stopType === 'rail';
+          const showLabel = isSel || isTransitFocus || (isRailOrMrt && zoomLevel >= 15.2);
           return (
             <Marker
               key={stop.id}
               id={`transit-stop-${stop.id}`}
               lngLat={[stop.lon, stop.lat]}
-              anchor="center"
+              anchor="bottom"
               onPress={() => {
                 lastMarkerTapTsRef.current = Date.now();
                 setSelectedTransitStop(stop);
@@ -1907,96 +1908,114 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 });
               }}
             >
-              {showLabel ? (
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: 4,
-                    backgroundColor: isSel
-                      ? '#1D4ED8'
-                      : isNight
-                      ? 'rgba(15, 23, 42, 0.92)'
-                      : 'rgba(255, 255, 255, 0.95)',
-                    paddingLeft: 3,
-                    paddingRight: 7,
-                    paddingVertical: 3,
-                    borderRadius: 14,
-                    borderWidth: 1,
-                    borderColor: isSel
-                      ? '#FFFFFF'
-                      : isNight
-                      ? 'rgba(96, 165, 250, 0.45)'
-                      : 'rgba(37, 99, 235, 0.28)',
-                    shadowColor: '#000',
-                    shadowOpacity: 0.16,
-                    shadowRadius: 4,
-                    elevation: 3,
-                    maxWidth: 135,
-                  }}
-                >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                {isRailOrMrt ? (
                   <View
                     style={{
-                      width: 18,
-                      height: 18,
-                      borderRadius: 9,
+                      width: isSel ? 22 : 18,
+                      height: isSel ? 22 : 18,
+                      borderRadius: isSel ? 11 : 9,
                       backgroundColor: isSel
-                        ? 'rgba(255,255,255,0.22)'
+                        ? '#DB2777'
                         : stop.stopType === 'mrt'
                         ? '#7C3AED'
-                        : stop.stopType === 'rail'
-                        ? '#0F172A'
-                        : '#2563EB',
+                        : '#1E293B',
+                      borderWidth: 1.2,
+                      borderColor: '#FFFFFF',
                       alignItems: 'center',
                       justifyContent: 'center',
+                      shadowColor: '#000',
+                      shadowOpacity: 0.2,
+                      shadowRadius: 3,
+                      elevation: 3,
                     }}
                   >
-                    <Ionicons
-                      name={stop.stopType === 'mrt' || stop.stopType === 'rail' ? 'train' : 'bus'}
-                      size={10}
-                      color="#FFFFFF"
+                    <Ionicons name="train" size={isSel ? 11 : 9} color="#FFFFFF" />
+                  </View>
+                ) : (
+                  /* 高德風格迷你公車站牌圖示 */
+                  <View style={{ alignItems: 'center' }}>
+                    <View
+                      style={{
+                        width: isSel ? 22 : 18,
+                        height: isSel ? 15 : 12,
+                        borderRadius: 3,
+                        backgroundColor: isSel ? '#059669' : '#10B981',
+                        borderWidth: 1.2,
+                        borderColor: '#FFFFFF',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        shadowColor: '#000',
+                        shadowOpacity: 0.22,
+                        shadowRadius: 2.5,
+                        elevation: 3,
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: isSel ? 14 : 11,
+                          height: isSel ? 8 : 6,
+                          borderRadius: 1.5,
+                          backgroundColor: '#FFFFFF',
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          paddingHorizontal: 1.5,
+                          gap: 1.5,
+                        }}
+                      >
+                        <View
+                          style={{
+                            width: isSel ? 4.5 : 3.5,
+                            height: isSel ? 4.5 : 3.5,
+                            borderRadius: 1,
+                            backgroundColor: '#EF4444',
+                          }}
+                        />
+                        <View
+                          style={{
+                            flex: 1,
+                            height: 2,
+                            borderRadius: 1,
+                            backgroundColor: '#94A3B8',
+                          }}
+                        />
+                      </View>
+                    </View>
+                    <View
+                      style={{
+                        width: 2,
+                        height: isSel ? 4 : 3,
+                        backgroundColor: '#475569',
+                      }}
                     />
                   </View>
+                )}
+
+                {showLabel && (
                   <Text
                     style={{
                       fontSize: 10.5,
-                      fontWeight: '700',
-                      color: isSel ? '#FFFFFF' : isNight ? '#E2E8F0' : '#1E3A8A',
+                      fontWeight: '800',
+                      color: isSel
+                        ? '#DB2777'
+                        : isNight
+                        ? '#E2E8F0'
+                        : isRailOrMrt
+                        ? '#5B21B6'
+                        : '#047857',
+                      textShadowColor: isNight
+                        ? 'rgba(15, 23, 42, 0.92)'
+                        : 'rgba(255, 255, 255, 0.96)',
+                      textShadowOffset: { width: 0, height: 0 },
+                      textShadowRadius: 3,
+                      maxWidth: 105,
                     }}
                     numberOfLines={1}
                   >
-                    {stop.stopType === 'mrt' ? `捷運 ${stop.name}` : stop.name}
+                    {stop.stopType === 'mrt' ? `捷運${stop.name}` : stop.name}
                   </Text>
-                </View>
-              ) : (
-                <View
-                  style={{
-                    width: 20,
-                    height: 20,
-                    borderRadius: 10,
-                    backgroundColor:
-                      stop.stopType === 'mrt'
-                        ? '#7C3AED'
-                        : stop.stopType === 'rail'
-                        ? '#0F172A'
-                        : '#2563EB',
-                    borderWidth: 2,
-                    borderColor: '#FFFFFF',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    shadowColor: '#000',
-                    shadowOpacity: 0.18,
-                    shadowRadius: 3,
-                    elevation: 2,
-                  }}
-                >
-                  <Ionicons
-                    name={stop.stopType === 'mrt' || stop.stopType === 'rail' ? 'train' : 'bus'}
-                    size={10}
-                    color="#FFFFFF"
-                  />
-                </View>
-              )}
+                )}
+              </View>
             </Marker>
           );
         })}
@@ -2033,20 +2052,20 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                     alignItems: 'center',
                     gap: 3,
                     backgroundColor: isSel ? '#EA580C' : hasBikes ? '#F59E0B' : '#94A3B8',
-                    paddingHorizontal: isSel ? 8 : 6,
-                    paddingVertical: isSel ? 5 : 3,
-                    borderRadius: 12,
-                    borderWidth: 2,
+                    paddingHorizontal: isSel ? 7 : 5,
+                    paddingVertical: isSel ? 3.5 : 2,
+                    borderRadius: 10,
+                    borderWidth: 1.2,
                     borderColor: '#FFFFFF',
                     shadowColor: '#000',
-                    shadowOpacity: 0.22,
-                    shadowRadius: 4,
+                    shadowOpacity: 0.18,
+                    shadowRadius: 3,
                   }}
                 >
-                  <Ionicons name="bicycle" size={12} color="#FFFFFF" />
-                  <Text style={{ fontSize: 10.5, fontWeight: '900', color: '#FFFFFF' }}>
+                  <Ionicons name="bicycle" size={10} color="#FFFFFF" />
+                  <Text style={{ fontSize: 9.5, fontWeight: '800', color: '#FFFFFF' }}>
                     {showFullDetail
-                      ? `借${typeof st.availableBikes === 'number' ? st.availableBikes : '--'} 停${
+                      ? `${typeof st.availableBikes === 'number' ? st.availableBikes : '--'}/${
                           typeof st.availableReturnDocks === 'number' ? st.availableReturnDocks : '--'
                         }`
                       : `${typeof st.availableBikes === 'number' ? st.availableBikes : '--'}`}
@@ -2056,7 +2075,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             );
           })}
 
-        {/* GOBA 自建台灣 POI 地標層（支援點擊查看詳情與一鍵導航） */}
+        {/* GOBA 自建台灣 POI 地標層（Apple Maps 簡潔圓點 + 描邊文字風格，支援點擊查看詳情與導航） */}
         {uiState === 'browse' &&
           !activePoiCat &&
           zoomLevel >= 13.8 &&
@@ -2069,7 +2088,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 key={poi.place_id}
                 id={`goba-poi-${poi.place_id}`}
                 lngLat={[poi.lon, poi.lat]}
-                anchor="bottom"
+                anchor="center"
                 onPress={() => {
                   lastMarkerTapTsRef.current = Date.now();
                   setSelectedTransitStop(null);
@@ -2092,43 +2111,39 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   setSheetCollapsed(false);
                 }}
               >
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: 4,
-                    backgroundColor: isSel ? '#EC4899' : isNight ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.94)',
-                    paddingHorizontal: 6,
-                    paddingVertical: 3,
-                    borderRadius: 12,
-                    borderWidth: 1.5,
-                    borderColor: isSel ? '#FFFFFF' : st.color,
-                    shadowColor: '#000',
-                    shadowOpacity: 0.16,
-                    shadowRadius: 3,
-                  }}
-                >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3.5 }}>
                   <View
                     style={{
-                      width: 16,
-                      height: 16,
-                      borderRadius: 8,
-                      backgroundColor: isSel ? '#FFFFFF' : st.color,
+                      width: isSel ? 22 : 18,
+                      height: isSel ? 22 : 18,
+                      borderRadius: isSel ? 11 : 9,
+                      backgroundColor: isSel ? '#EC4899' : st.color,
+                      borderWidth: 1.2,
+                      borderColor: '#FFFFFF',
                       alignItems: 'center',
                       justifyContent: 'center',
+                      shadowColor: '#000',
+                      shadowOpacity: 0.2,
+                      shadowRadius: 2.5,
+                      elevation: 3,
                     }}
                   >
                     <Ionicons
                       name={st.icon as any}
-                      size={10}
-                      color={isSel ? '#EC4899' : '#FFFFFF'}
+                      size={isSel ? 11 : 9.5}
+                      color="#FFFFFF"
                     />
                   </View>
                   <Text
                     style={{
-                      fontSize: 10.5,
-                      fontWeight: '700',
-                      color: isSel ? '#FFFFFF' : isNight ? '#F8FAFC' : '#1E293B',
+                      fontSize: 11,
+                      fontWeight: isSel ? '800' : '700',
+                      color: isSel ? '#EC4899' : isNight ? '#F8FAFC' : st.color,
+                      textShadowColor: isNight
+                        ? 'rgba(15, 23, 42, 0.94)'
+                        : 'rgba(255, 255, 255, 0.96)',
+                      textShadowOffset: { width: 0, height: 0 },
+                      textShadowRadius: 3.5,
                     }}
                     numberOfLines={1}
                   >
