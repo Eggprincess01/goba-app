@@ -4,6 +4,24 @@ import { API_BASE, fetchWithTimeout } from '../services/api';
 const TRIP_HISTORY_KEY = 'goba_trip_history_v1';
 const PARKING_SPOT_KEY = 'goba_saved_parking_spot_v1';
 const NAV_CURSOR_SKIN_KEY = 'goba_nav_cursor_skin_v1';
+const CAMERA_ALERT_LEAD_KEY = 'goba_camera_alert_lead_m_v1';
+
+export const CAMERA_ALERT_LEAD_OPTIONS = [300, 400, 500, 600, 800] as const;
+
+export async function loadCameraAlertLeadMeters(): Promise<number> {
+  try {
+    const raw = await AsyncStorage.getItem(CAMERA_ALERT_LEAD_KEY);
+    const val = raw ? parseInt(raw, 10) : 300;
+    if (Number.isFinite(val) && val >= 300 && val <= 1000) return val;
+  } catch {
+    // ignore
+  }
+  return 300;
+}
+
+export async function saveCameraAlertLeadMeters(meters: number): Promise<void> {
+  await AsyncStorage.setItem(CAMERA_ALERT_LEAD_KEY, String(meters)).catch(() => {});
+}
 
 // ==================== 第 24 項：導航圖示個人化 ====================
 export type NavCursorSkin = 'arrow' | 'goba_pink' | 'moto' | 'car';

@@ -49,12 +49,14 @@ import { ExtrasModal } from '../components/navigation/ExtrasModal';
 import { useFleetMode } from '../navigation/fleet';
 import {
   appendTripRecord,
+  CAMERA_ALERT_LEAD_OPTIONS,
   clearParkingSpot,
   CommunityCategory,
   CommunityReport,
   createTripShare,
   fetchCommunityReports,
   fetchSpeedCameras,
+  loadCameraAlertLeadMeters,
   loadNavCursorSkin,
   loadSavedParking,
   loadTripHistory,
@@ -62,6 +64,7 @@ import {
   NavCursorSkin,
   parseGobaVoiceCommand,
   revokeTripShare,
+  saveCameraAlertLeadMeters,
   SavedParkingSpot,
   saveNavCursorSkin,
   saveParkingSpot,
@@ -215,9 +218,10 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [communityReports, setCommunityReports] = useState<CommunityReport[]>([]);
   const [speedCameras, setSpeedCameras] = useState<SpeedCameraNode[]>([]);
   const [shendunEnabled, setShendunEnabled] = useState(true);
+  const [cameraLeadM, setCameraLeadM] = useState<number>(300);
   const [activeCameraAlert, setActiveCameraAlert] = useState<ActiveSpeedCameraAlert | null>(null);
   const announcedCamsRef = useRef<
-    Record<string, { tier400?: boolean; tier180?: boolean; lastOverspeedTs?: number }>
+    Record<string, { tierInitial?: boolean; tier200?: boolean; tier100?: boolean; tierPass?: boolean }>
   >({});
   const redPulseAnim = useRef(new Animated.Value(0)).current;
 
@@ -251,6 +255,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     loadNavCursorSkin().then(setCursorSkin);
     loadSavedParking().then(setSavedParking);
     loadTripHistory().then(setTripHistory);
+    loadCameraAlertLeadMeters().then(setCameraLeadM);
   }, []);
 
   // 若從交通地圖分頁直接點擊某站點的「導航」，自動帶入該站點並進入路線預覽
@@ -576,12 +581,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       return false;
     };
 
+    const maxDetectM = Math.min(950, Math.max(350, cameraLeadM + 350));
+
     let bestCam: SpeedCameraNode | null = null;
     let bestDistM = Infinity;
 
     for (const cam of speedCameras) {
       const distM = haversineKm(lat, lon, cam.lat, cam.lon) * 1000;
-      if (distM > 450) continue;
+      if (distM > maxDetectM) continue;
 
       if (headingDeg != null) {
         const bearingToCam = calcBearing(lat, lon, cam.lat, cam.lon);
@@ -613,42 +620,65 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
     const limit = bestCam.speed_limit_kmh;
     const isOverspeed = typeof limit === 'number' && limit > 0 && speedKmh > limit + 4;
+    const speedBoost = speedKmh > 60 ? (speedKmh - 60) * 4 : 0;
+    const limitBoost = typeof limit === 'number' && limit >= 80 ? 120 : 0;
+    const overspeedBoost = isOverspeed ? 80 : 0;
+    const effectiveLeadM = Math.min(900, Math.max(300, cameraLeadM + speedBoost + limitBoost + overspeedBoost));
+
+    if (bestDistM > effectiveLeadM + 20) {
+      setActiveCameraAlert(null);
+      return;
+    }
+
     setActiveCameraAlert({ camera: bestCam, distanceM: bestDistM, isOverspeed });
 
     if (nav.voiceEnabled) {
       const rec = announcedCamsRef.current[bestCam.id] || {};
       const typeLabel =
         bestCam.camera_type === 'section'
-          ? '區間測速'
+          ? '區間測速照相'
           : bestCam.camera_type === 'tech_enforcement'
           ? '科技執法'
           : '固定測速照相';
-      const limitSpeech = typeof limit === 'number' && limit > 0 ? `，限速 ${limit} 公里` : '';
-      const nowTs = Date.now();
+      const limitPart = typeof limit === 'number' && limit > 0 ? `，限速${limit}公里` : '';
+      const overspeedPart = isOverspeed ? '，你已超速' : '';
 
-      if (bestDistM <= 420 && bestDistM > 190 && !rec.tier400) {
-        rec.tier400 = true;
+      if (bestDistM <= effectiveLeadM && bestDistM > 215 && !rec.tierInitial) {
+        rec.tierInitial = true;
         announcedCamsRef.current[bestCam.id] = rec;
-        Speech.speak(`前方約 ${Math.round(bestDistM / 50) * 50} 公尺${typeLabel}${limitSpeech}`, {
+        const roundedDist = Math.max(300, Math.round(bestDistM / 50) * 50);
+        if (isOverspeed) Vibration.vibrate([0, 120, 80, 120]);
+        Speech.speak(`${typeLabel}${limitPart}${overspeedPart}，${roundedDist}公尺`, {
           language: 'zh-TW',
           rate: 1.05,
         });
-      } else if (bestDistM <= 190 && !rec.tier180) {
-        rec.tier180 = true;
+      } else if (bestDistM <= 215 && bestDistM > 120 && !rec.tier200) {
+        const firstTime = !rec.tierInitial;
+        rec.tierInitial = true;
+        rec.tier200 = true;
         announcedCamsRef.current[bestCam.id] = rec;
-        Vibration.vibrate([0, 120, 80, 120]);
+        if (isOverspeed) Vibration.vibrate([0, 140, 80, 140]);
         Speech.speak(
-          isOverspeed ? `注意，前方測速照相，您已超速請減速` : `注意，前方即將通過${typeLabel}${limitSpeech}`,
+          firstTime ? `${typeLabel}${limitPart}${overspeedPart}，200公尺` : `200公尺${overspeedPart}`,
           { language: 'zh-TW', rate: 1.05 }
         );
-      } else if (isOverspeed && (!rec.lastOverspeedTs || nowTs - rec.lastOverspeedTs > 8000)) {
-        rec.lastOverspeedTs = nowTs;
+      } else if (bestDistM <= 120 && bestDistM > 38 && !rec.tier100) {
+        rec.tierInitial = true;
+        rec.tier200 = true;
+        rec.tier100 = true;
         announcedCamsRef.current[bestCam.id] = rec;
-        Vibration.vibrate([0, 180, 90, 180]);
-        Speech.speak(`已超速，請減速`, { language: 'zh-TW', rate: 1.1 });
+        Vibration.vibrate([0, 90]);
+        Speech.speak(`100公尺${overspeedPart}`, { language: 'zh-TW', rate: 1.05 });
+      } else if (bestDistM <= 38 && !rec.tierPass) {
+        rec.tierInitial = true;
+        rec.tier200 = true;
+        rec.tier100 = true;
+        rec.tierPass = true;
+        announcedCamsRef.current[bestCam.id] = rec;
+        Speech.speak('通過', { language: 'zh-TW', rate: 1.05 });
       }
     }
-  }, [shendunEnabled, isActiveNav, nav.route?.coordinates, nav.gps?.lat, nav.gps?.lon, nav.gps?.headingDeg, nav.speedKmh, nav.voiceEnabled, speedCameras]);
+  }, [shendunEnabled, cameraLeadM, isActiveNav, nav.route?.coordinates, nav.gps?.lat, nav.gps?.lon, nav.gps?.headingDeg, nav.speedKmh, nav.voiceEnabled, speedCameras]);
 
   // 導航中自動記錄 GPX 軌跡與統計移動/停止時間，結束時自動存檔；並同步旅程分享連結
   useEffect(() => {
@@ -2891,6 +2921,19 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                 onPress={cycleThemePref}
               >
                 <Text style={styles.optChipText}>底圖：{themePrefLabel}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.optChip}
+                onPress={() => {
+                  const idx = CAMERA_ALERT_LEAD_OPTIONS.indexOf(cameraLeadM as any);
+                  const next = CAMERA_ALERT_LEAD_OPTIONS[(idx + 1) % CAMERA_ALERT_LEAD_OPTIONS.length];
+                  setCameraLeadM(next);
+                  void saveCameraAlertLeadMeters(next);
+                }}
+              >
+                <Text style={styles.optChipText}>
+                  📷 測速最早預警：{cameraLeadM}公尺{cameraLeadM === 300 ? ' (預設)' : ''}
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.optChip, showTrafficSignals && { backgroundColor: '#1F2937' }]}
