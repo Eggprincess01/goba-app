@@ -13,6 +13,7 @@ import {
   RouteManeuver,
   VoiceGuidanceMode,
 } from '../../navigation/types';
+import { type ActiveSpeedCameraAlert } from './SpeedCameraAlertBanner';
 
 interface NavHudOverlayProps {
   nextManeuver: RouteManeuver | null;
@@ -35,6 +36,7 @@ interface NavHudOverlayProps {
   voiceEnabled: boolean;
   voiceMode?: VoiceGuidanceMode;
   isNight?: boolean;
+  activeCameraAlert?: ActiveSpeedCameraAlert | null;
   onToggleVoice: () => void;
   onCycleVoiceMode?: () => void;
   onRetryOfflineReroute: () => void;
@@ -65,6 +67,7 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
     voiceEnabled,
     voiceMode,
     isNight = false,
+    activeCameraAlert = null,
     onToggleVoice,
     onCycleVoiceMode,
     onRetryOfflineReroute,
@@ -163,25 +166,68 @@ export const NavHudOverlay: React.FC<NavHudOverlayProps> = React.memo(
             <ComplexJunctionCard maneuver={nextManeuver} distanceMeters={distanceToNextTurnMeters} />
           )}
 
-        {/* 左側獨立即時車速圓徽章 + 真實速限牌（有圖資時才顯示） + 必要狀態提示 */}
+        {/* 左側獨立即時車速圓徽章（有測速預警時自動切換紅框測速樣式） + 精簡測速提示 + 必要狀態提示 */}
         <View style={s.subHudRow}>
-          <View
-            style={[
-              s.speedCircleBadge,
-              !isNight && s.speedCircleBadgeLight,
-              isOverspeed && { borderColor: '#EF4444' },
-            ]}
-          >
-            <Text
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <View
               style={[
-                s.speedValueText,
-                !isNight && { color: '#0F172A' },
-                isOverspeed && { color: isNight ? '#FCA5A5' : '#DC2626' },
+                s.speedCircleBadge,
+                !isNight && s.speedCircleBadgeLight,
+                activeCameraAlert && {
+                  borderColor: '#DC2626',
+                  borderWidth: 4,
+                  backgroundColor: activeCameraAlert.isOverspeed
+                    ? '#FEE2E2'
+                    : isNight
+                    ? 'rgba(15, 23, 42, 0.96)'
+                    : '#FFFFFF',
+                },
+                isOverspeed && { borderColor: '#EF4444' },
               ]}
             >
-              {Math.max(0, Math.round(speedKmh))}
-            </Text>
-            <Text style={[s.speedUnitText, !isNight && { color: '#64748B' }]}>km/h</Text>
+              <Text
+                style={[
+                  s.speedValueText,
+                  !isNight && { color: '#0F172A' },
+                  activeCameraAlert?.isOverspeed && { color: '#DC2626' },
+                  isOverspeed && { color: isNight ? '#FCA5A5' : '#DC2626' },
+                ]}
+              >
+                {Math.max(0, Math.round(speedKmh))}
+              </Text>
+              <Text style={[s.speedUnitText, !isNight && { color: '#64748B' }]}>km/h</Text>
+            </View>
+
+            {activeCameraAlert && (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 5,
+                  backgroundColor: activeCameraAlert.isOverspeed
+                    ? 'rgba(220, 38, 38, 0.94)'
+                    : 'rgba(15, 23, 42, 0.88)',
+                  paddingHorizontal: 9,
+                  paddingVertical: 5,
+                  borderRadius: 14,
+                  borderWidth: 1.5,
+                  borderColor: activeCameraAlert.isOverspeed ? '#FCA5A5' : '#EF4444',
+                }}
+              >
+                <Ionicons name="camera" size={12} color="#FFFFFF" />
+                <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#FFFFFF' }}>
+                  {activeCameraAlert.camera.camera_type === 'section'
+                    ? '區間'
+                    : activeCameraAlert.camera.camera_type === 'tech_enforcement'
+                    ? '科技'
+                    : '測速'}{' '}
+                  {Math.round(activeCameraAlert.distanceM)}m
+                  {activeCameraAlert.camera.speed_limit_kmh
+                    ? ` · 限${activeCameraAlert.camera.speed_limit_kmh}`
+                    : ''}
+                </Text>
+              </View>
+            )}
           </View>
           {verifiedSpeedLimit !== null && (
             <View

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Appearance,
   Image,
   Keyboard,
@@ -218,6 +219,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const announcedCamsRef = useRef<
     Record<string, { tier400?: boolean; tier180?: boolean; lastOverspeedTs?: number }>
   >({});
+  const redPulseAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!activeCameraAlert) {
+      redPulseAnim.setValue(0);
+      return;
+    }
+    const duration = activeCameraAlert.isOverspeed ? 380 : 750;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(redPulseAnim, { toValue: 1, duration, useNativeDriver: true }),
+        Animated.timing(redPulseAnim, { toValue: 0.25, duration, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [Boolean(activeCameraAlert), activeCameraAlert?.isOverspeed, redPulseAnim]);
   const [tripShareToken, setTripShareToken] = useState<string | null>(null);
   const [tripShareUrl, setTripShareUrl] = useState<string | null>(null);
   const tripTrackRef = useRef<{
@@ -521,7 +539,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     };
   }, [mapMovedCenter?.lat, mapMovedCenter?.lon, nav.effectiveOrigin.lat, nav.effectiveOrigin.lon, zoomLevel >= 12.5, isActiveNav, nav.speedKmh >= 12]);
 
-  // 神盾級測速與科技執法即時偵測（支援導航中＋免設目的地巡航模式：含行進方向比對、400m/180m 語音倒數與超速震動紅閃）
+  // 神盾級測速與科技執法即時偵測（僅在行駛中且確實在車頭前方同車道／路線上才警示，杜絕靜止或平行道路誤報）
   useEffect(() => {
     if (!shendunEnabled || !nav.gps || speedCameras.length === 0) {
       setActiveCameraAlert(null);
@@ -529,6 +547,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     }
     const { lat, lon, headingDeg } = nav.gps;
     const speedKmh = nav.speedKmh;
+    const minTriggerSpeed = isActiveNav ? 8 : 15;
+    if (speedKmh < minTriggerSpeed) {
+      setActiveCameraAlert(null);
+      return;
+    }
+
     const toRad = (d: number) => (d * Math.PI) / 180;
     const calcBearing = (lat1: number, lon1: number, lat2: number, lon2: number) => {
       const dLon = toRad(lon2 - lon1);
@@ -538,9 +562,18 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
       return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
     };
-    const angleDiff = (a: number, b: number) => {
-      const diff = Math.abs(((a - b + 540) % 360) - 180);
-      return diff;
+    const angleDiff = (a: number, b: number) => Math.abs(((a - b + 540) % 360) - 180);
+
+    const routeCoords = isActiveNav ? nav.route?.coordinates : undefined;
+    const isNearRoute = (clat: number, clon: number) => {
+      if (!routeCoords || routeCoords.length === 0) return true;
+      for (let i = 0; i < routeCoords.length; i += 2) {
+        const [rlon, rlat] = routeCoords[i];
+        if (Math.abs(rlat - clat) < 0.0006 && Math.abs(rlon - clon) < 0.0006) {
+          if (haversineKm(rlat, rlon, clat, clon) * 1000 <= 45) return true;
+        }
+      }
+      return false;
     };
 
     let bestCam: SpeedCameraNode | null = null;
@@ -548,16 +581,23 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
 
     for (const cam of speedCameras) {
       const distM = haversineKm(lat, lon, cam.lat, cam.lon) * 1000;
-      if (distM > 500) continue;
+      if (distM > 450) continue;
 
-      if (headingDeg != null && speedKmh >= 8) {
+      if (headingDeg != null) {
         const bearingToCam = calcBearing(lat, lon, cam.lat, cam.lon);
-        if (distM > 45 && angleDiff(headingDeg, bearingToCam) > 58) {
-          continue; // 測速桿不在車頭前方
+        const fwdDiff = angleDiff(headingDeg, bearingToCam);
+        const crossTrackM = distM * Math.sin(toRad(fwdDiff));
+        // 必須在車頭前方 32° 錐形內，且橫向偏離 <= 45 公尺（過濾平行道路如隔壁文化北路）
+        if (distM > 35 && (fwdDiff > 32 || crossTrackM > 45)) {
+          continue;
         }
-        if (typeof cam.bearing_deg === 'number' && angleDiff(headingDeg, cam.bearing_deg) > 75) {
+        if (typeof cam.bearing_deg === 'number' && angleDiff(headingDeg, cam.bearing_deg) > 55) {
           continue; // 拍攝方向為對向車道，過濾不誤報
         }
+      }
+
+      if (isActiveNav && !isNearRoute(cam.lat, cam.lon)) {
+        continue; // 導航模式下只報規劃路線上的測速點
       }
 
       if (distM < bestDistM) {
@@ -575,7 +615,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     const isOverspeed = typeof limit === 'number' && limit > 0 && speedKmh > limit + 4;
     setActiveCameraAlert({ camera: bestCam, distanceM: bestDistM, isOverspeed });
 
-    if (nav.voiceEnabled && speedKmh >= 10) {
+    if (nav.voiceEnabled) {
       const rec = announcedCamsRef.current[bestCam.id] || {};
       const typeLabel =
         bestCam.camera_type === 'section'
@@ -586,7 +626,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       const limitSpeech = typeof limit === 'number' && limit > 0 ? `，限速 ${limit} 公里` : '';
       const nowTs = Date.now();
 
-      if (bestDistM <= 450 && bestDistM > 190 && !rec.tier400) {
+      if (bestDistM <= 420 && bestDistM > 190 && !rec.tier400) {
         rec.tier400 = true;
         announcedCamsRef.current[bestCam.id] = rec;
         Speech.speak(`前方約 ${Math.round(bestDistM / 50) * 50} 公尺${typeLabel}${limitSpeech}`, {
@@ -608,7 +648,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         Speech.speak(`已超速，請減速`, { language: 'zh-TW', rate: 1.1 });
       }
     }
-  }, [shendunEnabled, nav.gps?.lat, nav.gps?.lon, nav.gps?.headingDeg, nav.speedKmh, nav.voiceEnabled, speedCameras]);
+  }, [shendunEnabled, isActiveNav, nav.route?.coordinates, nav.gps?.lat, nav.gps?.lon, nav.gps?.headingDeg, nav.speedKmh, nav.voiceEnabled, speedCameras]);
 
   // 導航中自動記錄 GPX 軌跡與統計移動/停止時間，結束時自動存檔；並同步旅程分享連結
   useEffect(() => {
@@ -2364,6 +2404,24 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         )}
       </Map>
 
+      {/* 測速預警全螢幕外框紅色閃爍提示（不遮擋地圖畫面） */}
+      {shendunEnabled && uiState !== 'search' && activeCameraAlert && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              borderWidth: activeCameraAlert.isOverspeed ? 7 : 4.5,
+              borderColor: '#EF4444',
+              opacity: redPulseAnim,
+              shadowColor: '#EF4444',
+              shadowOpacity: 0.9,
+              shadowRadius: 18,
+            },
+          ]}
+        />
+      )}
+
       {/* ==================== 頂部區塊（依四大狀態切換） ==================== */}
       <SafeAreaView style={styles.topOverlay} pointerEvents="box-none">
         {/* 狀態 1：Browse（Apple Maps 極簡風格：頂部僅保留左上角氣溫膠囊，搜尋列移至底部卡片） */}
@@ -2652,6 +2710,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             voiceEnabled={nav.voiceEnabled}
             voiceMode={nav.voiceMode}
             isNight={isNight}
+            activeCameraAlert={shendunEnabled ? activeCameraAlert : null}
             onToggleVoice={nav.toggleVoice}
             onCycleVoiceMode={nav.cycleVoiceMode}
             onRetryOfflineReroute={() => {
@@ -2678,10 +2737,32 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
             )}
           </LiquidGlassSurface>
         )}
-        {/* 神盾級測速預警橫幅（導航中或自由巡航模式皆自動顯示） */}
-        {shendunEnabled && uiState !== 'search' && activeCameraAlert && (
-          <View style={{ marginTop: 8 }}>
-            <SpeedCameraAlertBanner alert={activeCameraAlert} speedKmh={nav.speedKmh} />
+        {/* 瀏覽巡航模式下僅在行駛中顯示超精簡測速小膠囊，不遮擋地圖 */}
+        {shendunEnabled && uiState === 'browse' && activeCameraAlert && (
+          <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+                backgroundColor: activeCameraAlert.isOverspeed
+                  ? 'rgba(220, 38, 38, 0.94)'
+                  : 'rgba(15, 23, 42, 0.88)',
+                paddingHorizontal: 10,
+                paddingVertical: 5,
+                borderRadius: 16,
+                borderWidth: 1.5,
+                borderColor: '#EF4444',
+              }}
+            >
+              <Ionicons name="camera" size={13} color="#FFFFFF" />
+              <Text style={{ fontSize: 12, fontWeight: '800', color: '#FFFFFF' }}>
+                前方 {Math.round(activeCameraAlert.distanceM)}m 測速
+                {activeCameraAlert.camera.speed_limit_kmh
+                  ? ` · 限速 ${activeCameraAlert.camera.speed_limit_kmh}`
+                  : ''}
+              </Text>
+            </View>
           </View>
         )}
       </SafeAreaView>
