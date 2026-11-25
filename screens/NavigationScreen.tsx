@@ -590,17 +590,38 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
       const distM = haversineKm(lat, lon, cam.lat, cam.lon) * 1000;
       if (distM > maxDetectM) continue;
 
+      const rec = announcedCamsRef.current[cam.id];
       if (headingDeg != null) {
         const bearingToCam = calcBearing(lat, lon, cam.lat, cam.lon);
         const fwdDiff = angleDiff(headingDeg, bearingToCam);
+        // 若先前已預警過該測速點，且現在已實際通過（位於車尾後方 >= 95° 且距離 <= 70m，或距離 <= 12m），才播報「通過」
+        if (rec?.tierInitial && !rec.tierPass && ((fwdDiff >= 95 && distM <= 70) || distM <= 12)) {
+          rec.tierPass = true;
+          announcedCamsRef.current[cam.id] = rec;
+          if (nav.voiceEnabled) {
+            Speech.speak('通過', { language: 'zh-TW', rate: 1.05 });
+          }
+          continue;
+        }
         const crossTrackM = distM * Math.sin(toRad(fwdDiff));
         // 必須在車頭前方 32° 錐形內，且橫向偏離 <= 45 公尺（過濾平行道路如隔壁文化北路）
-        if (distM > 35 && (fwdDiff > 32 || crossTrackM > 45)) {
+        if (distM > 15 && (fwdDiff > 32 || crossTrackM > 45)) {
           continue;
         }
         if (typeof cam.bearing_deg === 'number' && angleDiff(headingDeg, cam.bearing_deg) > 55) {
           continue; // 拍攝方向為對向車道，過濾不誤報
         }
+      } else if (rec?.tierInitial && !rec.tierPass && distM <= 12) {
+        rec.tierPass = true;
+        announcedCamsRef.current[cam.id] = rec;
+        if (nav.voiceEnabled) {
+          Speech.speak('通過', { language: 'zh-TW', rate: 1.05 });
+        }
+        continue;
+      }
+
+      if (rec?.tierPass) {
+        continue; // 已通過的測速點不再重複警示
       }
 
       if (isActiveNav && !isNearRoute(cam.lat, cam.lon)) {
@@ -662,20 +683,13 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           firstTime ? `${typeLabel}${limitPart}${overspeedPart}，200公尺` : `200公尺${overspeedPart}`,
           { language: 'zh-TW', rate: 1.05 }
         );
-      } else if (bestDistM <= 120 && bestDistM > 38 && !rec.tier100) {
+      } else if (bestDistM <= 120 && bestDistM > 12 && !rec.tier100) {
         rec.tierInitial = true;
         rec.tier200 = true;
         rec.tier100 = true;
         announcedCamsRef.current[bestCam.id] = rec;
         Vibration.vibrate([0, 90]);
         Speech.speak(`100公尺${overspeedPart}`, { language: 'zh-TW', rate: 1.05 });
-      } else if (bestDistM <= 38 && !rec.tierPass) {
-        rec.tierInitial = true;
-        rec.tier200 = true;
-        rec.tier100 = true;
-        rec.tierPass = true;
-        announcedCamsRef.current[bestCam.id] = rec;
-        Speech.speak('通過', { language: 'zh-TW', rate: 1.05 });
       }
     }
   }, [shendunEnabled, cameraLeadM, isActiveNav, nav.route?.coordinates, nav.gps?.lat, nav.gps?.lon, nav.gps?.headingDeg, nav.speedKmh, nav.voiceEnabled, speedCameras]);
