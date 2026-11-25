@@ -193,6 +193,12 @@ export interface SpeedCameraNode {
   lat: number;
   lon: number;
   speed_limit_kmh: number | null;
+  camera_type?: 'fixed' | 'section' | 'tech_enforcement';
+  direction_text?: string;
+  bearing_deg?: number | null;
+  road_name?: string;
+  city?: string;
+  district?: string;
   source: string;
 }
 

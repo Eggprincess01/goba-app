@@ -17,9 +17,11 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Vibration,
   View,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Speech from 'expo-speech';
 import { Ionicons } from '@expo/vector-icons';
 import {
   Camera,
@@ -36,6 +38,10 @@ import { LiquidGlassSurface } from '../components/LiquidGlassSurface';
 import { ManeuverArrowIcon } from '../components/ManeuverArrowIcon';
 import { HdRoadLayers } from '../components/navigation/HdRoadLayers';
 import { NavHudOverlay } from '../components/navigation/NavHudOverlay';
+import {
+  SpeedCameraAlertBanner,
+  type ActiveSpeedCameraAlert,
+} from '../components/navigation/SpeedCameraAlertBanner';
 import { RouteProgressBar } from '../components/navigation/RouteProgressBar';
 import { FleetModal } from '../components/navigation/FleetModal';
 import { ExtrasModal } from '../components/navigation/ExtrasModal';
@@ -207,6 +213,11 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [tripHistory, setTripHistory] = useState<TripRecord[]>([]);
   const [communityReports, setCommunityReports] = useState<CommunityReport[]>([]);
   const [speedCameras, setSpeedCameras] = useState<SpeedCameraNode[]>([]);
+  const [shendunEnabled, setShendunEnabled] = useState(true);
+  const [activeCameraAlert, setActiveCameraAlert] = useState<ActiveSpeedCameraAlert | null>(null);
+  const announcedCamsRef = useRef<
+    Record<string, { tier400?: boolean; tier180?: boolean; lastOverspeedTs?: number }>
+  >({});
   const [tripShareToken, setTripShareToken] = useState<string | null>(null);
   const [tripShareUrl, setTripShareUrl] = useState<string | null>(null);
   const tripTrackRef = useRef<{
@@ -494,8 +505,8 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     fetchCommunityReports(center.lat, center.lon).then((list) => {
       if (active) setCommunityReports(list);
     });
-    if (zoomLevel >= 12.5) {
-      const span = 0.05;
+    if (zoomLevel >= 12.5 || isActiveNav || nav.speedKmh >= 12) {
+      const span = 0.06;
       fetchSpeedCameras({
         minLat: center.lat - span,
         minLon: center.lon - span,
@@ -508,7 +519,96 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     return () => {
       active = false;
     };
-  }, [mapMovedCenter?.lat, mapMovedCenter?.lon, nav.effectiveOrigin.lat, nav.effectiveOrigin.lon, zoomLevel >= 12.5]);
+  }, [mapMovedCenter?.lat, mapMovedCenter?.lon, nav.effectiveOrigin.lat, nav.effectiveOrigin.lon, zoomLevel >= 12.5, isActiveNav, nav.speedKmh >= 12]);
+
+  // 神盾級測速與科技執法即時偵測（支援導航中＋免設目的地巡航模式：含行進方向比對、400m/180m 語音倒數與超速震動紅閃）
+  useEffect(() => {
+    if (!shendunEnabled || !nav.gps || speedCameras.length === 0) {
+      setActiveCameraAlert(null);
+      return;
+    }
+    const { lat, lon, headingDeg } = nav.gps;
+    const speedKmh = nav.speedKmh;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const calcBearing = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+      const dLon = toRad(lon2 - lon1);
+      const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+      const x =
+        Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+        Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+      return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+    };
+    const angleDiff = (a: number, b: number) => {
+      const diff = Math.abs(((a - b + 540) % 360) - 180);
+      return diff;
+    };
+
+    let bestCam: SpeedCameraNode | null = null;
+    let bestDistM = Infinity;
+
+    for (const cam of speedCameras) {
+      const distM = haversineKm(lat, lon, cam.lat, cam.lon) * 1000;
+      if (distM > 500) continue;
+
+      if (headingDeg != null && speedKmh >= 8) {
+        const bearingToCam = calcBearing(lat, lon, cam.lat, cam.lon);
+        if (distM > 45 && angleDiff(headingDeg, bearingToCam) > 58) {
+          continue; // 測速桿不在車頭前方
+        }
+        if (typeof cam.bearing_deg === 'number' && angleDiff(headingDeg, cam.bearing_deg) > 75) {
+          continue; // 拍攝方向為對向車道，過濾不誤報
+        }
+      }
+
+      if (distM < bestDistM) {
+        bestDistM = distM;
+        bestCam = cam;
+      }
+    }
+
+    if (!bestCam) {
+      setActiveCameraAlert(null);
+      return;
+    }
+
+    const limit = bestCam.speed_limit_kmh;
+    const isOverspeed = typeof limit === 'number' && limit > 0 && speedKmh > limit + 4;
+    setActiveCameraAlert({ camera: bestCam, distanceM: bestDistM, isOverspeed });
+
+    if (nav.voiceEnabled && speedKmh >= 10) {
+      const rec = announcedCamsRef.current[bestCam.id] || {};
+      const typeLabel =
+        bestCam.camera_type === 'section'
+          ? '區間測速'
+          : bestCam.camera_type === 'tech_enforcement'
+          ? '科技執法'
+          : '固定測速照相';
+      const limitSpeech = typeof limit === 'number' && limit > 0 ? `，限速 ${limit} 公里` : '';
+      const nowTs = Date.now();
+
+      if (bestDistM <= 450 && bestDistM > 190 && !rec.tier400) {
+        rec.tier400 = true;
+        announcedCamsRef.current[bestCam.id] = rec;
+        Speech.speak(`前方約 ${Math.round(bestDistM / 50) * 50} 公尺${typeLabel}${limitSpeech}`, {
+          language: 'zh-TW',
+          rate: 1.05,
+        });
+      } else if (bestDistM <= 190 && !rec.tier180) {
+        rec.tier180 = true;
+        announcedCamsRef.current[bestCam.id] = rec;
+        Vibration.vibrate([0, 120, 80, 120]);
+        Speech.speak(
+          isOverspeed ? `注意，前方測速照相，您已超速請減速` : `注意，前方即將通過${typeLabel}${limitSpeech}`,
+          { language: 'zh-TW', rate: 1.05 }
+        );
+      } else if (isOverspeed && (!rec.lastOverspeedTs || nowTs - rec.lastOverspeedTs > 8000)) {
+        rec.lastOverspeedTs = nowTs;
+        announcedCamsRef.current[bestCam.id] = rec;
+        Vibration.vibrate([0, 180, 90, 180]);
+        Speech.speak(`已超速，請減速`, { language: 'zh-TW', rate: 1.1 });
+      }
+    }
+  }, [shendunEnabled, nav.gps?.lat, nav.gps?.lon, nav.gps?.headingDeg, nav.speedKmh, nav.voiceEnabled, speedCameras]);
 
   // 導航中自動記錄 GPX 軌跡與統計移動/停止時間，結束時自動存檔；並同步旅程分享連結
   useEffect(() => {
@@ -1814,12 +1914,33 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           </Marker>
         )}
 
-        {/* OSM 測速照相點位（第 15/33 項） */}
-        {zoomLevel >= 13 &&
-          speedCameras.slice(0, 35).map((cam) => (
+        {/* 全台警政署測速照相／區間測速／科技執法點位（精簡速限圓牌樣式） */}
+        {shendunEnabled &&
+          zoomLevel >= 13 &&
+          speedCameras.slice(0, 40).map((cam) => (
             <Marker key={cam.id} id={cam.id} lngLat={[cam.lon, cam.lat]} anchor="center">
-              <View style={{ backgroundColor: '#DC2626', width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: '#FFF', alignItems: 'center', justifyContent: 'center' }}>
-                <Ionicons name="camera" size={12} color="#FFF" />
+              <View
+                style={{
+                  backgroundColor: '#FFFFFF',
+                  width: 24,
+                  height: 24,
+                  borderRadius: 12,
+                  borderWidth: 2.5,
+                  borderColor: cam.camera_type === 'tech_enforcement' ? '#7C3AED' : '#DC2626',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  shadowColor: '#000',
+                  shadowOpacity: 0.2,
+                  shadowRadius: 2.5,
+                }}
+              >
+                {typeof cam.speed_limit_kmh === 'number' && cam.speed_limit_kmh > 0 ? (
+                  <Text style={{ fontSize: 9.5, fontWeight: '900', color: '#0F172A' }}>
+                    {cam.speed_limit_kmh}
+                  </Text>
+                ) : (
+                  <Ionicons name="camera" size={11} color="#DC2626" />
+                )}
               </View>
             </Marker>
           ))}
@@ -2248,23 +2369,58 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         {/* 狀態 1：Browse（Apple Maps 極簡風格：頂部僅保留左上角氣溫膠囊，搜尋列移至底部卡片） */}
         {uiState === 'browse' && (
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <LiquidGlassSurface
-              variant={isNight ? 'dark' : 'light'}
-              interactive
-              borderRadius={16}
-              contentStyle={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 5,
-                paddingHorizontal: 10,
-                paddingVertical: 5,
-              }}
-            >
-              <Ionicons name="partly-sunny" size={14} color={isNight ? '#FBBF24' : '#64748B'} />
-              <Text style={{ fontSize: 13, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A' }}>
-                {weatherTemp != null ? `${Math.round(weatherTemp)}°` : '22°'}
-              </Text>
-            </LiquidGlassSurface>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <LiquidGlassSurface
+                variant={isNight ? 'dark' : 'light'}
+                interactive
+                borderRadius={16}
+                contentStyle={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 5,
+                  paddingHorizontal: 10,
+                  paddingVertical: 5,
+                }}
+              >
+                <Ionicons name="partly-sunny" size={14} color={isNight ? '#FBBF24' : '#64748B'} />
+                <Text style={{ fontSize: 13, fontWeight: '700', color: isNight ? '#F8FAFC' : '#0F172A' }}>
+                  {weatherTemp != null ? `${Math.round(weatherTemp)}°` : '22°'}
+                </Text>
+              </LiquidGlassSurface>
+
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => setShendunEnabled((v) => !v)}
+              >
+                <LiquidGlassSurface
+                  variant={isNight ? 'dark' : 'light'}
+                  interactive
+                  borderRadius={16}
+                  contentStyle={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 4,
+                    paddingHorizontal: 9,
+                    paddingVertical: 5,
+                  }}
+                >
+                  <Ionicons
+                    name="shield-checkmark"
+                    size={13}
+                    color={shendunEnabled ? '#DC2626' : '#94A3B8'}
+                  />
+                  <Text
+                    style={{
+                      fontSize: 11.5,
+                      fontWeight: '800',
+                      color: shendunEnabled ? (isNight ? '#FCA5A5' : '#B91C1C') : '#94A3B8',
+                    }}
+                  >
+                    {shendunEnabled ? '測速預警' : '預警關閉'}
+                  </Text>
+                </LiquidGlassSurface>
+              </TouchableOpacity>
+            </View>
 
             {showSearchAreaBtn && (
               <TouchableOpacity
@@ -2521,6 +2677,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
               </TouchableOpacity>
             )}
           </LiquidGlassSurface>
+        )}
+        {/* 神盾級測速預警橫幅（導航中或自由巡航模式皆自動顯示） */}
+        {shendunEnabled && uiState !== 'search' && activeCameraAlert && (
+          <View style={{ marginTop: 8 }}>
+            <SpeedCameraAlertBanner alert={activeCameraAlert} speedKmh={nav.speedKmh} />
+          </View>
         )}
       </SafeAreaView>
 
