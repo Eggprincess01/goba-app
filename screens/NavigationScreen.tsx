@@ -221,8 +221,12 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   const [cameraLeadM, setCameraLeadM] = useState<number>(300);
   const [activeCameraAlert, setActiveCameraAlert] = useState<ActiveSpeedCameraAlert | null>(null);
   const announcedCamsRef = useRef<
-    Record<string, { tierInitial?: boolean; tier200?: boolean; tier100?: boolean; tierPass?: boolean }>
+    Record<
+      string,
+      { tierInitial?: boolean; speakingIntro?: boolean; tier200?: boolean; tier100?: boolean; tierPass?: boolean }
+    >
   >({});
+  const latestCamSnapshotRef = useRef<{ id: string; distM: number; isOverspeed: boolean } | null>(null);
   const redPulseAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -599,7 +603,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           rec.tierPass = true;
           announcedCamsRef.current[cam.id] = rec;
           if (nav.voiceEnabled) {
-            Speech.speak('通過', { language: 'zh-TW', rate: 1.05 });
+            Speech.speak('通過', { language: 'zh-TW', rate: 0.92 });
           }
           continue;
         }
@@ -615,7 +619,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         rec.tierPass = true;
         announcedCamsRef.current[cam.id] = rec;
         if (nav.voiceEnabled) {
-          Speech.speak('通過', { language: 'zh-TW', rate: 1.05 });
+          Speech.speak('通過', { language: 'zh-TW', rate: 0.92 });
         }
         continue;
       }
@@ -635,6 +639,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     }
 
     if (!bestCam) {
+      latestCamSnapshotRef.current = null;
       setActiveCameraAlert(null);
       return;
     }
@@ -647,49 +652,72 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
     const effectiveLeadM = Math.min(900, Math.max(300, cameraLeadM + speedBoost + limitBoost + overspeedBoost));
 
     if (bestDistM > effectiveLeadM + 20) {
+      latestCamSnapshotRef.current = null;
       setActiveCameraAlert(null);
       return;
     }
 
+    latestCamSnapshotRef.current = { id: bestCam.id, distM: bestDistM, isOverspeed };
     setActiveCameraAlert({ camera: bestCam, distanceM: bestDistM, isOverspeed });
 
     if (nav.voiceEnabled) {
-      const rec = announcedCamsRef.current[bestCam.id] || {};
+      const camId = bestCam.id;
+      const rec = announcedCamsRef.current[camId] || {};
       const typeLabel =
         bestCam.camera_type === 'section'
           ? '區間測速照相'
           : bestCam.camera_type === 'tech_enforcement'
           ? '科技執法'
-          : '固定測速照相';
+          : '固定式測速照相';
       const limitPart = typeof limit === 'number' && limit > 0 ? `，限速${limit}公里` : '';
       const overspeedPart = isOverspeed ? '，你已超速' : '';
 
       if (bestDistM <= effectiveLeadM && bestDistM > 215 && !rec.tierInitial) {
         rec.tierInitial = true;
-        announcedCamsRef.current[bestCam.id] = rec;
-        const roundedDist = Math.max(300, Math.round(bestDistM / 50) * 50);
+        rec.speakingIntro = true;
+        announcedCamsRef.current[camId] = rec;
         if (isOverspeed) Vibration.vibrate([0, 120, 80, 120]);
-        Speech.speak(`${typeLabel}${limitPart}${overspeedPart}，${roundedDist}公尺`, {
+        Speech.speak(`${typeLabel}${limitPart}`, {
           language: 'zh-TW',
-          rate: 1.05,
+          rate: 0.92,
+          onDone: () => {
+            rec.speakingIntro = false;
+            setTimeout(() => {
+              const snap = latestCamSnapshotRef.current;
+              if (!snap || snap.id !== camId || snap.distM <= 120 || rec.tierPass) return;
+              const liveDist =
+                snap.distM >= 250
+                  ? Math.round(snap.distM / 50) * 50
+                  : Math.round(snap.distM / 10) * 10;
+              if (snap.distM <= 225) rec.tier200 = true;
+              const overTxt = snap.isOverspeed ? '，你已超速' : '';
+              Speech.speak(`${liveDist}公尺${overTxt}`, { language: 'zh-TW', rate: 0.92 });
+            }, 220);
+          },
+          onStopped: () => {
+            rec.speakingIntro = false;
+          },
+          onError: () => {
+            rec.speakingIntro = false;
+          },
         });
-      } else if (bestDistM <= 215 && bestDistM > 120 && !rec.tier200) {
+      } else if (!rec.speakingIntro && bestDistM <= 215 && bestDistM > 120 && !rec.tier200) {
         const firstTime = !rec.tierInitial;
         rec.tierInitial = true;
         rec.tier200 = true;
-        announcedCamsRef.current[bestCam.id] = rec;
+        announcedCamsRef.current[camId] = rec;
         if (isOverspeed) Vibration.vibrate([0, 140, 80, 140]);
         Speech.speak(
-          firstTime ? `${typeLabel}${limitPart}${overspeedPart}，200公尺` : `200公尺${overspeedPart}`,
-          { language: 'zh-TW', rate: 1.05 }
+          firstTime ? `${typeLabel}${limitPart}，200公尺${overspeedPart}` : `200公尺${overspeedPart}`,
+          { language: 'zh-TW', rate: 0.92 }
         );
-      } else if (bestDistM <= 120 && bestDistM > 12 && !rec.tier100) {
+      } else if (!rec.speakingIntro && bestDistM <= 120 && bestDistM > 12 && !rec.tier100) {
         rec.tierInitial = true;
         rec.tier200 = true;
         rec.tier100 = true;
-        announcedCamsRef.current[bestCam.id] = rec;
+        announcedCamsRef.current[camId] = rec;
         Vibration.vibrate([0, 90]);
-        Speech.speak(`100公尺${overspeedPart}`, { language: 'zh-TW', rate: 1.05 });
+        Speech.speak(`100公尺${overspeedPart}`, { language: 'zh-TW', rate: 0.92 });
       }
     }
   }, [shendunEnabled, cameraLeadM, isActiveNav, nav.route?.coordinates, nav.gps?.lat, nav.gps?.lon, nav.gps?.headingDeg, nav.speedKmh, nav.voiceEnabled, speedCameras]);
