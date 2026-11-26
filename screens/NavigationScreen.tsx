@@ -670,14 +670,14 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
           ? '科技執法'
           : '固定式測速照相';
       const limitPart = typeof limit === 'number' && limit > 0 ? `，限速${limit}公里` : '';
-      const overspeedPart = isOverspeed ? '，你已超速' : '';
+      const overspeedPart = isOverspeed ? '，您已超速' : '';
 
       if (bestDistM <= effectiveLeadM && bestDistM > 215 && !rec.tierInitial) {
         rec.tierInitial = true;
         rec.speakingIntro = true;
         announcedCamsRef.current[camId] = rec;
         if (isOverspeed) Vibration.vibrate([0, 120, 80, 120]);
-        Speech.speak(`${typeLabel}${limitPart}`, {
+        Speech.speak(`${typeLabel}${limitPart}${overspeedPart}`, {
           language: 'zh-TW',
           rate: 0.92,
           onDone: () => {
@@ -690,8 +690,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
                   ? Math.round(snap.distM / 50) * 50
                   : Math.round(snap.distM / 10) * 10;
               if (snap.distM <= 225) rec.tier200 = true;
-              const overTxt = snap.isOverspeed ? '，你已超速' : '';
-              Speech.speak(`${liveDist}公尺${overTxt}`, { language: 'zh-TW', rate: 0.92 });
+              Speech.speak(`${liveDist}公尺`, { language: 'zh-TW', rate: 0.92 });
             }, 220);
           },
           onStopped: () => {
